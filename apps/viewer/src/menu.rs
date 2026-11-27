@@ -55,10 +55,16 @@ pub enum Command {
     MidiChange,
     /// View ▸ MIDI Monitor.
     MidiMonitor,
+    /// View ▸ Audio & CPU Monitor.
+    AudioMonitor,
     /// File ▸ Export Audio….
     ExportAudio,
     /// File ▸ Export MIDI… (the song, or the focused scene).
     ExportMidi,
+    /// File ▸ Record Session to File… / Stop Session Recording (the master output).
+    SessionRecord,
+    /// View ▸ Session Recorder: show or hide the Recorder window.
+    SessionRecorderWindow,
 }
 
 /// ⌘ + `key` (+ Shift).
@@ -168,6 +174,7 @@ pub fn menus(app: &App) -> Vec<(&'static str, Vec<Item>)> {
         Item::Separator,
         cmd("Export Audio…", Command::ExportAudio).enabled(has),
         cmd("Export MIDI…", Command::ExportMidi).enabled(has),
+        cmd(if app.session.active() { "Stop Session Recording" } else { "Record Session to File…" }, Command::SessionRecord),
         Item::Separator,
         cmd("Preferences…", Command::Preferences).key(Key::Comma, false),
         Item::Separator,
@@ -220,6 +227,8 @@ pub fn menus(app: &App) -> Vec<(&'static str, Vec<Item>)> {
         cmd("Note Repeat / Arp", Command::RepeatPanel).checked(app.repeat_panel),
         cmd("Lock", Command::LockPanel).checked(app.lock_panel),
         cmd("MIDI Monitor", Command::MidiMonitor).checked(app.midi_monitor),
+        cmd("Audio & CPU Monitor", Command::AudioMonitor).checked(app.audio_monitor),
+        cmd("Session Recorder", Command::SessionRecorderWindow).checked(app.session_window_open),
         Item::Separator,
         cmd("Follow Playback", Command::Follow).checked(app.follow),
         cmd("Full Screen", Command::FullScreen).key(Key::F, false),
@@ -623,5 +632,39 @@ pub mod native {
             }
             cmds
         })
+    }
+}
+
+#[cfg(test)]
+mod session_menu_tests {
+    use super::*;
+
+    fn labels(app: &App, menu: &str) -> Vec<(String, bool)> {
+        let all = menus(app);
+        let (_, items) = all.iter().find(|(t, _)| *t == menu).unwrap();
+        items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Command { label, checked, .. } => Some((label.clone(), *checked)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn file_label_toggles_with_recording_and_view_item_follows_window() {
+        let mut app = App::default();
+        let file = labels(&app, "File");
+        assert!(file.iter().any(|(l, _)| l == "Record Session to File…"));
+        assert!(!file.iter().any(|(l, _)| l == "Stop Session Recording"));
+        assert_eq!(labels(&app, "View").iter().find(|(l, _)| l == "Session Recorder"), Some(&("Session Recorder".to_string(), false)));
+
+        let dir = tempfile::tempdir().unwrap();
+        app.session.start(dir.path().join("s.wav"), 48_000, 1_000_000_000, "now".into()).unwrap();
+        app.session_window_open = true;
+        let file = labels(&app, "File");
+        assert!(file.iter().any(|(l, _)| l == "Stop Session Recording"));
+        assert!(!file.iter().any(|(l, _)| l == "Record Session to File…"));
+        assert_eq!(labels(&app, "View").iter().find(|(l, _)| l == "Session Recorder"), Some(&("Session Recorder".to_string(), true)));
     }
 }

@@ -1,6 +1,9 @@
-//! Audio file loading: WAV and AIFF/AIFC, to stereo f32.
+//! Audio file loading: WAV, AIFF/AIFC, Ogg Vorbis and MP3, to stereo f32.
 
 use std::path::Path;
+
+/// The extensions of the audio files a sound can hold (dropped, picked or browsed).
+pub const EXTENSIONS: [&str; 5] = ["wav", "aif", "aiff", "aifc", "mp3"];
 
 /// A decoded sample, always stereo.
 #[derive(Debug, Clone, Default)]
@@ -19,6 +22,7 @@ impl Sample {
                 parse_aiff(&bytes)
             }
             "ogg" => load_ogg(path),
+            "mp3" => parse_mp3(std::fs::read(path).map_err(|e| e.to_string())?),
             "ncw" => Err("NCW (NI compressed wave) is not supported".into()),
             other => Err(format!("unsupported sample format {other:?}")),
         }
@@ -50,6 +54,53 @@ fn load_ogg(path: &Path) -> Result<Sample, String> {
         let Some(left) = packet.first() else { continue };
         let right = packet.get(1).unwrap_or(left);
         frames.extend(left.iter().zip(right).map(|(l, r)| [*l, *r]));
+    }
+    Ok(Sample { rate, frames })
+}
+
+/// MP3: mono doubled. The encoder's delay and padding (LAME's header) are trimmed, so a
+/// loop is as long as it was before it was encoded. A frame that doesn't decode is
+/// skipped, as players do.
+fn parse_mp3(bytes: Vec<u8>) -> Result<Sample, String> {
+    use symphonia::core::audio::SampleBuffer;
+    use symphonia::core::codecs::{CODEC_TYPE_MP3, DecoderOptions};
+    use symphonia::core::errors::Error;
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::io::MediaSourceStream;
+
+    let source = MediaSourceStream::new(Box::new(std::io::Cursor::new(bytes)), Default::default());
+    let mut hint = symphonia::core::probe::Hint::new();
+    hint.with_extension("mp3");
+    let options = FormatOptions { enable_gapless: true, ..Default::default() };
+    let mut format =
+        symphonia::default::get_probe().format(&hint, source, &options, &Default::default()).map_err(|e| e.to_string())?.format;
+    let track = format.tracks().iter().find(|t| t.codec_params.codec == CODEC_TYPE_MP3).ok_or("no MP3 audio in the file")?;
+    let id = track.id;
+    let mut decoder = symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default()).map_err(|e| e.to_string())?;
+    let (mut rate, mut frames) = (track.codec_params.sample_rate.unwrap_or(0), Vec::new());
+    loop {
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(Error::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(Error::ResetRequired) => break,
+            Err(e) => return Err(e.to_string()),
+        };
+        if packet.track_id() != id {
+            continue;
+        }
+        let decoded = match decoder.decode(&packet) {
+            Ok(d) => d,
+            Err(Error::DecodeError(_)) => continue,
+            Err(e) => return Err(e.to_string()),
+        };
+        let spec = *decoded.spec();
+        rate = spec.rate;
+        let mut buf = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
+        buf.copy_interleaved_ref(decoded);
+        frames.extend(to_stereo(spec.channels.count(), buf.samples().iter().copied()));
+    }
+    if rate == 0 || frames.is_empty() {
+        return Err("no audio in the MP3".into());
     }
     Ok(Sample { rate, frames })
 }
@@ -277,5 +328,36 @@ mod ogg_tests {
         assert!(s.rate >= 22_050);
         assert!(s.frames.len() > s.rate as usize / 10, "{} frames", s.frames.len());
         assert!(s.frames.iter().any(|f| f[0].abs() > 0.01));
+    }
+}
+
+#[cfg(test)]
+mod mp3_tests {
+    use super::Sample;
+
+    /// One second of a 440 Hz tone, the right channel half as loud, encoded by LAME.
+    #[test]
+    fn an_mp3_loads_at_its_own_length() {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/tone.mp3");
+        let s = Sample::load(&p).unwrap();
+        assert_eq!(s.rate, 44_100);
+        // The encoder's delay and padding are gone: one second, not one and a bit.
+        assert!(s.frames.len().abs_diff(44_100) <= 2, "{} frames", s.frames.len());
+        let peak = |c: usize| s.frames[4410..39_690].iter().map(|f| f[c].abs()).fold(0.0f32, f32::max);
+        assert!((peak(0) - 0.0625).abs() < 0.01, "left {}", peak(0));
+        assert!((peak(1) - 0.03125).abs() < 0.01, "right {}", peak(1));
+        // 440 crossings upward in the second.
+        let ups = s.frames.windows(2).filter(|w| w[0][0] <= 0.0 && w[1][0] > 0.0).count();
+        assert!(ups.abs_diff(440) <= 2, "{ups}");
+    }
+
+    #[test]
+    fn a_file_that_is_not_an_mp3_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.mp3");
+        std::fs::write(&p, b"not audio at all, just text").unwrap();
+        assert!(Sample::load(&p).is_err());
+        std::fs::write(&p, b"").unwrap();
+        assert!(Sample::load(&p).is_err());
     }
 }

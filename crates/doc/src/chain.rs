@@ -19,6 +19,13 @@ pub enum Chain {
 use deckard_model::SAMPLER_PARAMS;
 use mxprj::decode::{Obj, Path, Value};
 
+/// A plug-in slot captured independently of its original chain.
+pub struct CopiedSlot {
+    slot: Obj,
+    instrument: bool,
+    perform: bool,
+}
+
 const SLOT: &str = "NI::MASCOMMON::DATA::Slot";
 const SLOT_PTR: &str = "std::shared_ptr<NI::MASCOMMON::DATA::Slot>";
 const QUICK_BROWSE: &str = "NI::DB3::QuickBrowseHandle";
@@ -250,10 +257,19 @@ impl Document {
         if module.is_instrument() && before.iter().any(|x| !x.is_instrument()) {
             return Err("an instrument can't go after an effect".into());
         }
+        let label = match module {
+            NewModule::Plugin { name, .. } if !name.is_empty() => "Load Plug-in",
+            NewModule::Effect(_) => "Load Effect",
+            _ => "Load Module",
+        };
+        let (item, qb) = self.new_slot(module)?;
+        self.insert_slot(c, at, item, qb, label)
+    }
+
+    fn insert_slot(&mut self, c: Chain, at: usize, item: Value, qb: Value, label: &str) -> Result<(), String> {
         let chain_path = self.chain_of(c)?;
         let Some(Value::Obj(chain)) = self.tree.at(&chain_path).cloned() else { return Err("the sound has no chain".into()) };
         let mut chain = chain;
-        let (item, qb) = self.new_slot(module)?;
         let slots = crate::build::obj_mut(&mut chain, "slots")?;
         let objs = crate::build::obj_mut(slots, "objects")?;
         if !objs.fields.iter().any(|(n, _)| n == "items#item_version") {
@@ -262,13 +278,9 @@ impl Document {
         let Some(Value::List(items)) = objs.get_mut("items") else { return Err("slots without items".into()) };
         let at = at.min(items.len());
         items.insert(at, item);
-        let first_qb = chain.fields.iter().position(|(n, _)| n == "quick_browse").unwrap_or(chain.fields.len());
-        chain.fields.insert(first_qb + at, ("quick_browse".into(), qb));
-        let label = match module {
-            NewModule::Plugin { name, .. } if !name.is_empty() => "Load Plug-in",
-            NewModule::Effect(_) => "Load Effect",
-            _ => "Load Module",
-        };
+        let qb_at =
+            chain.fields.iter().enumerate().filter(|(_, (n, _))| n == "quick_browse").nth(at).map_or(chain.fields.len(), |(i, _)| i);
+        chain.fields.insert(qb_at, ("quick_browse".into(), qb));
         let mut ops = vec![Op::Set { path: chain_path, value: Value::Obj(chain) }];
         // Side-chain inputs of the slots after it move up one.
         ops.extend(self.sidechain_rekey(c, |k| Some(if k >= at { k + 1 } else { k })));
@@ -516,6 +528,65 @@ impl Document {
         self.prune_extra_outs()
     }
 
+    /// Capture a slot and its settings for a later paste.
+    pub fn copy_slot(&self, c: Chain, at: usize) -> Result<CopiedSlot, String> {
+        let info = self.chain_slots(c).and_then(|slots| slots.get(at)).ok_or("no such slot")?;
+        let items = self.field_path(&self.chain_of(c)?, &["slots", "objects", "items"])?;
+        let path = [items.as_slice(), &[at as u32]].concat();
+        let Some(Value::Obj(holder)) = self.tree.at(&path) else { return Err("no such slot".into()) };
+        let Some(Value::Obj(slot)) = holder.get("px") else { return Err("slot without plug-in data".into()) };
+        let slot = crate::files::self_contained(slot.clone(), &self.tree);
+        Ok(CopiedSlot { slot, instrument: info.is_instrument(), perform: info.module == "PerformanceFX" })
+    }
+
+    /// Return the destination position if the chain can accept this slot.
+    pub fn slot_paste_position(&self, c: Chain, copy: &CopiedSlot) -> Result<usize, String> {
+        let slots = self.chain_slots(c).ok_or("no such chain")?;
+        if copy.instrument {
+            if !matches!(c, Chain::Sound(..)) || slots.first().is_some_and(|s| s.is_instrument()) {
+                return Err("a sound has one instrument, in its first slot".into());
+            }
+            return Ok(0);
+        }
+        if copy.perform {
+            if !matches!(c, Chain::Group(_)) || slots.iter().any(|s| s.module == "PerformanceFX") {
+                return Err("a group has one Perform FX".into());
+            }
+            return Ok(0);
+        }
+        Ok(slots.len())
+    }
+
+    /// Paste as a new instance with fresh object IDs.
+    pub fn paste_slot(&mut self, c: Chain, copy: &CopiedSlot) -> Result<usize, String> {
+        let at = self.slot_paste_position(c, copy)?;
+        let slot = self.fresh_obj(copy.slot.clone(), *b"SLOT", "NI::MASCOMMON::DATA::Slot")?;
+        self.note_classes(&slot);
+        let (item, qb) = self.build(|b| Ok((b.shared(SLOT, slot), Value::Obj(b.blank(QUICK_BROWSE)?))))?;
+        self.insert_slot(c, at, item, qb, "Paste Plug-in")?;
+        Ok(at)
+    }
+
+    /// Check whether the clicked instrument can be replaced by the clipboard's instrument.
+    pub fn can_paste_over_instrument(&self, c: Chain, at: usize, copy: &CopiedSlot) -> bool {
+        copy.instrument
+            && at == 0
+            && matches!(c, Chain::Sound(..))
+            && self.chain_slots(c).and_then(|slots| slots.first()).is_some_and(|slot| slot.is_instrument())
+    }
+
+    /// Replace the instrument in one undo step, keeping the sound's effects.
+    pub fn paste_over_instrument(&mut self, c: Chain, at: usize, copy: &CopiedSlot) -> Result<(), String> {
+        if !self.can_paste_over_instrument(c, at, copy) {
+            return Err("select an instrument slot and copy an instrument first".into());
+        }
+        self.transaction("Paste Instrument", |doc| {
+            doc.remove_slot_in(c, at)?;
+            doc.paste_slot(c, copy)?;
+            Ok(())
+        })
+    }
+
     /// Bypass (`active` false) or enable slot `at` of sound `s`.
     pub fn set_slot_active(&mut self, g: usize, s: usize, at: usize, active: bool) -> Result<(), String> {
         self.set_slot_active_in(Chain::Sound(g, s), at, active)
@@ -571,6 +642,39 @@ mod tests {
         let snd = &d.project().groups[0].sounds[1];
         assert_eq!(snd.slots.len(), 1);
         assert!(snd.plugin.is_none(), "{:?}", snd.plugin);
+    }
+
+    #[test]
+    fn paste_plugin_within_and_between_groups() {
+        use crate::Chain;
+        let mut d = Document::new_project().unwrap();
+        let source = Chain::Group(0);
+        let target = Chain::Group(d.add_group().unwrap());
+        let chunk = vec![1, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 41, 42];
+        let effect = NewModule::Plugin {
+            id: "BABY Audio:VST3:FX:565354436D36626261627920636F6D65".into(),
+            name: "Baby Comeback".into(),
+            chunk: chunk.clone(),
+        };
+        d.add_slot_in(source, 0, &effect).unwrap();
+        d.set_slot_active_in(source, 0, false).unwrap();
+        let copied = d.copy_slot(source, 0).unwrap();
+        d.set_slot_active_in(source, 0, true).unwrap();
+
+        assert_eq!(d.paste_slot(source, &copied).unwrap(), 1);
+        assert_eq!(d.paste_slot(target, &copied).unwrap(), 0);
+        assert!(d.chain_slots(source).unwrap()[0].active);
+        assert!(!d.chain_slots(source).unwrap()[1].active);
+        assert!(!d.chain_slots(target).unwrap()[0].active);
+        let reopened = Document::from_bytes(d.to_bytes().unwrap(), None).unwrap();
+        for (chain, at) in [(source, 1), (target, 0)] {
+            let plugin = reopened.chain_slots(chain).unwrap()[at].plugin.as_ref().unwrap();
+            assert_eq!(plugin.name, "Baby Comeback");
+            assert_eq!(plugin.chunk, chunk);
+        }
+        assert!(d.undo());
+        assert!(d.chain_slots(target).unwrap().is_empty());
+        assert_eq!(d.chain_slots(source).unwrap().len(), 2);
     }
 
     #[test]

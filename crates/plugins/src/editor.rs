@@ -139,6 +139,20 @@ impl Editor {
         Vst3Editor::open(plugin, title).map(Editor::Vst3)
     }
 
+    /// Open `plugin`'s editor in a window that is never shown: for handing the plug-in's
+    /// own view something, as [`crate::kontakt`] does. Must be called on the main thread.
+    #[cfg(windows)]
+    pub fn open_hidden(plugin: &Shared, title: &str) -> Result<Editor, String> {
+        Vst3Editor::open_window(plugin, title, false).map(Editor::Vst3)
+    }
+
+    /// The editor's window.
+    #[cfg(windows)]
+    pub fn hwnd(&self) -> windows_sys::Win32::Foundation::HWND {
+        let Editor::Vst3(e) = self;
+        e.window.hwnd
+    }
+
     /// Dispatch the window's pending messages. Only for programs without a message loop
     /// of their own (the app's loop dispatches them itself).
     #[cfg(windows)]
@@ -200,11 +214,13 @@ pub struct Vst3Editor {
 /// The plug-in's editor view for `platform`, and its size.
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 fn create_view(plugin: &Shared, platform: FIDString, platform_name: &str) -> Result<(ComPtr<IPlugView>, i32, i32), String> {
-    let view = {
-        let p = plugin.lock().map_err(|_| "the plug-in is unavailable")?;
-        let c = p.controller().ok_or("the plug-in has no editor")?;
-        unsafe { ComPtr::from_raw(c.createView(c"editor".as_ptr())) }.ok_or("the plug-in has no editor")?
-    };
+    // The instance is held only to take its controller: making the view can take a
+    // plug-in a long while, and the audio thread skips an instance that is held (an
+    // effect passes dry, an instrument is silent). The view's other calls are made
+    // unheld too.
+    let c = plugin.lock().map_err(|_| "the plug-in is unavailable")?.controller().cloned();
+    let c = c.ok_or("the plug-in has no editor")?;
+    let view = unsafe { ComPtr::from_raw(c.createView(c"editor".as_ptr())) }.ok_or("the plug-in has no editor")?;
     if unsafe { view.isPlatformTypeSupported(platform) } != kResultOk {
         return Err(format!("the plug-in's editor doesn't support {platform_name} windows"));
     }
@@ -273,6 +289,11 @@ impl Vst3Editor {
     /// messages).
     #[cfg(windows)]
     pub fn open(plugin: &Shared, title: &str) -> Result<Vst3Editor, String> {
+        Self::open_window(plugin, title, true)
+    }
+
+    #[cfg(windows)]
+    fn open_window(plugin: &Shared, title: &str, show: bool) -> Result<Vst3Editor, String> {
         if !crate::on_main_thread() {
             return Err("plug-in windows can only be opened on the main thread".into());
         }
@@ -288,7 +309,9 @@ impl Vst3Editor {
             window.close();
             return Err(format!("the plug-in's editor could not be opened ({r})"));
         }
-        window.show();
+        if show {
+            window.show();
+        }
         Ok(Vst3Editor { plugin: plugin.clone(), view, frame, window })
     }
 
@@ -810,6 +833,21 @@ mod tests {
         assert_eq!(sized.load(Ordering::SeqCst), 1);
         frame.apply_pending(&view);
         assert_eq!(sized.load(Ordering::SeqCst), 1, "once");
+    }
+
+    /// Opening an editor holds the instance only to look at it: whether or not a view is
+    /// made, the audio thread can take the instance straight after.
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    #[test]
+    fn opening_an_editor_leaves_the_instance_free() {
+        let class = &crate::tuner::CLASS;
+        let id = crate::PluginId::parse(&class.plugin_id(), class.name).unwrap();
+        let plugin = crate::Plugin::native(class, id, class.name, 48_000.0).shared();
+        match create_view(&plugin, c"".as_ptr(), "test") {
+            Err(e) => assert_eq!(e, "the plug-in has no editor"),
+            Ok(_) => panic!("a native plug-in has no VST3 editor"),
+        }
+        assert!(plugin.try_audio().is_ok());
     }
 
     /// On Linux the frame is the plug-in's run loop too: it must answer a query for it.

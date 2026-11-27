@@ -96,8 +96,10 @@ New to DECKARD? Start with the
 ### Opening and saving projects
 
 - **Opening:** use **File ▸ Open…**, pick from **File ▸ Open Recent**, or drag a
-  Maschine project (`.mxprj`) onto the window. Samples (WAV and other audio files)
-  dropped onto a sound load into it.
+  Maschine project (`.mxprj`) onto the window. Samples (WAV, AIFF or MP3)
+  dropped onto a sound load into it: an Audio plug-in on an empty sound, a zone in a
+  Sampler. An MP3 stays an MP3 in the project (Maschine may not read it there); an
+  edit of it (truncate, normalize…) writes a WAV.
 - **Saving:** **File ▸ Save** writes a normal Maschine project. The first time you save
   over a file in a session, the previous version is kept beside it as
   `<name>.mxprj.bak`.
@@ -262,7 +264,7 @@ under the pattern offers Pitch, Slide, Pressure and Release:
   - DECKARD can send the synth its MPE setup for you (**Send MPE setup to synths**, on
     by default).
 - **To DECKARD's own sounds:** use Pressure, Slide and Pitch as sources in the mod
-  matrix (below).
+  matrix (below), and Mod Wheel (MIDI CC 1 coming in to the sound).
   - These routes drive the whole sound, not each voice: Pressure follows the
     hardest-pressed note, Pitch the latest one.
   - Expression isn't passed to hosted plug-ins yet.
@@ -446,6 +448,12 @@ Replicant is a classic subtractive synth:
 
 Its pages are Oscillators, Filter, Amp, Modulation and Super. Add it from **+ ▸
 Internal ▸ Replicant**.
+
+On the controller, the Control page of Replicant, of Plaits and of the internal
+instruments (Kick, Snare, Hi-hat, Tom, Percussion, Cymbal, Bass Synth, Poly Synth)
+previews the patch on the right screen, beside its picture: a waveform of the
+current sound and the note's amplitude envelope, redrawn as knobs turn (it needs
+nothing playing).
 
 ### Plaits
 

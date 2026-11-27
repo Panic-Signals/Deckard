@@ -118,6 +118,39 @@ every timer tick and redraws the buttons when it changes.
 
 ### 3.3 Pads
 
+- DECKARD's choice: a Sampler Preview has a mode, TYPE (knob 5 on RECORD's first knob
+  page, shown on the right display; three buttons in the window's header): Original (what the classic Sampler
+  does, and no more), Advanced (Sync and Keys, stems on a zone's lanes, slices that
+  play on) or Layers (every sample is a layer). A sound with a sample is asked before
+  its mode changes, since the change keeps the sample shown and loses the sound's other
+  changes: the displays say "Changing the mode loses all changes to this sound." with
+  CANCEL on display button 7 and OK on 8, the window asks the same in a dialog, and
+  either answers both. While it is asked the other display buttons, the page arrows and
+  the other knobs do nothing. Original made Advanced loses nothing and isn't asked.
+- DECKARD's choice: a take focused (a pad, PREVIOUS, NEXT, or a click in the window) is
+  loaded into the sound only if the sound isn't a Sampler Preview in Layers that
+  already has a sample. There the sample (its layers) stays, and so it does when a take
+  is recorded: the take waits in the list, and EDIT works on the take itself (an edit
+  is a new file in the list; the sound isn't changed) until it has a layer. A take
+  that is on a layer is edited as that layer, and stays its layer. RECORD's LAYER (a knob of the RECORDING page, a field in
+  the window) is the focused take's layer: None, 1 to n, New. Turning it only chooses;
+  APPLY (display button 8, lit while a layer is chosen; a field beside LAYER in the
+  window) puts the take there, an existing layer keeping its settings, and None takes
+  the take's layer away. The take's right-click menu in the window still puts it on a
+  layer at once. So display button 8 isn't BANK on DECKARD's own layer: the pads have
+  the focused take's sixteen (SHIFT + 7 / 8, PREVIOUS / NEXT, walks through them).
+- DECKARD's choice: in Layers, display button 3 is LAYERS where SLICE would be (a
+  sound in Layers has no slices), so the tabs read RECORD, EDIT, LAYERS, ZONE, in the
+  window too. A take on no layer has RECORD, EDIT and LAYERS.
+- DECKARD's choice: on LAYERS each layer's row (the right display) has its envelope
+  over its waveform, a line where it plays and, while it loops, a line at each loop
+  point. With the morph off the left display is the focused layer's waveform and
+  envelope, large ("ENVELOPE n"), with the same lines, in place of the windows.
+- DECKARD's choice: EDIT's third knob page is LOOP (ACTIVE, START, END, XFADE) in every
+  mode, the same settings as ZONE's LOOP page; in Layers it is the focused layer's.
+- DECKARD's choice: in Layers a take just recorded onto a sound that has layers is on
+  no layer, and is what EDIT shows and works on until it has one (as one picked in the
+  list).
 - **Takes on pads off** (default): pads play the sounds as usual (sound pad mode), and the
   pad LEDs are the normal sound LEDs.
 - **Takes on pads on**: pad n focuses take `n + 16·bank`, loads it into the sound and
@@ -192,6 +225,14 @@ units.
   overview is hidden (black), the info bar texts are hidden, buttons 5, 6 and 8 are disabled,
   7 is hidden, and the knob-touch icons are off.
 
+DECKARD note: with a New Sampler zone (named Sampler Preview in the app) the EDIT knob
+pages go on with DECKARD's own (TEMPO / PITCH, PLAYBACK, TAIL / MOTION, SYNC, STEMS; WARP
+and the warp edit functions are held back for now: `beat::WARPS`). TAIL / MOTION has **TAIL**
+(0 to 2000 ms in steps of 10: at its end the slice plays back from there, fading) and
+**MOTION** (Off, Next, Random: every note plays the next, or a random, slice of the
+sound). MUNGE (swing and the eighths of a bar) is in the software's EDIT tools
+only, as STRETCH's settings are NI's.
+
 ### 4.3 STRETCH settings open
 
 - The right display keeps its waveform area. A second parameter row is added at the bottom
@@ -227,6 +268,28 @@ units.
 | SHIFT held | 5 and 6 hidden; 7+8 become an arrow pair "◀ BANK n ▶" | They page the 16-pad slice bank. 7 is enabled when n > 1, 8 when a later bank exists. While SHIFT is held, pressing 5 or 6 also counts as "previous bank". |
 
 All four are enabled only when there is a sample. Without one, presses do nothing.
+
+DECKARD's own page adds, on SLICE:
+
+- **Catching.** In Manual mode, while the sample plays (a slice's pad was pressed, or
+  PLAY in the software), an empty pad drops a slice at the play position, on the
+  sample's nearest 1/8 note when the zone has a tempo. (Exactly there: SHIFT + CUE in
+  the software.)
+- **SHIFT + a pad** is the pad's printed shortcut (undo, redo, quantize...), as on
+  every other page.
+- **SHIFT + 5, KEY SHIFT.** The focused slice goes onto the group's next empty sound,
+  over all its keys.
+- **SHIFT + 6, RE-ROLL** (Random mode). Random picks again.
+- **SHIFT + 8, KEEP** (Find and Random). The focused slice (the pad last pressed) is
+  kept through re-rolls and other counts (its pad is lit bright); **UNKEEP** lets it go.
+- **SHIFT + 7, BANK.** With more than 16 slices, the pads go to the next 16 (and round
+  to the first). Selecting a slice with the knob moves the pads to its bank too.
+- The slicer's MODE has **Find** and **Random** after Maschine's four, each with a
+  SAMPLES count. Split's, Find's and Random's counts go up to 64.
+- The Apply page has **TO** on knob 1 (*Keys*: every slice on a key of this sound, as
+  Maschine does; *Pads*: every slice a sound of its own on the pads of new groups, 16 a
+  group, the sliced group left as it is) and **ORDER** on knob 3 (*In order* or
+  *Shuffled*: the pattern's notes keep their times and play other slices).
 
 ### 5.2 Knobs (page-local, 3 pages; LEFT/RIGHT move between them)
 

@@ -20,6 +20,8 @@ pub struct SampleView {
     pub selection: Option<(usize, usize)>,
     /// Slice starts (frames), and the slice in focus (kept by the scripts).
     pub slices: Vec<usize>,
+    /// The slices kept through re-rolls (Find, Random), by index.
+    pub kept: Vec<usize>,
     pub focus_slice: Option<usize>,
     pub playhead: Option<usize>,
     /// The Sampler's zones (keys, velocities; inclusive) and the focused one.
@@ -29,6 +31,61 @@ pub struct SampleView {
     pub color: Option<u32>,
     /// An Audio plug-in's take (RECORD and EDIT only), not a Sampler zone.
     pub take: bool,
+    /// The zone's stem lanes (a New Sampler's), in their order.
+    pub lanes: Vec<LaneView>,
+    /// A layered New Sampler's layers in their order (else none), the one focused, and
+    /// its morph.
+    pub layers: Vec<LayerView>,
+    pub layer: usize,
+    pub morph: Option<MorphView>,
+    /// Whether the sound is layered (a lone zone not yet a layer is listed in `layers`
+    /// but isn't: it can still be sliced).
+    pub layered: bool,
+}
+
+/// A layer of the focused sound, for the controller's LAYERS screens: its sample's
+/// name, whether it's heard (not muted, nor left out by another's solo), its level as
+/// stored (0..1) and as shown, its window on the morph and its envelope (attack, decay,
+/// sustain, release), and its sample's peaks.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct LayerView {
+    pub name: String,
+    pub mute: bool,
+    pub solo: bool,
+    pub heard: bool,
+    pub gain: f64,
+    pub level: String,
+    pub window: [f64; 4],
+    pub envelope: [f64; 4],
+    pub detail: Vec<(f32, f32)>,
+    /// Where it plays now, of its sample's length (0..1); None while it doesn't.
+    pub head: Option<f64>,
+    /// Its loop's start and end, of its sample's length (0..1); None while it doesn't
+    /// loop.
+    pub loop_points: Option<(f64, f64)>,
+}
+
+/// The morph of a sound's layers: whether it runs, where it is now, and its shape
+/// (round, else there and back) and fade (equal power, else linear).
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct MorphView {
+    pub on: bool,
+    pub position: f64,
+    pub round: bool,
+    pub power: bool,
+}
+
+/// A stem lane of the focused zone, for the controller: which (0 Drums, 1 Vocals, 2
+/// Bass, 3 Leads), whether it's heard (not muted, nor left out by another's solo), and
+/// its peaks over the frames shown.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct LaneView {
+    pub lane: usize,
+    pub name: String,
+    pub mute: bool,
+    pub solo: bool,
+    pub heard: bool,
+    pub detail: Vec<(f32, f32)>,
 }
 
 /// A stem separation running in the app: whether it's the focused zone's sample, and
@@ -58,6 +115,15 @@ pub enum SamplingCall {
     SplitSlice(usize),
     RemoveSlice(usize),
     ClearSlices,
+    /// A slice where the sample is playing (`true`: exactly there, not on its nearest
+    /// 1/8 note).
+    CatchSlice(bool),
+    /// Keep slice `.0` through re-rolls, or no longer.
+    KeepSlice(usize),
+    /// Slice `.0` onto the group's next empty sound, over all its keys.
+    KeyShift(usize),
+    /// Random picks again.
+    Reroll,
     MoveSlice(usize, usize),
     /// Make the slices zones of the focused sound.
     ApplySlices,
@@ -66,9 +132,42 @@ pub enum SamplingCall {
     FocusZone(usize),
     /// Play frames (start, end) of the focused sample.
     Prehear(usize, usize),
+    /// A New Sampler zone's tempo doubled or halved (true: doubled); the song's tempo
+    /// set to it.
+    ScaleBpm(bool),
+    ToProject,
+    /// Its Tune set so its root is the nearest note of the song's key.
+    MatchKey,
+    /// Its tempo and root heard again (the part selected, else the part it plays).
+    Reanalyze,
+    /// Stem lane `.0` (from 0, as [`LaneView::lane`]) muted or not; soloed or not.
+    LaneMute(usize),
+    LaneSolo(usize),
+    /// Its root (`.1`) and/or tempo (`.2`) as stem lane `.0` alone has them.
+    LaneHear(usize, bool, bool),
+    /// Its warp markers: 0 put on its hits, 1 quantized, 2 cleared.
+    Warp(usize),
+    /// The sound's Sampler made a New Sampler, or back.
+    Convert,
+    /// Layer `.0` focused; muted or not; soloed or not; removed. The focused layer's
+    /// level (a zone's gain, 0..1). Every layer's window spread evenly again.
+    FocusLayer(usize),
+    LayerMute(usize),
+    LayerSolo(usize),
+    RemoveLayer(usize),
+    /// RECORD's APPLY: the focused take onto the layer LAYER was turned to.
+    ApplyTakeLayer,
+    /// Sampler Preview's mode asked for (0 Original, 1 Advanced, 2 Layers): a sound with
+    /// a sample asks first ([`SamplingCall::SamplerAnswer`]).
+    SamplerMode(u8),
+    /// The mode change asked for: gone ahead with (`true`), or dropped.
+    SamplerAnswer(bool),
+    LayerLevel(f64),
+    SpreadLayers,
 }
 
-/// A page of the Sampling page's knobs (up to four; knobs 5 and 6 zoom and scroll).
+/// A page of the Sampling page's knobs (up to four, knobs 5 and 6 zooming and scrolling;
+/// up to six on LAYERS).
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct KnobPage {
     pub name: String,

@@ -87,12 +87,13 @@ impl Document {
 
     /// The object id of parameter `field` of `target` (what a macro points at).
     pub fn param_oid(&self, target: Target, field: &str) -> Option<u64> {
-        let owner = self.owner(target)?;
-        let fp = self.field_in(&owner, field)?;
-        match self.tree.at(&[owner.as_slice(), &fp].concat())? {
-            Value::Obj(o) => o.oid,
-            _ => None,
+        {
+            let cache = self.param_cache.borrow();
+            if let Some(c) = cache.get(&target).and_then(|m| m.get(field)) {
+                return c.oid;
+            }
         }
+        self.resolve_param(target, field).oid
     }
 
     /// Path of field `k` of macro `m` on page `page`.

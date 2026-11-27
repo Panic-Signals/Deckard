@@ -385,15 +385,13 @@ pub struct Grow {
     pub before: i64,
     bar: i64,
     bars: i64,
-    /// Bar from which the strip's progress is currently measured (resets on empty bars).
-    strip_from_bar: i64,
-    seen_bar: Option<i64>,
-    recorded_bar: Option<i64>,
+    /// The first bar anything was recorded in.
+    first_bar: Option<i64>,
 }
 
 impl Grow {
     pub fn new(group: usize, pattern: usize, bar: i64) -> Grow {
-        Grow { group, pattern, before: bar, bar: bar.max(1), bars: 1, strip_from_bar: 0, seen_bar: None, recorded_bar: None }
+        Grow { group, pattern, before: bar, bar: bar.max(1), bars: 1, first_bar: None }
     }
 
     pub fn length(&self) -> i64 {
@@ -411,68 +409,27 @@ impl Grow {
         Some(self.length())
     }
 
-    /// Playback reached `at` ticks into the pattern: reset the strip's origin to this
-    /// bar whenever the previous bar passed with nothing recorded during it.
-    pub fn advance_bar(&mut self, at: i64) {
-        let b = at.max(0) / self.bar;
-        match self.seen_bar {
-            None => {
-                self.strip_from_bar = if b > 0 && self.recorded_bar == Some(b - 1) { b - 1 } else { b };
-                self.seen_bar = Some(b);
-            }
-            Some(prev) if b > prev => {
-                if self.recorded_bar != Some(b - 1) {
-                    self.strip_from_bar = b;
-                }
-                self.seen_bar = Some(b);
-            }
-            Some(prev) if b < prev => {
-                self.strip_from_bar = b;
-                self.seen_bar = Some(b);
-                if self.recorded_bar.is_some_and(|r| r >= b) {
-                    self.recorded_bar = None;
-                }
-            }
-            Some(_) => {}
-        }
-    }
-
     /// Something was recorded `at` ticks into the pattern.
     pub fn record_at(&mut self, at: i64) {
         let b = at.max(0) / self.bar;
-        self.recorded_bar = Some(self.recorded_bar.map_or(b, |prev| prev.max(b)));
+        self.first_bar = Some(self.first_bar.map_or(b, |first| first.min(b)));
     }
 
     pub fn has_recorded(&self) -> bool {
-        self.recorded_bar.is_some()
+        self.first_bar.is_some()
     }
 
-    /// MK3 touchstrip progress (0..1) at `at` ticks into the growing pattern: spans the
-    /// bars since the last empty bar, resetting at each bar where nothing was recorded.
-    pub fn strip_progress(&self, at: i64) -> f64 {
+    /// MK3 touchstrip progress (0..1) at `at` ticks into the growing pattern, its first
+    /// note `first_note` ticks in. Until something is recorded each bar fills it anew;
+    /// from the first bar recorded on (the one its first note is in, where REC off starts
+    /// the pattern) it's that of a pattern as long as the bars reached, played into or not.
+    pub fn strip_progress(&self, at: i64, first_note: Option<i64>) -> f64 {
         let at = at.max(0);
         let b = at / self.bar;
-        let origin = match self.seen_bar {
-            None => {
-                if b > 0 && self.recorded_bar == Some(b - 1) {
-                    b - 1
-                } else {
-                    b
-                }
-            }
-            Some(prev) if b > prev => {
-                if self.recorded_bar == Some(b - 1) {
-                    self.strip_from_bar
-                } else {
-                    b
-                }
-            }
-            Some(prev) if b < prev => b,
-            Some(_) => self.strip_from_bar,
-        };
-        let origin = origin.min(b);
-        let span = ((b - origin + 1) * self.bar).max(1);
-        ((at - origin * self.bar) as f64 / span as f64).clamp(0.0, 1.0)
+        let first = first_note.map(|n| n.max(0) / self.bar).or(self.first_bar);
+        let origin = first.filter(|&f| f <= b).unwrap_or(b);
+        let span = (b - origin + 1) * self.bar;
+        (at - origin * self.bar) as f64 / span as f64
     }
 }
 
@@ -520,25 +477,27 @@ mod grow_tests {
     }
 
     #[test]
-    fn strip_progress_resets_every_bar_when_nothing_was_recorded() {
+    fn strip_progress_extends_from_the_first_recorded_bar() {
         let mut g = Grow::new(0, 0, BAR);
-        // Bar 0: empty -> 0..1 across bar 0.
-        g.advance_bar(0);
-        assert!((g.strip_progress(0) - 0.0).abs() < 1e-9);
-        assert!((g.strip_progress(BAR / 2) - 0.5).abs() < 1e-9);
-        // Bar 1: nothing recorded in bar 0 -> resets to 0..1 across bar 1.
-        g.advance_bar(BAR);
-        assert!((g.strip_progress(BAR) - 0.0).abs() < 1e-9);
-        assert!((g.strip_progress(BAR + BAR / 4) - 0.25).abs() < 1e-9);
-        // Record in bar 1, then advance into bar 2 -> continues across 2 bars (0.5..1.0).
+        let near = |got: f64, want: f64| assert!((got - want).abs() < 1e-9, "{got}, not {want}");
+        // Nothing recorded: each bar fills the strip anew.
+        near(g.strip_progress(0, None), 0.0);
+        near(g.strip_progress(BAR / 2, None), 0.5);
+        near(g.strip_progress(BAR + BAR / 4, None), 0.25);
+        // Recorded into in bar 1: a 2-bar pattern in bar 2, a 3-bar one in bar 3, played
+        // into or not.
         g.record_at(BAR + BAR / 4);
-        g.advance_bar(2 * BAR);
-        assert!((g.strip_progress(2 * BAR) - 0.5).abs() < 1e-9);
-        assert!((g.strip_progress(2 * BAR + BAR / 2) - 0.75).abs() < 1e-9);
-        // Nothing recorded in bar 2 -> bar 3 resets back to 0..1.
-        g.advance_bar(3 * BAR);
-        assert!((g.strip_progress(3 * BAR) - 0.0).abs() < 1e-9);
-        assert!((g.strip_progress(3 * BAR + BAR / 2) - 0.5).abs() < 1e-9);
+        near(g.strip_progress(BAR + BAR / 2, None), 0.5);
+        near(g.strip_progress(2 * BAR, None), 0.5);
+        near(g.strip_progress(2 * BAR + BAR / 2, None), 0.75);
+        near(g.strip_progress(3 * BAR, None), 2.0 / 3.0);
+        // Recording later bars doesn't move where it's from.
+        g.record_at(3 * BAR);
+        near(g.strip_progress(4 * BAR, None), 0.75);
+        // The first note's bar is where REC off starts the pattern, whatever came before.
+        near(g.strip_progress(4 * BAR, Some(3 * BAR + 10)), 0.5);
+        // Before it (played early, quantized to the next line, or restarted): the bar.
+        near(g.strip_progress(2 * BAR + BAR / 2, Some(3 * BAR)), 0.5);
     }
 }
 

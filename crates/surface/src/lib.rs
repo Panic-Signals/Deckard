@@ -24,9 +24,20 @@ mod leds;
 mod names;
 mod screen;
 mod sources;
+pub mod theme_file;
+pub mod widget;
 
-pub use screen::{FONTS, Picture};
+pub use screen::{FONTS, PICTURE_ALPHA, Picture};
 pub use sources::SHIPPED;
+
+/// The app's question about unsaved changes (before New, Open, Revert or Quit).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AskView {
+    /// As the app's dialog words it.
+    pub question: String,
+    /// Reverting: there is nothing to save, only to go on or not.
+    pub revert: bool,
+}
 
 /// What the layer shows of the app, filled by the app each frame.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -35,6 +46,8 @@ pub struct View {
     pub tempo: f64,
     /// The song's swing, 0–100 %.
     pub swing: f64,
+    /// The focused sound's Variation settings, when there is a sound to show.
+    pub variation: Option<VariationView>,
     /// The master level as stored (0..1, 0.75 unity).
     pub master_volume: f64,
     /// The master level in dB (−∞ silent).
@@ -79,6 +92,8 @@ pub struct View {
     pub grid: GridView,
     /// The projects opened lately, most recent first (their names).
     pub recent: Vec<String>,
+    /// The question about unsaved changes that waits for its answer, if one does.
+    pub ask: Option<AskView>,
     /// What the Settings page (SETTINGS) shows.
     pub settings: SettingsView,
     /// Lock's snapshots and settings.
@@ -126,6 +141,13 @@ pub struct View {
     pub control: ControlView,
     /// The library as BROWSE shows it.
     pub browser: BrowserView,
+    /// The desktop library panel is open, so the strip is hidden: a script must not set
+    /// an edit nobody can see there (one that survives the panel closing).
+    pub browser_open: bool,
+    /// The controller page the app is showing (`control`, `step`, `song`…), as the MK3's
+    /// scripts leave it: the fact NI hands a device when the controller's page changes,
+    /// which is what closes a static OSO.
+    pub page: String,
     /// What the Sampling page (SAMPLE) shows.
     pub sampling: SamplingView,
     /// A group or sound is loading: the name, shown over both screens until it's in.
@@ -135,10 +157,10 @@ pub struct View {
 /// The app's sampler and recorder as the Sampling page's tabs show them.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SamplingView {
-    /// The tab: 0 RECORD, 1 EDIT, 2 SLICE, 3 ZONE.
+    /// The tab: 0 RECORD, 1 EDIT, 2 SLICE, 3 ZONE, 4 LAYERS.
     pub tab: usize,
     /// Each tab's knob pages (SLICE's knobs are its slicer's: `slice`).
-    pub pages: [Vec<KnobPage>; 4],
+    pub pages: [Vec<KnobPage>; 5],
     pub slice: Vec<SamplingKnob>,
     /// The focused zone's sample, if it has one.
     pub sample: Option<SampleView>,
@@ -146,6 +168,14 @@ pub struct SamplingView {
     /// How many recordings have been taken, and the one focused.
     pub takes: usize,
     pub take: Option<usize>,
+    /// RECORD's LAYER was turned for the focused take, and APPLY hasn't put it there yet.
+    pub layer_pending: bool,
+    /// The focused sound's Sampler Preview mode (0 Original, 1 Advanced, 2 Layers); None:
+    /// it isn't one.
+    pub sampler: Option<u8>,
+    /// A mode asked for that waits for its confirmation (changing it loses the sound's
+    /// changes).
+    pub sampler_ask: Option<u8>,
     /// Each take's mini waveform: (min, max) columns.
     pub take_waves: Vec<std::sync::Arc<Vec<(f32, f32)>>>,
     /// A stem separation running.
@@ -224,6 +254,11 @@ pub enum Browse {
     Routing(bool),
     /// Load a group with (`true`) or without (`false`) its patterns (`+ PATTERNS`).
     Patterns(bool),
+    /// Show the library at the focused sound's sample, or else its preset.
+    Locate,
+    /// Quick Browse on the Control page: the list that found the focused sound's sample
+    /// or preset, scrolled to it (`true`), or closed (`false`).
+    Quick(bool),
 }
 
 /// The song's grids, as Maschine's Grid page lists them (each value its place in the
@@ -407,6 +442,9 @@ pub struct SoundView {
     pub used: bool,
     /// One of its notes is sounding.
     pub playing: bool,
+    /// The pitches of its notes that have just started (sequenced or played): what its
+    /// pad, and in Keyboard mode each note's pad, flashes white for.
+    pub hits: Vec<i64>,
     /// The Mixer: its level (dB, −∞ silent), pan (−1..1), meters (left, right;
     /// amplitude), headroom (its loudest since reset; amplitude) and plug-ins.
     pub mix: MixView,
@@ -432,6 +470,12 @@ pub struct SoundView {
     pub selected: bool,
     /// Its Audio plug-in's loop in the focused pattern (focused group only).
     pub audio: Option<LoopView>,
+    /// Its Audio plug-in plays in Loop mode (with the pattern, not with notes): in Pad
+    /// mode its pad switches the loop on or off ([`Action::ToggleAudioLoop`]).
+    pub loop_mode: bool,
+    /// A loop on this sound is active now (an enabled Loop-mode Audio plug-in in the
+    /// active pattern, or an unmuted looped Sampler / New Sampler voice playing).
+    pub loop_playing: bool,
 }
 
 /// A sound's Audio plug-in loop as the pattern editors draw it (Maschine's
@@ -517,6 +561,36 @@ pub struct MixView {
     pub tune: Option<f64>,
 }
 
+/// The focused sound's Variation page (work-item 35): what the Jam's RANDOMIZER shows
+/// and sets. `mode` is 0 Humanize or 1 Random; the distributions are 0 Equal, 1 Gauss,
+/// 2 ½ Gauss, 3 Fixed; `keyboard` says whether the pads are in a keyboard layout, which
+/// shows Note Range and Chords (pad mode hides them).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct VariationView {
+    pub mode: i64,
+    pub velocity_lo: i64,
+    pub velocity_hi: i64,
+    /// Per cent of a grid step, 0–50.
+    pub time_shift: f64,
+    /// Per cent, 10–100.
+    pub probability: i64,
+    pub note_lo: i64,
+    pub note_hi: i64,
+    pub note_count: i64,
+    /// A note's length in grid steps, 1–6.
+    pub steps: f64,
+    pub dist_note_count: i64,
+    pub dist_notes: i64,
+    pub dist_note_length: i64,
+    /// The generator's Euclidean settings, which `Euclid` (mode 2) shows.
+    pub euclid_steps: i64,
+    pub fills: i64,
+    pub rotate: i64,
+    /// Its Division, as `layout::channel::DIVISIONS` lists it (0 Grid … 10 Fit Bar).
+    pub division: i64,
+    pub keyboard: bool,
+}
+
 /// The app's Control area: what the eight knobs turn.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ControlView {
@@ -524,6 +598,9 @@ pub struct ControlView {
     pub level: usize,
     /// Plug-ins shown (else the channel's properties).
     pub modules_visible: bool,
+    /// Quick Browse's list shows over the right screen (the browser's results are in
+    /// [`View::browser`]).
+    pub quick_browse: bool,
     pub page_group: usize,
     pub page_groups: usize,
     /// The focused slot's name, if any.
@@ -546,10 +623,17 @@ pub struct ControlView {
     pub filter: Option<EqCurveView>,
     /// Any other focused built-in effect, drawn on the right screen on every page.
     pub picture: Option<EqCurveView>,
+    /// The focused hosted plug-in's live output spectrum (0..1, -90 to 0 dBFS, 20 Hz to
+    /// 20 kHz), behind the response in the `filter` pictures over its knobs. Sent only
+    /// while one is drawn ([`Surface::drew_filter_picture`]).
+    pub output_spectrum: Vec<f32>,
     /// The focused Zhora: its tuner on the right screen, its buttons on both.
     pub zhora: Option<ZhoraView>,
     /// The focused Tuner effect: its dial on the right screen.
     pub tuner: Option<TunerView>,
+    /// The focused built-in synth (Replicant, Plaits, an internal instrument): its
+    /// patch's preview beside its picture.
+    pub scope: Option<ScopeView>,
     /// The sound's Generate page in Euclidean mode: its circle on the right screen.
     pub euclid: Option<EuclidView>,
     /// The sound's Generate page in Random mode: its notes on the right screen.
@@ -595,6 +679,15 @@ pub struct TunerView {
     pub muted: bool,
 }
 
+/// A synth's preview on the right screen: `wave` is `columns` pairs of (low, high),
+/// each -1..1, 0 being the middle line; `envelope` is the preview note's level in each
+/// column, 0..1.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ScopeView {
+    pub wave: Vec<(f32, f32)>,
+    pub envelope: Vec<f32>,
+}
+
 /// What Zhora's screens show. `note` is the note heard on its input and `cents` how far
 /// above it; `in_tune` within 5 cents. The bar reads `status` (when it was tuned), with
 /// `right` (what's held, or Live's state) at its end; `message` replaces it. `tune`,
@@ -631,6 +724,8 @@ pub struct ZhoraView {
 /// actually apply yet (the Cabinet).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EqCurveView {
+    /// Live input and output spectra behind a built-in EQ's response.
+    pub spectrum: [Vec<f32>; 2],
     pub points: Vec<f32>,
     pub bands: Vec<(f32, f32)>,
     pub extent: Vec<f32>,
@@ -669,6 +764,14 @@ pub struct SlotView {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct KnobView {
+    /// Where its parameter is with modulation applied (0..1), when it is modulated.
+    pub mod_position: Option<f64>,
+    /// The knob's text with its parameter at `mod_position` (set with it).
+    pub mod_text: Option<String>,
+    /// Its plug-in parameter's id, if it's a plug-in's (mappings find parameters by it).
+    pub param_id: Option<u32>,
+    /// The values it picks among, if it's a choice of a few (a filter type, a switch).
+    pub choices: Vec<String>,
     pub name: String,
     /// The section of the plug-in it's in ("Voice Settings").
     pub section: String,
@@ -721,6 +824,14 @@ pub enum Action {
     Volume(f64),
     /// The master level in dB (at most +10).
     VolumeDb(f64),
+    /// Set one of the focused sound's Variation settings (work-item 35): `field` as the
+    /// page names it (`mode`, `velocity_lo`, …, `dist_notes`), `value` as it shows it.
+    Variation {
+        field: &'static str,
+        value: f64,
+    },
+    /// The Variation page's Apply: vary the focused sound's notes in the focused pattern.
+    ApplyVariation,
     FocusGroup(usize),
     /// Focus sound `.0` of the focused group.
     FocusSound(usize),
@@ -836,6 +947,9 @@ pub enum Action {
     /// `save_group` / `save_sound` (the focused one), or `load` recent project `n`
     /// (from 0, as [`View::recent`]).
     File(&'static str, usize),
+    /// The answer to [`View::ask`]: `save` (then go on), `discard` (go on without
+    /// saving) or `cancel`.
+    Ask(&'static str),
     /// One of the song's grids (`perform`, `arrange`, `arrange_snap`, `quick`, `step`,
     /// `step_snap`, `nudge`), as [`GridView`]'s fields (on / off as 1 / 0).
     Grid(&'static str, i64),
@@ -1033,6 +1147,12 @@ pub enum Action {
         group: usize,
         pattern: usize,
     },
+    /// Sound `sound` of group `group` (both from 0): its Audio plug-in's loop switched on
+    /// or off in the pattern the group plays.
+    ToggleAudioLoop {
+        group: usize,
+        sound: usize,
+    },
     /// Group `group`'s pattern `to` becomes a copy of its pattern `from`; past the last, a
     /// new pattern goes there.
     CopyPattern {
@@ -1102,6 +1222,39 @@ pub enum Action {
     SettingsWanted(bool),
 }
 
+/// One OSO slot as the Jam script publishes it (`deckard.oso`): what the strip draws,
+/// and nothing else. `value` is the display text, `sub` the transcribed third-row
+/// sub-label (`None` where the reference leaves the row blank), `group` the spanning
+/// header (`None` where the reference shows none). Holes are `None` in the page's
+/// `slots`. The script's own key for the parameter (`RootNote`) stays in the script: no
+/// host code looks a slot up by name, and a required field nobody reads only failed
+/// scripts that had a slot the host ignored.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OsoSlot {
+    pub value: String,
+    pub sub: Option<String>,
+    pub group: Option<String>,
+}
+
+/// The Jam script's focused OSO page (`deckard.oso`): the title without its counter,
+/// the 1-based `page` and total `pages` for the `n/N` counter, the page-scoped slots
+/// (`None` is a hole), and the script's own cursor — `focus`, a 0-based page slot with
+/// holes counted, and whether it is being changed (`editing`).
+///
+/// The cursor is the script's on every page, menu or tab: the strip draws it and routes
+/// the ENCODER to the script, which owns the press and the turn alike. A viewer-side
+/// cursor existed once and drifted from the script's (three places kept a copy and the
+/// underline sat on a slot the encoder was not on). Stored so the viewer reads it
+/// without Lua.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OsoPage {
+    pub title: String,
+    pub page: usize,
+    pub pages: usize,
+    pub slots: Vec<Option<OsoSlot>>,
+    pub focus: usize,
+    pub editing: bool,
+}
 /// Where the pads play.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PadSetup {
@@ -1112,7 +1265,6 @@ pub struct PadSetup {
     /// Chords mode: every pad plays its chord's notes instead (128: none).
     pub chords: Option<[[i64; 16]; 16]>,
 }
-
 /// The page shown when the scripts start.
 pub const FIRST_PAGE: &str = "control";
 
@@ -1130,6 +1282,9 @@ pub(crate) struct Shared {
     pub view_id: u64,
     /// Seconds since the surface started.
     pub now: f64,
+    /// Until when (seconds on the `now` clock) the page asked for the screens to keep
+    /// being redrawn (`deckard.redraw_until`), for a timer that ends with no event.
+    pub redraw_until: f64,
     /// Buttons held (the scripts' names: `SHIFT`, `PLAY`…), and pads held (0..16).
     pub held: HashSet<String>,
     pub pads: [bool; 16],
@@ -1138,6 +1293,8 @@ pub(crate) struct Shared {
     pub leds: Leds,
     pub pinned: BTreeSet<String>,
     pub shown_pin: Option<(String, String)>,
+    /// The Jam script's focused OSO page, as `deckard.oso` last published it.
+    pub oso: Option<OsoPage>,
 }
 
 impl Shared {
@@ -1170,6 +1327,8 @@ pub struct Surface {
     last_ops: Option<([u8; 3], Vec<screen::DrawOp>)>,
     /// A picture was added since: the same drawing commands may now look different.
     pictures_changed: std::cell::Cell<bool>,
+    /// The last picture drew a `filter` picture over the knobs.
+    filter_drawn: std::cell::Cell<bool>,
     frames: u64,
     /// Pictures the scripts can draw ([`Surface::add_picture`]).
     pictures: screen::Pictures,
@@ -1204,6 +1363,7 @@ impl Surface {
             picture: None,
             last_ops: None,
             pictures_changed: std::cell::Cell::new(false),
+            filter_drawn: std::cell::Cell::new(false),
             frames: 0,
             pictures: Default::default(),
             pinned: BTreeSet::new(),
@@ -1223,6 +1383,36 @@ impl Surface {
         if !self.load() {
             self.theme = old;
         }
+    }
+
+    /// Load the current theme again, even when its name did not change. Saving over
+    /// the theme that is already showing would otherwise leave the old colours up.
+    pub fn reload_theme(&mut self) -> bool {
+        self.load()
+    }
+
+    /// A named colour of the theme that is showing, if that theme set one.
+    pub fn rgb(&self, name: &str) -> Option<[u8; 3]> {
+        self.run.as_ref()?.lua.app_data_ref::<screen::ThemeCache>()?.rgb(name)
+    }
+
+    /// Paint `look` onto the theme that is showing, and drop the last picture so the
+    /// screens take the new colours on the next draw. Nothing is written to disk.
+    pub fn apply_look(&mut self, look: theme_file::Look) -> bool {
+        let Some(run) = &self.run else { return false };
+        let lua = &run.lua;
+        let Ok(theme) = lua.named_registry_value::<Table>("deckard.theme") else { return false };
+        let Ok(colors) = theme.get::<Table>("colors") else { return false };
+        for (name, rgb) in theme_file::painted(&look) {
+            let Ok(t) = rgb_table(lua, rgb) else { return false };
+            if colors.set(name, t).is_err() {
+                return false;
+            }
+        }
+        let Ok(cache) = screen::ThemeCache::from_theme(&theme) else { return false };
+        lua.set_app_data(cache);
+        self.last_ops = None;
+        true
     }
 
     /// The LCD's colour. Reloads when that theme is the one showing, so the screens
@@ -1272,8 +1462,12 @@ impl Surface {
         match start(&self.sources, page, &self.theme, lcd::look(&self.lcd_mode), self.pinned.clone(), self.shown_pin.clone()) {
             Ok(run) => {
                 run.lua.set_app_data(self.pictures.clone());
+                let mapping_error = run.lua.app_data_ref::<MappingErrors>().and_then(|e| e.0.first().cloned());
                 self.run = Some(run);
                 *self.error.borrow_mut() = None;
+                if let Some(e) = mapping_error {
+                    self.set_error(e);
+                }
                 self.picture = None;
                 self.last_ops = None;
                 true
@@ -1360,7 +1554,12 @@ impl Surface {
     /// Whether the theme moves by itself (a `chase` border): the screens want drawing
     /// often, even with nothing happening.
     pub fn animates(&self) -> bool {
-        self.run.as_ref().is_some_and(|r| r.lua.app_data_ref::<screen::ThemeCache>().is_some_and(|c| c.animates))
+        self.run.as_ref().is_some_and(|r| {
+            r.lua.app_data_ref::<screen::ThemeCache>().is_some_and(|c| c.animates) || {
+                let sh = r.shared.borrow();
+                sh.redraw_until > sh.now
+            }
+        })
     }
 
     /// The pages' timer: `tick()` for the page shown, then `global.lua` (as for events),
@@ -1436,7 +1635,11 @@ impl Surface {
 
     /// The shown page's table (if it loads) and the global one, in that order.
     fn tables(&self, run: &Run) -> Vec<Table> {
-        let page = run.shared.borrow().page.clone();
+        // (A question about unsaved changes shows over the page until it's answered.)
+        let page = {
+            let sh = run.shared.borrow();
+            if sh.view.ask.is_some() { "ask".to_string() } else { sh.page.clone() }
+        };
         let mut out = Vec::new();
         match page_table(&run.lua, &page) {
             Ok(Some(t)) => out.push(t),
@@ -1516,10 +1719,8 @@ impl Surface {
                 self.call_global(run, "knob_turned", ());
                 self.dispatch(run, "knob", (k + 1, amount));
             }
-            Event::Wheel(steps) => {
-                if !self.call_global(run, "wheel_mode", steps) {
-                    self.dispatch(run, "wheel", steps);
-                }
+            Event::Wheel(steps) if !self.call_global(run, "wheel_mode", steps) => {
+                self.dispatch(run, "wheel", steps);
             }
             // (Fingers from 1; "down", "move" or "up".)
             Event::Touch(finger, kind, pos) => {
@@ -1669,11 +1870,44 @@ impl Surface {
         self.pictures.borrow().contains_key(&(key.to_string(), thumb))
     }
 
+    /// The knob pages of the mapping for plug-in `name`, if one matches and has pages
+    /// (`mappings/` in the controller scripts; the user's win).
+    pub fn mapping_pages(&self, name: &str) -> Option<Vec<widget::mapping::PageParams>> {
+        let run = self.run.as_ref()?;
+        let all = run.lua.app_data_ref::<widget::Mappings>()?;
+        let pages = widget::mapping::find(&all.0, name, "", "")?.page_params();
+        (!pages.is_empty()).then_some(pages)
+    }
+
+    /// Whether the last picture drew a `filter` picture over the knobs: then it can show
+    /// the plug-in's output spectrum ([`ControlView::output_spectrum`]).
+    pub fn drew_filter_picture(&self) -> bool {
+        self.filter_drawn.get()
+    }
+
+    /// Whether the focused plug-in's mapping requests an EQ spectrum.
+    pub fn mapping_shows_eq(&self, name: &str, vendor: &str, id: &str) -> bool {
+        self.run
+            .as_ref()
+            .and_then(|run| {
+                let all = run.lua.app_data_ref::<widget::Mappings>()?;
+                let mapping = widget::mapping::find(&all.0, name, vendor, id)?;
+                Some(mapping.kind == "eq" && (mapping.matches.builtin.is_none() || (vendor.is_empty() && id.is_empty())))
+            })
+            .unwrap_or(false)
+    }
+
+    /// The widgets' look in the theme shown now (for the widgets' golden tests).
+    #[cfg(test)]
+    pub(crate) fn widget_look(&self) -> Option<widget::Look> {
+        self.run.as_ref().and_then(|r| r.lua.app_data_ref::<screen::ThemeCache>().map(|c| widget::Look::from_cache(&c)))
+    }
+
     fn draw_picture(&self, v: &View) -> screen::Picture {
         let Some(p) = self.with(v, None, |run| self.draw_picture_in(run, v)).map(|(p, _)| p) else {
             let mut p = screen::Picture::new([0, 0, 0]);
             if let Some(name) = &v.loading {
-                p.loading(name);
+                p.loading(name, None);
             }
             if let Some(e) = self.error() {
                 p.error(&e);
@@ -1686,7 +1920,28 @@ impl Surface {
     fn draw_picture_in(&self, run: &Run, v: &View) -> screen::Picture {
         let res: mlua::Result<screen::Picture> = (|| {
             let theme: Table = run.lua.named_registry_value("deckard.theme")?;
-            let (field, ink, accent) = match run.lua.app_data_ref::<screen::ThemeCache>() {
+            widget::set_theme_style(run.lua.app_data_ref::<screen::ThemeCache>().and_then(|c| c.picture_style));
+            // (A theme in the focused group's colour: its accent, and what's lit, follow it.
+            // Not `on_colour`: that's also the text on a row filled in the text colour,
+            // as Browse's focused result.)
+            if theme.get::<Option<bool>>("accent_from_group").ok().flatten() == Some(true)
+                && let Some(g) = v.groups.get(v.group)
+            {
+                let rgb = g.rgb;
+                let lum = 0.2126 * f32::from(rgb[0]) + 0.7152 * f32::from(rgb[1]) + 0.0722 * f32::from(rgb[2]);
+                let on = if lum > 110.0 { [0x08, 0x10, 0x16] } else { [0xf2, 0xf6, 0xfa] };
+                if let Some(mut cache) = run.lua.app_data_mut::<screen::ThemeCache>() {
+                    cache.set_colour("accent", rgb);
+                    cache.set_colour("button_selected", rgb);
+                    cache.set_colour("button_selected_text", on);
+                    cache.accent = rgb;
+                }
+                let colors: Table = theme.get("colors")?;
+                for (k, c) in [("accent", rgb), ("button_selected", rgb), ("button_selected_text", on)] {
+                    colors.set(k, run.lua.create_sequence_from(c)?)?;
+                }
+            }
+            let (field, text, accent) = match run.lua.app_data_ref::<screen::ThemeCache>() {
                 Some(cache) => (cache.background, cache.text, cache.accent),
                 None => {
                     let colors: Table = theme.get("colors")?;
@@ -1697,18 +1952,26 @@ impl Surface {
                     )
                 }
             };
+            // Plug-in pictures take the accent on their orange knobs and sit on the
+            // field. Their light pixels stay white or black with that field: the Text
+            // colour is for labels, not for the picture. The LCD theme is the exception,
+            // because its one ink is the only colour that reads on its paper.
+            let ink = plug_picture_ink(&self.theme, field, text);
             let mut pic = screen::Picture::new(field);
             pic.restyle_plugs = true;
             pic.plug_field = field;
             pic.plug_ink = ink;
             pic.plug_accent = accent;
+            pic.caps = run.lua.app_data_ref::<screen::ThemeCache>().is_some_and(|c| c.caps);
             let ud = run.lua.create_userdata(pic)?;
+            widget::begin_frame(&v.control.output_spectrum);
             for t in self.tables(run).into_iter().rev() {
                 let Ok(Some(f)) = t.get::<Option<Function>>("draw") else { continue };
                 if let Err(e) = f.call::<()>((ud.clone(), theme.clone())) {
                     self.set_error(e);
                 }
             }
+            self.filter_drawn.set(widget::filter_drawn());
             ud.take::<screen::Picture>()
         })();
         let mut p = match res {
@@ -1719,7 +1982,7 @@ impl Surface {
             }
         };
         if let Some(name) = &v.loading {
-            p.loading(name);
+            p.loading(name, run.lua.app_data_ref::<screen::ThemeCache>().map(|c| c.default_style));
         }
         if let Some(e) = self.error() {
             p.error(&e);
@@ -1779,6 +2042,15 @@ fn merge(lua: &Lua, base: &Table, over: &Table, deep: bool) -> mlua::Result<Valu
         out.set(k, v)?;
     }
     Ok(Value::Table(out))
+}
+
+/// The light parts of a plug-in picture. Not the theme's text colour.
+pub(crate) fn plug_picture_ink(theme: &str, field: [u8; 3], text: [u8; 3]) -> [u8; 3] {
+    if theme == "lcd" {
+        return text;
+    }
+    let light = u16::from(field[0]) * 3 + u16::from(field[1]) * 6 + u16::from(field[2]);
+    if light > 1400 { [0, 0, 0] } else { [255, 255, 255] }
 }
 
 /// `{r, g, b}` as a Lua array (1-based), which `themes/lcd.lua` mixes.
@@ -1844,6 +2116,9 @@ fn sync_lua_pin(lua: &Lua, shown: Option<&(String, String)>) -> mlua::Result<()>
     Ok(())
 }
 
+/// The plug-in mappings that didn't load (Lua app data), first shown as the error.
+struct MappingErrors(Vec<String>);
+
 fn start(
     sources: &sources::Sources,
     page: String,
@@ -1858,6 +2133,7 @@ fn start(
         view: Rc::default(),
         view_id: 1,
         now: 0.0,
+        redraw_until: 0.0,
         held: HashSet::new(),
         pads: [false; 16],
         actions: Vec::new(),
@@ -1865,6 +2141,7 @@ fn start(
         leds: leds::blank(),
         pinned,
         shown_pin,
+        oso: None,
     }));
     api::install(&lua, &shared)?;
     sources::install_require(&lua, sources.clone())?;
@@ -1875,6 +2152,10 @@ fn start(
     lua.set_named_registry_value("deckard.global", global)?;
     let theme = load_theme(&lua, sources, theme, 0)?;
     lua.set_app_data(screen::ThemeCache::from_theme(&theme)?);
+    // The plug-in mappings; one that doesn't load is reported and left out.
+    let (mappings, errors) = widget::mapping::load_all(&lua, sources);
+    lua.set_app_data(widget::Mappings(std::rc::Rc::new(mappings)));
+    lua.set_app_data(MappingErrors(errors));
     lua.set_named_registry_value("deckard.theme", theme)?;
     lua.set_named_registry_value("deckard.pages", lua.create_table()?)?;
     // The first page loads now, so its errors show at once.

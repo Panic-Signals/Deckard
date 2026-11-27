@@ -16,6 +16,12 @@ pub struct SoundClip {
 }
 
 impl SoundClip {
+    /// The sound alone: none of its notes.
+    pub fn without_notes(mut self) -> SoundClip {
+        self.events.clear();
+        self
+    }
+
     /// The clip copied from document `from`, for pasting in `to` (its notes'
     /// expression carried over).
     pub fn carried(mut self, from: &Document, to: &mut Document) -> SoundClip {

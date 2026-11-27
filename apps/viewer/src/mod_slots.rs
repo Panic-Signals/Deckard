@@ -236,6 +236,15 @@ pub fn destinations(app: &App, g: usize, s: usize, i: usize) -> Vec<Destination>
             out.push(Destination { module, param, name: channel::title(&k.0), travel: k.2.clamp(0.0, 1.0) });
         }
     }
+    // A layered New Sampler: its layers' morph (no knob of the Control page).
+    let p = d.project();
+    if crate::layers::layered(p, g, s)
+        && let Some(snd) = p.groups.get(g).and_then(|x| x.sounds.get(s))
+        && snd.slots.get(i).is_some_and(|x| x.module == "Sampler")
+    {
+        let travel = snd.new_sampler.map_or(0.0, |n| n.morph.position.clamp(0.0, 1.0) as f32);
+        out.push(Destination { module: "Sampler".into(), param: ModParam::Field("morph".into()), name: "MORPH".into(), travel });
+    }
     out
 }
 
@@ -898,7 +907,7 @@ fn source_step(lfos: &[Lfo], cur: Option<ModSource>, steps: i64) -> Option<ModSo
 /// The source `steps` on from `cur` in None, then `list`.
 fn step_in(list: &[ModSource], cur: Option<ModSource>, steps: i64) -> Option<ModSource> {
     let rank = |s: &ModSource| match s {
-        ModSource::Lfo(n) => 3 + i64::from(*n),
+        ModSource::Lfo(n) => ModSource::ALL.len() as i64 + i64::from(*n),
         s => ModSource::ALL.iter().position(|x| x == s).unwrap_or(0) as i64,
     };
     let to = match cur {
@@ -1173,12 +1182,23 @@ mod tests {
         assert_eq!(group_text(&q, 8).unwrap(), "A2 – Bass");
     }
 
+    /// The sources step None, Pressure, Slide, Pitch, Mod Wheel, then the LFOs.
+    #[test]
+    fn the_mod_wheel_comes_after_pitch_in_the_sources() {
+        let lfos = [Lfo::new(1)];
+        let names: Vec<String> = (1..=5).map(|k| source_step(&lfos, None, k).map_or("None".into(), |s| s.name())).collect();
+        assert_eq!(names, ["Pressure", "Slide", "Pitch", "Mod Wheel", "LFO 1"]);
+        assert_eq!(source_step(&lfos, Some(ModSource::Lfo(1)), -1), Some(ModSource::ModWheel));
+        // (An LFO that's gone steps from after the wheel, not from among the playing sources.)
+        assert_eq!(source_step(&[], Some(ModSource::Lfo(3)), -1), Some(ModSource::ModWheel));
+    }
+
     /// An LFO in Envelope mode is named "ENV n" in the Source row.
     #[test]
     fn an_envelope_source_reads_env() {
         let mut app = app();
         app.surface_act(A::Lfo("create", 1, 0.0));
-        app.surface_act(A::ModSlot(0, 0, 4));
+        app.surface_act(A::ModSlot(0, 0, 5));
         assert_eq!(rows(&app, 0)[0], "LFO 1");
         app.surface_act(A::Lfo("env", 1, 0.0));
         assert_eq!(rows(&app, 0)[0], "ENV 1");
@@ -1189,7 +1209,7 @@ mod tests {
         let mut app = app();
         app.surface_act(A::Lfo("create", 1, 0.0));
         // None, Pressure, Slide, Pitch, LFO 1.
-        app.surface_act(A::ModSlot(0, 0, 4));
+        app.surface_act(A::ModSlot(0, 0, 5));
         assert_eq!(rows(&app, 0)[0], "LFO 1");
         app.surface_act(A::ModSlot(0, 1, 1));
         app.surface_act(A::ModSlot(0, 2, 1));
@@ -1259,7 +1279,7 @@ mod tests {
         let taken = ModRoute { module: d[1].module.clone(), param: d[1].param.clone(), ..cutoff(ModSource::Pressure) };
         set_routes(&app, vec![taken.clone()]);
         // Slot 2 (from 0: 1): LFO 1, A1, S1, the Sampler.
-        app.surface_act(A::ModSlot(1, 0, 4));
+        app.surface_act(A::ModSlot(1, 0, 5));
         app.surface_act(A::ModSlot(1, 1, 1));
         app.surface_act(A::ModSlot(1, 2, 1));
         app.surface_act(A::ModSlot(1, 3, 1));
@@ -1302,7 +1322,7 @@ mod tests {
         let d = destinations(&app, 0, 0, 0);
         let taken = ModRoute { module: d[0].module.clone(), param: d[0].param.clone(), ..cutoff(ModSource::Pressure) };
         set_routes(&app, vec![taken.clone()]);
-        app.surface_act(A::ModSlot(1, 0, 4));
+        app.surface_act(A::ModSlot(1, 0, 5));
         app.surface_act(A::ModSlot(1, 1, 1));
         app.surface_act(A::ModSlot(1, 2, 1));
         app.surface_act(A::ModSlot(1, 3, 1));
@@ -1324,7 +1344,7 @@ mod tests {
             d.iter().map(|x| ModRoute { module: x.module.clone(), param: x.param.clone(), ..cutoff(ModSource::Pressure) }).collect();
         set_routes(&app, all.clone());
         let n = all.len();
-        app.surface_act(A::ModSlot(n, 0, 4));
+        app.surface_act(A::ModSlot(n, 0, 5));
         app.surface_act(A::ModSlot(n, 1, 1));
         app.surface_act(A::ModSlot(n, 2, 1));
         app.surface_act(A::ModSlot(n, 3, 1));
@@ -1373,7 +1393,7 @@ mod tests {
         let theirs = vec![ModRoute { low: 0.0, high: 1.0, ..cutoff(ModSource::Pressure) }];
         doc.borrow_mut().set_mod_routes(0, 1, theirs.clone()).unwrap();
         app.surface_act(A::Lfo("create", 1, 0.0));
-        app.surface_act(A::ModSlot(1, 0, 4));
+        app.surface_act(A::ModSlot(1, 0, 5));
         app.surface_act(A::ModSlot(1, 1, 1));
         app.surface_act(A::ModSlot(1, 2, 1));
         app.surface_act(A::ModSlot(1, 3, 1));

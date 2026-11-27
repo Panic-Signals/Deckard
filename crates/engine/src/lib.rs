@@ -16,6 +16,7 @@ use channel_sends as aux;
 #[cfg(feature = "output")]
 pub mod devices;
 pub mod edit;
+pub mod eq_spectrum;
 pub mod export;
 pub mod fx;
 pub mod glide;
@@ -28,6 +29,7 @@ pub mod midi;
 pub mod midi_input;
 mod mod_rt;
 pub mod modscale;
+pub mod munge;
 #[cfg(native_asio)]
 pub(crate) mod native_asio;
 pub mod note_echo;
@@ -39,8 +41,10 @@ mod performance_regressions;
 pub mod pool;
 mod prehear;
 pub mod queue;
+pub mod render;
 pub mod repeat;
 pub mod scrolling;
+pub mod spectrum;
 pub use ahead::Junk;
 pub mod sample;
 pub mod sampler;
@@ -156,6 +160,10 @@ pub struct Timeline {
     /// How many ratcheted notes have been put in: each takes the next roll
     /// ([`NoteEvent::roll`]).
     pub ratchets: u64,
+    /// Where a queued switch can happen: every this many ticks (a scene's longest
+    /// pattern, inside the longer cycle its patterns make looping by themselves). 0: only
+    /// at the end.
+    pub switch_every: i64,
 }
 
 impl Timeline {
@@ -268,6 +276,12 @@ pub enum Live {
     /// which leaves other Groups playing).
     ChokeGroup {
         group: usize,
+    },
+    /// [`Live::ChokeAll`] for one sound only (the Sampler's STOP: what it auditions ends,
+    /// the song plays on).
+    ChokeSound {
+        group: usize,
+        sound: usize,
     },
 }
 
@@ -399,7 +413,8 @@ pub fn timeline(p: &Project, mode: Mode) -> Timeline {
             }
         }
         Mode::Scene(scene) if scene < p.scenes.len() => {
-            t.length = p.scene_length(scene);
+            t.length = scene_cycle(p, scene);
+            t.switch_every = p.scene_length(scene);
             let len = t.length;
             t.tempos.push((0, p.scenes[scene].tempo));
             add_scene(&mut t, scene, 0, len);
@@ -446,6 +461,11 @@ fn cue_take(e: &NoteEvent) -> Option<(usize, f64)> {
 
 /// How many sounding sounds [`Engine::catch_beat_hits`] tracks at once.
 const SOUNDING_ROOM: usize = 64;
+
+/// Sound `s` of group `g`'s notes on timeline `tl`, as (tick, pitch, length, velocity).
+fn sound_notes(tl: &Timeline, g: usize, s: usize) -> impl Iterator<Item = (i64, i64, i64, i64)> + '_ {
+    tl.events.iter().filter(move |e| (e.group, e.sound) == (g, s) && e.velocity > 0).map(|e| (e.tick, e.pitch, e.length, e.velocity))
+}
 
 /// How long after a beat's tick a mute or pattern switch still catches that beat's hit
 /// (compensating for output buffer latency plus the controller-to-adopt round-trip).
@@ -524,6 +544,31 @@ fn group_pattern_sigs(project: &Project, mode: Mode) -> Vec<u64> {
 }
 fn pattern_length(p: &Project, g: usize, pi: usize) -> i64 {
     own_length(p, &p.groups[g].patterns[pi])
+}
+
+/// The longest a scene's cycle gets, in bars; past it, its patterns start over with the
+/// longest one.
+const MAX_CYCLE_BARS: i64 = 128;
+
+/// How long scene `scene` plays before it repeats. Each pattern loops by itself, as in
+/// Maschine's Ideas view (a 1-bar and a 1:0:2 pattern line up again after 9 bars), so
+/// it's the shortest stretch every pattern fits a whole number of times into: the
+/// longest pattern when that's over [`MAX_CYCLE_BARS`].
+fn scene_cycle(p: &Project, scene: usize) -> i64 {
+    fn gcd(a: i64, b: i64) -> i64 {
+        if b == 0 { a } else { gcd(b, a % b) }
+    }
+    let longest = p.scene_length(scene);
+    let cap = MAX_CYCLE_BARS * p.bar_length().max(1);
+    let mut cycle = longest.max(1);
+    for &(g, pi) in &p.scenes[scene].patterns {
+        let l = pattern_length(p, g, pi).max(1);
+        cycle = cycle / gcd(cycle, l) * l;
+        if cycle > cap {
+            return longest;
+        }
+    }
+    cycle
 }
 
 /// A pattern's (or clip's) length, a bar when it has none.
@@ -1351,6 +1396,7 @@ fn bare_chain(units: Vec<Unit>, sr_f: f64) -> FxChain {
         dr: vec![0.0; MAX_BLOCK],
         fade: (FX_FADE_SECONDS * sr_f).round() as u32,
         meters: None,
+        spectrum: None,
         tap: Vec::new(),
         sl: vec![0.0; MAX_BLOCK],
         sr: vec![0.0; MAX_BLOCK],
@@ -1440,6 +1486,13 @@ fn run_chain(chain: &mut FxChain, buf: &mut [f32], frames: usize, at: impl Fn(us
 
 /// A sound's effect plug-ins (its chain after the instrument), in order, and the
 /// sound's level and pan, which come after them.
+#[derive(Clone, Copy)]
+enum SpectrumChain {
+    Sound(usize, usize),
+    Group(usize),
+    Master,
+}
+
 struct FxChain {
     units: Vec<Unit>,
     gain: (f32, f32),
@@ -1452,6 +1505,7 @@ struct FxChain {
     fade: u32,
     /// Where metered effects post their meters, and this chain's sound (group, sound).
     meters: Option<(Arc<meters::FxMeters>, usize, usize)>,
+    spectrum: Option<(Arc<eq_spectrum::EqSpectrum>, SpectrumChain)>,
     /// This sound feeds side-chains: per tap, its buffer and gain (1 before its fader,
     /// for a sound source; its fader, for its group's sum).
     tap: Vec<(usize, (f32, f32))>,
@@ -1774,7 +1828,7 @@ impl FxChain {
                         sc_filter.process(&mut self.sl[..n], &mut self.sr[..n]);
                     }
                     let started = std::time::Instant::now();
-                    let Ok(mut p) = shared.lock() else {
+                    let Ok(mut p) = shared.try_audio() else {
                         skipped();
                         continue;
                     };
@@ -1793,22 +1847,39 @@ impl FxChain {
                     drop(p);
                     timed(shared, started);
                 }
-                FxUnit::Internal { fx, glide, .. } => {
+                FxUnit::Internal { class, fx, glide, .. } => {
                     fx.set_transport(transport.playing.then_some(transport.quarters));
-                    // Gliding to new settings: a step of it every glide::STEP frames.
-                    let mut at = 0;
-                    while at < n {
-                        let to = if glide.gliding() { (at + glide::STEP).min(n) } else { n };
-                        if glide.tick() {
-                            fx.set(glide.now());
+                    let mut run = |l: &mut [f32], r: &mut [f32]| {
+                        // Gliding to new settings: a step of it every glide::STEP frames.
+                        let mut at = 0;
+                        while at < n {
+                            let to = if glide.gliding() { (at + glide::STEP).min(n) } else { n };
+                            if glide.tick() {
+                                fx.set(glide.now());
+                            }
+                            let (l, r) = (&mut l[at..to], &mut r[at..to]);
+                            if sources.is_empty() {
+                                fx.process(l, r)
+                            } else {
+                                fx.process_sc(l, r, Some((&self.sl[at..to], &self.sr[at..to])))
+                            }
+                            at = to;
                         }
-                        let (l, r) = (&mut self.l[at..to], &mut self.r[at..to]);
-                        if sources.is_empty() {
-                            fx.process(l, r)
-                        } else {
-                            fx.process_sc(l, r, Some((&self.sl[at..to], &self.sr[at..to])))
-                        }
-                        at = to;
+                    };
+                    let (l, r) = (&mut self.l[..n], &mut self.r[..n]);
+                    if class == "EQ"
+                        && !unit.ghost
+                        && unit.target > 0.0
+                        && let Some((board, chain)) = &self.spectrum
+                    {
+                        let owner = match *chain {
+                            SpectrumChain::Sound(g, s) => Owner::Chain(g, s, unit.slot),
+                            SpectrumChain::Group(g) => Owner::Group(g, unit.slot),
+                            SpectrumChain::Master => Owner::Master(unit.slot),
+                        };
+                        board.process(owner, l, r, run);
+                    } else {
+                        run(l, r);
                     }
                 }
             }
@@ -2026,8 +2097,8 @@ fn taps(tap: Option<&Tap>, g: usize, s: usize) -> bool {
     }
 }
 
-/// Plug-in blocks the audio thread skipped (an instance whose mutex was poisoned by a
-/// panic; each one a gap in that plug-in's sound). For diagnostics.
+/// Plug-in blocks skipped because the instance was busy or its mutex was poisoned.
+/// For diagnostics.
 pub static PLUGIN_SKIPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The slowest single plug-in call on the audio thread since [`take_slowest`] was last
@@ -2131,6 +2202,9 @@ pub struct Telemetry {
     /// is playing.
     pub watch: Vec<(usize, usize, usize)>,
     pub zones: Vec<Option<usize>>,
+    /// The sound (group, sound) whose layers' morph the UI wants, and where it is.
+    pub morph_watch: Option<(usize, usize)>,
+    pub morph: Option<f32>,
     /// The last note played live: how many so far, then its group, sound, pitch and
     /// velocity. (The Sampler's pages show the zone it lands in.)
     pub live_hit: (u64, usize, usize, i64, i64),
@@ -2161,6 +2235,9 @@ pub struct Telemetry {
     /// Peak (left, right) of each extra output's strip since the UI last took them, as
     /// `project.extra_outs` lists them (after the strip's level and pan).
     pub extra_meters: Vec<(f32, f32)>,
+    /// Per-group bitmask (`1 << sound`, up to 64 sounds) of unmuted sounds currently
+    /// playing a loop (`SamplerRt::loop_playing`).
+    pub loop_playing: Vec<u64>,
 }
 
 /// Strips whose meters [`Engine::publish`] hands over without allocating (more: once,
@@ -2251,6 +2328,8 @@ pub struct Engine {
     mode: Mode,
     /// What to play when the current pass ends (a scene launched while playing).
     queued: Option<(Mode, Timeline)>,
+    /// The arrangement loop range in ticks; an empty range means the whole timeline.
+    loop_range: (i64, i64),
     /// A jump within the timeline: at tick `.0`, continue from tick `.1` (a section
     /// picked while the song plays).
     jump: Option<(i64, i64)>,
@@ -2365,6 +2444,8 @@ pub struct Engine {
     live_hint: Vec<Vec<bool>>,
     /// The event being played comes from the timeline (not live input).
     from_timeline: bool,
+    /// Beats into the note being played: one joined late (see [`Engine::follow_timeline`]).
+    chase_skip: f64,
     /// The group that plays live (pads, keys): its sounds aren't rendered ahead.
     focus: Option<usize>,
     /// An edit's engine: per sound, what to keep of the playing one's (see
@@ -2408,6 +2489,9 @@ pub struct Engine {
     /// Sounding notes' expression, for the modulation sources ([`mod_rt`]).
     touch: Vec<mod_rt::ExprVoice>,
     held_keys: Vec<mod_rt::HeldKey>,
+    /// Each sound's mod wheel (group, sound, 0..1) once it has come in, for the mod
+    /// matrix.
+    mod_wheels: Vec<(usize, usize, f32)>,
     touch_order: u64,
     /// The sounds' modulation routes ([`mod_rt`]).
     mod_routes: Vec<mod_rt::TargetRt>,
@@ -2558,6 +2642,126 @@ pub(crate) fn ext_channels(n: i64) -> Option<(usize, usize)> {
     let n = n.max(0) as usize;
     let (l, r) = if n < 16 { (2 * n, 2 * n + 1) } else { (n - 16, n - 16) };
     (r < 32).then_some((l, r))
+}
+
+/// Keys mode asks for renders this many semitones either side of the root.
+const KEYS_SPAN: i64 = 12;
+
+/// A New Sampler zone in Sync or Keys (its `meta` says so, with a tempo): it plays the
+/// render of `span` (its play range, or more of the file around it) at the song's
+/// `tempo`, its Tune (zone's and sound's, semitones) in it, when `renders` has it, and asks for it when not, playing its own
+/// sample in time (repitched) meanwhile. Keys asks for the notes' renders around the
+/// root, nearest first, and plays those made. Other zones are left as they are.
+fn synced_zone(
+    zone: &mut sampler::ZoneRt,
+    meta: Option<&deckard_model::new_sampler::ZoneMeta>,
+    sound_tune: f64,
+    tempo: f64,
+    span: (usize, usize),
+    renders: &mut render::Renders,
+) {
+    use deckard_model::new_sampler::PlayMode;
+    let Some(meta) = meta.filter(|m| m.mode != PlayMode::Repitch) else { return };
+    let Some(bpm) = meta.bpm.filter(|b| b.is_finite() && *b > 0.0) else { return };
+    if !(tempo.is_finite() && tempo > 0.0) || zone.play.1 <= zone.play.0 {
+        return;
+    }
+    let keys = meta.mode == PlayMode::Keys;
+    let semitones = zone.tune as f64 + sound_tune;
+    // Warp markers: the range plays through its beat map.
+    let map = (!meta.warps.is_empty()).then(|| deckard_model::new_sampler::BeatMap::of(meta, zone.sample.rate).map(Arc::new)).flatten();
+    // Stretched as it plays: the zone stays the file itself (its lanes too), each voice
+    // stretches it to whatever the song's tempo is. (Warp markers still take a render.)
+    if !renders.ahead && map.is_none() {
+        // (Its own speed against the song's is a tempo that much lower.)
+        let tempo = bpm / meta.speed_factor();
+        zone.sync = Some(sampler::ZoneSync { tempo, keys, grid: meta.start.beats(), live: Some(semitones), ..Default::default() });
+        return;
+    }
+    let job_of = |sample: &Arc<Sample>, semis: f64| {
+        let j = render::RenderJob::new(sample, span, bpm, tempo, semis);
+        match &map {
+            Some(m) => j.warped(m.clone()),
+            None => j,
+        }
+    };
+    let job = |semis: f64| job_of(&zone.sample, semis);
+    // The stem lanes' renders for a Tune (each lane stretched as the sample is): all
+    // of them, or none yet.
+    let lanes = zone.lanes.clone();
+    let lane_renders = |renders: &mut render::Renders, semis: f64| -> Option<[Option<Arc<Sample>>; sampler::LANES]> {
+        let l = lanes.as_ref()?;
+        let made: [Option<Option<Arc<Sample>>>; sampler::LANES] = std::array::from_fn(|k| match &l.samples[k] {
+            Some(s) => renders.get_or_want(job_of(s, semis)).map(Some),
+            None => Some(None),
+        });
+        made.iter().all(Option::is_some).then(|| made.map(Option::flatten))
+    };
+    let base = job(semitones);
+    let made = renders.get_or_want(base.clone());
+    // Its lanes are asked for with it. With one muted, turned down or taken away the zone
+    // waits for them all: until then it plays as it is (repitched, its lanes with it), so
+    // a mute holds through a change of tempo.
+    let lanes_made = lane_renders(renders, semitones);
+    let off = lanes.as_ref().is_some_and(|l| l.only || (0..sampler::LANES).any(|k| l.samples[k].is_some() && l.levels[k] != 1.0));
+    let Some(made) = made.filter(|_| !off || lanes_made.is_some()) else {
+        zone.sync = Some(sampler::ZoneSync {
+            tempo: bpm,
+            keys,
+            notes: Vec::new(),
+            note_lanes: Vec::new(),
+            grid: meta.start.beats(),
+            shown: Vec::new(),
+            live: None,
+        });
+        return;
+    };
+    let mut notes = Vec::new();
+    let mut note_lanes = Vec::new();
+    if keys {
+        let mut offsets: Vec<i64> =
+            (-KEYS_SPAN..=KEYS_SPAN).filter(|o| *o != 0 && (zone.keys.0..=zone.keys.1).contains(&(zone.root + o))).collect();
+        offsets.sort_by_key(|o| (o.abs(), *o < 0));
+        // A note's lanes are asked for once a lane is off unity (a mute then waits for
+        // them; until they come the note plays whole).
+        let muted = lanes.as_ref().is_some_and(|l| (0..sampler::LANES).any(|k| l.samples[k].is_some() && l.levels[k] != 1.0));
+        for o in offsets {
+            if let Some(r) = renders.get_or_want(job(semitones + o as f64)) {
+                notes.push((o, r));
+                if muted {
+                    note_lanes.push(lane_renders(renders, semitones + o as f64).unwrap_or_default());
+                }
+            }
+        }
+    }
+    // Lanes all at unity play as the sample does: until they're made it plays whole.
+    match lanes_made {
+        Some(samples) => zone.lanes.as_mut().unwrap().samples = samples,
+        None => zone.lanes = None,
+    }
+    // The render holds `span` only (the play range, or the stretch of the file this zone
+    // and its sound's other zones of it play: chops of one sample share one render),
+    // its frames where `out_frame` puts them.
+    let len = made.frames.len();
+    let at = |f: usize| (base.out_frame(f as f64).round().max(0.0) as usize).min(len);
+    let a = zone.play.0;
+    let scale = |x: usize| at(a + x) - at(a);
+    // Where the render's frames are in the sample, for the playhead (65 points: between
+    // warp markers the stretch is even).
+    let (from, to) = (zone.play.0 as f64, zone.play.1 as f64);
+    let shown: Vec<(f64, f64)> = (0..=64)
+        .map(|k| {
+            let f = from + (to - from) * f64::from(k) / 64.0;
+            (base.out_frame(f).clamp(0.0, len as f64), f)
+        })
+        .collect();
+    zone.looped = zone.looped.map(|(l, r)| (at(l), at(r))).filter(|(l, r)| r > l);
+    zone.x_fade = scale(zone.x_fade);
+    zone.fade_in = scale(zone.fade_in);
+    zone.fade_out = scale(zone.fade_out);
+    zone.play = (at(zone.play.0), at(zone.play.1));
+    zone.sample = made;
+    zone.sync = Some(sampler::ZoneSync { tempo, keys, notes, note_lanes, grid: meta.start.beats(), shown, live: None });
 }
 
 type FoundKey = (i64, String, String, String, Option<std::path::PathBuf>);
@@ -2720,6 +2924,8 @@ pub struct SampleCache {
     /// Where the engines made with it note plug-ins' extra pairs making sound (one board,
     /// so parts an edit keeps and parts it makes anew note on the same).
     heard: Arc<meters::HeardBoard>,
+    /// The New Sampler's stretched renders (Sync and Keys), and those asked for.
+    renders: render::Renders,
     /// Tests: plug-ins (made by the test) that play these slots, whatever the project
     /// names.
     #[cfg(test)]
@@ -2727,6 +2933,25 @@ pub struct SampleCache {
 }
 
 impl SampleCache {
+    /// The renders engines made with it asked for since last time: make them
+    /// ([`render::RenderJob::run`], off the audio and UI threads), give them back with
+    /// [`SampleCache::add_render`], and build the engine again to play them.
+    pub fn wanted_renders(&mut self) -> Vec<render::RenderJob> {
+        self.renders.take_wanted()
+    }
+
+    /// Sync and Keys zones play renders made ahead (asked for here, played once made)
+    /// instead of being stretched as they play (a stretcher a voice: nothing to wait for
+    /// or keep, at more work a note), which is how they play unless this is set.
+    pub fn stretch_ahead(&mut self, on: bool) {
+        self.renders.ahead = on;
+    }
+
+    /// A render made for `job`.
+    pub fn add_render(&mut self, job: &render::RenderJob, render: Arc<Sample>) {
+        self.renders.add(job, render);
+    }
+
     /// The instance for `slot` (see [`deckard_plugins::Host::instance`]).
     fn plugin(&mut self, slot: Slot, plugin_id: &str, name: &str, chunk: &[u8], sample_rate: f64) -> Result<Shared, String> {
         #[cfg(test)]
@@ -2743,6 +2968,13 @@ impl SampleCache {
             return Some(p.clone());
         }
         self.plugins.loaded(slot, plugin_id, name)
+    }
+
+    /// Where the file `sample` (as a project refers to it) is, if it's found.
+    pub fn path_of(&self, sample: &deckard_model::SampleRef, project_path: Option<&Path>) -> Option<std::path::PathBuf> {
+        let mut resolver = library::Resolver::new(project_path);
+        resolver.set_extra(&self.library_dirs);
+        resolver.resolve(sample)
     }
 
     /// The sample `sample` (as a project refers to it) decoded, loading it if needed.
@@ -2972,6 +3204,7 @@ impl Engine {
                     dr: vec![0.0; MAX_BLOCK],
                     fade: (FX_FADE_SECONDS * sr_f).round() as u32,
                     meters: None,
+                    spectrum: None,
                     tap,
                     sl: vec![0.0; MAX_BLOCK],
                     sr: vec![0.0; MAX_BLOCK],
@@ -3028,6 +3261,8 @@ impl Engine {
             });
             Some(sample)
         };
+        let mut renders = std::mem::take(&mut cache.renders);
+        renders.begin();
         let sounds: Vec<Vec<Option<SamplerRt>>> = project
             .groups
             .iter()
@@ -3084,19 +3319,29 @@ impl Engine {
                         }
                         let smp = s.sampler.as_ref()?;
                         let mut zones = Vec::new();
-                        for z in &smp.zones {
+                        for (zi, z) in smp.zones.iter().enumerate() {
                             report.zones += 1;
                             let Some(sample) = load(&z.sample) else { continue };
                             let len = sample.frames.len();
                             // Ranges are inclusive in the file.
-                            let (lo, hi) = z.play_range;
-                            let play = if hi > lo { ((lo.max(0) as usize).min(len), ((hi + 1) as usize).min(len)) } else { (0, len) };
+                            // What a zone plays of its file `n` frames long. Reversed, a
+                            // start point (it plays to the file's end) plays from there
+                            // back to the beginning.
+                            let play_of = |z: &deckard_model::Zone, n: usize| {
+                                let (lo, hi) = z.play_range;
+                                let p = if hi > lo { ((lo.max(0) as usize).min(n), ((hi + 1) as usize).min(n)) } else { (0, n) };
+                                let back = z.meta.as_ref().is_some_and(|m| m.reverse) && s.new_sampler.is_some();
+                                // (One that loops stays where it is: its loop is what goes backwards.)
+                                let looping = z.loop_active && z.loop_range.1 > z.loop_range.0;
+                                if back && !looping && p.1 == n && p.0 > 0 { (0, p.0) } else { p }
+                            };
+                            let play = play_of(z, len);
                             let (ll, lh) = z.loop_range;
                             let looped = (z.loop_active && lh > ll).then(|| {
                                 let a = (ll.max(0) as usize).clamp(play.0, play.1);
                                 (a, ((lh + 1) as usize).clamp(a, play.1))
                             });
-                            zones.push(sampler::ZoneRt {
+                            let mut zone = sampler::ZoneRt {
                                 sample,
                                 root: z.root_key,
                                 keys: z.key_range,
@@ -3109,14 +3354,74 @@ impl Engine {
                                 x_fade: z.x_fade.max(0) as usize,
                                 fade_in: z.fade_in.max(0) as usize,
                                 fade_out: z.fade_out.max(0) as usize,
-                            });
+                                sync: None,
+                                lanes: None,
+                                reverse: false,
+                                once: false,
+                                tail_ms: 0.0,
+                                layer: None,
+                            };
+                            if s.new_sampler.is_some() {
+                                // A layer: its envelope and window, heard unless muted
+                                // or left out by another's solo.
+                                if let Some(l) = z.meta.as_ref().and_then(|m| m.layer.as_ref()) {
+                                    let all: Vec<deckard_model::layers::Layer> =
+                                        smp.zones.iter().filter_map(|z| z.meta.as_ref()?.layer).collect();
+                                    let at = smp.zones[..zi].iter().filter(|z| z.meta.as_ref().is_some_and(|m| m.layer.is_some())).count();
+                                    let on = deckard_model::layers::audible(&all).get(at).copied().unwrap_or(true);
+                                    zone.layer = Some(sampler::LayerRt { on, env: sampler::layer_times(l, sr_f), window: l.window });
+                                }
+                                zone.reverse = z.meta.as_ref().is_some_and(|m| m.reverse);
+                                zone.once = z.meta.as_ref().is_some_and(|m| m.once);
+                                zone.tail_ms = z.meta.as_ref().map_or(0.0, |m| m.tail_ms() as f32);
+                                // Its stem lanes: files at the sample's rate.
+                                if let Some(m) = z.meta.as_ref().filter(|m| m.has_stems()) {
+                                    let rate = zone.sample.rate;
+                                    let samples: [Option<Arc<Sample>>; sampler::LANES] = std::array::from_fn(|k| {
+                                        let l = m.stems[k].as_ref()?;
+                                        load(&deckard_model::SampleRef { kind: 0, path: l.file.clone(), ..Default::default() })
+                                            .filter(|x| x.rate == rate)
+                                    });
+                                    let mut levels = deckard_model::new_sampler::lane_levels(&m.stems);
+                                    for k in 0..sampler::LANES {
+                                        if samples[k].is_none() {
+                                            levels[k] = 0.0;
+                                        }
+                                    }
+                                    if samples.iter().any(Option::is_some) {
+                                        zone.lanes = Some(sampler::Lanes { samples, levels, only: m.stems_only });
+                                    }
+                                }
+                                // Zones of the same file stretched alike (chops of one sample)
+                                // share one render, of all they play between them.
+                                let alike = |o: &&deckard_model::Zone| {
+                                    use deckard_model::new_sampler::PlayMode;
+                                    let (Some(m), Some(om)) = (z.meta.as_ref(), o.meta.as_ref()) else { return false };
+                                    o.sample == z.sample
+                                        && o.tune == z.tune
+                                        && om.mode != PlayMode::Repitch
+                                        && (om.bpm, &om.warps, om.grid_offset) == (m.bpm, &m.warps, m.grid_offset)
+                                };
+                                let span = smp.zones.iter().filter(alike).fold(play, |a, o| {
+                                    let p = play_of(o, len);
+                                    (a.0.min(p.0), a.1.max(p.1))
+                                });
+                                synced_zone(&mut zone, z.meta.as_ref(), smp.tune, project.tempo, span, &mut renders);
+                            }
+                            zones.push(zone);
                         }
                         // At unity: the sound's level and pan are the mixer's (they glide).
-                        Some(SamplerRt::new(sampler::Settings::new(smp, sr_f), zones, (1.0, 1.0), sr_f))
+                        let mut rt = SamplerRt::new(sampler::Settings::new(smp, sr_f), zones, (1.0, 1.0), sr_f);
+                        rt.motion = s.new_sampler.map_or(Default::default(), |n| n.motion);
+                        // Its layers' morph.
+                        let layered = smp.zones.iter().any(|z| z.meta.as_ref().is_some_and(|m| m.layer.is_some()));
+                        rt.set_morph(s.new_sampler.filter(|_| layered).map(|n| n.morph));
+                        Some(rt)
                     })
                     .collect()
             })
             .collect();
+        cache.renders = renders;
         let mut instruments: Vec<Vec<Option<InstrumentRt>>> = Vec::new();
         for (gi, g) in project.groups.iter().enumerate() {
             let mut row = Vec::new();
@@ -3325,6 +3630,7 @@ impl Engine {
             timeline,
             mode,
             queued: None,
+            loop_range: (0, 0),
             jump: None,
             samples,
             sounds,
@@ -3391,6 +3697,7 @@ impl Engine {
             ahead: None,
             live_hint,
             from_timeline: false,
+            chase_skip: 0.0,
             focus: None,
             reuse,
             keep_timeline,
@@ -3431,6 +3738,7 @@ impl Engine {
             batching: false,
             touch: Vec::with_capacity(mod_rt::VOICES),
             held_keys: Vec::with_capacity(mod_rt::KEYS),
+            mod_wheels: Vec::with_capacity(256),
             touch_order: 0,
             mod_routes,
             modded_plugins: Vec::with_capacity(mod_rt::UNROUTED),
@@ -3516,6 +3824,8 @@ impl Engine {
         let old_frame = self.frame;
         let old_spt = self.samples_per_tick();
         let sigs_valid = self.pattern_sigs_mode == self.mode && fresh.mode == self.mode;
+        // The notes the timeline sounds here, to set against the new one's (below).
+        let (sounding, sounding_n) = self.timeline_sounding(ticks);
         // Sounding Sampler voices carry over to the same sounds; sounds that went away
         // fade out.
         for (g, row) in std::mem::take(&mut self.sounds).into_iter().enumerate() {
@@ -3549,10 +3859,8 @@ impl Engine {
         // Notes held by plug-ins that are gone or muted now end.
         let kept = |p: &Shared| fresh.instruments.iter().flatten().flatten().any(|i| !i.muted && Arc::ptr_eq(&i.plugin, p));
         for i in self.instruments.iter().flatten().flatten() {
-            if !kept(&i.plugin)
-                && let Ok(mut p) = i.plugin.lock()
-            {
-                p.all_notes_off();
+            if !kept(&i.plugin) {
+                i.plugin.audio_all_notes_off();
             }
         }
 
@@ -3624,6 +3932,7 @@ impl Engine {
         // Meters of the new shape, made here rather than on the audio thread.
         fresh.meters = self.sounds.iter().map(|g| vec![(0.0, 0.0); g.len()]).collect();
         std::mem::swap(&mut self.meters, &mut fresh.meters);
+        self.retime_offs(self.tempo, fresh.tempo);
         self.tempo = fresh.tempo;
         self.song_tempo = fresh.song_tempo;
         for u in self.fx.iter_mut().flatten().flatten().flat_map(|c| c.units.iter_mut()) {
@@ -3710,6 +4019,11 @@ impl Engine {
             } else {
                 Some(&fresh.timeline)
             };
+            // (Before the new pattern's long notes are joined: those play on.)
+            self.stop_long_samples_on_pattern_off(old_tl, &fresh.pattern_sigs, sigs_valid && timeline_changed);
+            if !fresh.keep_timeline {
+                self.follow_timeline(&sounding[..sounding_n]);
+            }
             self.catch_beat_hits(
                 old_tl,
                 &fresh.sound_muted,
@@ -3721,6 +4035,140 @@ impl Engine {
             );
         }
         fresh
+    }
+
+    /// A group's pattern turned off or switched for another while the song plays: its
+    /// sounds' long sample voices that a pattern started (a zone longer than a beat, or
+    /// looped) fade out now, leaving drum hits to ring out. (`active`: the timeline
+    /// changed and the old pattern signatures `old_sigs` are comparable.)
+    fn stop_long_samples_on_pattern_off(&mut self, old_tl: Option<&Timeline>, old_sigs: &[u64], active: bool) {
+        let Some(old) = old_tl.filter(|_| active) else { return };
+        let tempo = self.tempo;
+        for g in 0..self.sounds.len() {
+            if self.pattern_sigs.get(g) == old_sigs.get(g) {
+                continue;
+            }
+            for s in 0..self.sounds[g].len() {
+                // (A sound whose notes the switch left as they were plays on.)
+                if sound_notes(old, g, s).next().is_none() || sound_notes(old, g, s).eq(sound_notes(&self.timeline, g, s)) {
+                    continue;
+                }
+                if self.link_ahead(g, s).is_some() {
+                    self.send_live(g, s, ahead::Ev::FadeLongPatternVoices);
+                } else if let Some(smp) = self.sounds[g][s].as_mut() {
+                    smp.fade_long_pattern_voices(tempo);
+                }
+            }
+        }
+    }
+
+    /// The notes (group, sound, pitch) the timeline sounds at song position `ticks`,
+    /// as many as there's room for. (No allocating: this runs on the audio thread.)
+    fn timeline_sounding(&self, ticks: f64) -> ([(usize, usize, i64); SOUNDING_ROOM], usize) {
+        let mut out = [(0, 0, 0); SOUNDING_ROOM];
+        let mut n = 0;
+        let len = self.timeline.length as f64;
+        if !self.sequencing || len <= 0.0 {
+            return (out, 0);
+        }
+        let at = if self.looping { ticks.rem_euclid(len) } else { ticks };
+        for (i, e) in self.timeline.events.iter().enumerate() {
+            let key = (e.group, e.sound, e.pitch);
+            if n < SOUNDING_ROOM && sounding_in_pass(e, i < self.next, at, len, self.looping).is_some() && !out[..n].contains(&key) {
+                out[n] = key;
+                n += 1;
+            }
+        }
+        (out, n)
+    }
+
+    /// The timeline changed under a playing song (a pattern taken out of the scene or
+    /// put in, notes edited). A note the old one was sounding (`was`) that the new one
+    /// doesn't sound here stops now, rather than at its end; a long Sampler note the new
+    /// one sounds here that wasn't sounding starts now, as far in as it would be, rather
+    /// than next time round. A loop recorded into a pattern comes and goes at once.
+    /// Short notes (hits) wait for their next time, as do notes a group's MIDI input
+    /// plug-in plays and notes that only just started ([`Engine::catch_beat_hits`]
+    /// plays those from their start).
+    fn follow_timeline(&mut self, was: &[(usize, usize, i64)]) {
+        let len = self.timeline.length as f64;
+        if len <= 0.0 {
+            return;
+        }
+        let at = if self.looping { self.position().rem_euclid(len) } else { self.position() };
+        let now = self.time;
+        for &(g, s, pitch) in was {
+            let still = self.timeline.events.iter().enumerate().any(|(i, e)| {
+                (e.group, e.sound, e.pitch) == (g, s, pitch) && sounding_in_pass(e, i < self.next, at, len, self.looping).is_some()
+            });
+            if still {
+                continue;
+            }
+            if self.link_ahead(g, s).is_some() {
+                self.send_live(g, s, ahead::Ev::Release { pitch });
+            } else {
+                for o in self.note_offs.iter_mut().filter(|o| (o.1, o.2, o.3) == (g, s, pitch) && o.0 > now) {
+                    o.0 = now;
+                }
+            }
+        }
+        let spt = self.samples_per_tick();
+        if spt <= 0.0 {
+            return;
+        }
+        // (As catch_beat_hits reckons it.)
+        let step_half = ((PPQ as f64 / 8.0) * spt).round().max(1.0) as u64;
+        let grace = ((BEAT_GRACE_SECONDS * self.sr).round().max(1.0) as u64).min(step_half) as f64;
+        for i in 0..self.timeline.events.len() {
+            let e = self.timeline.events[i];
+            let Some(into) = sounding_in_pass(&e, i < self.next, at, len, self.looping) else { continue };
+            if e.length < PPQ
+                || e.probability < 100
+                || into * spt <= grace
+                || was.contains(&(e.group, e.sound, e.pitch))
+                || note_muted(&self.sound_muted, &e)
+                || self.has_midi_input(e.group)
+            {
+                continue;
+            }
+            let ahead = self.link_ahead(e.group, e.sound).is_some();
+            let local_sampler =
+                self.sounds.get(e.group).and_then(|r| r.get(e.sound)).and_then(Option::as_ref).is_some_and(sampler::SamplerRt::can_chase)
+                    && self.instruments.get(e.group).and_then(|r| r.get(e.sound)).is_none_or(Option::is_none);
+            if ahead {
+                // Its player takes it up after its lookahead.
+                let delay = self.ahead.as_ref().map_or(0, |a| a.lookahead + a.span) as f64 / spt;
+                let into = into + delay;
+                let left = e.length as f64 - into;
+                if left <= 0.0 {
+                    continue;
+                }
+                let id = self.ahead.as_mut().map_or(0, |a| {
+                    a.next_id += 1;
+                    a.next_id
+                });
+                let ev = ahead::Ev::NoteOn {
+                    id,
+                    pitch: e.pitch,
+                    velocity: e.velocity,
+                    gate: Some((left * spt).max(1.0) as u64),
+                    beats: self.position() / PPQ as f64,
+                    live: false,
+                    skip: into / PPQ as f64,
+                };
+                self.send_live(e.group, e.sound, ev);
+            } else if local_sampler {
+                let left = (e.length as f64 - into).round() as i64;
+                if left <= 0 {
+                    continue;
+                }
+                self.chase_skip = into / PPQ as f64;
+                self.from_timeline = true;
+                self.trigger_with(NoteEvent { length: left, ..e }, 1.0 / spt, false);
+                self.from_timeline = false;
+                self.chase_skip = 0.0;
+            }
+        }
     }
 
     fn played_live_within(&self, group: usize, sound: usize, pitch: i64, window: u64) -> bool {
@@ -3738,10 +4186,8 @@ impl Engine {
         if let Some(Some(snd)) = self.sounds.get_mut(group).and_then(|r| r.get_mut(sound)) {
             snd.fade_all();
         }
-        if let Some(Some(inst)) = self.instruments.get(group).and_then(|r| r.get(sound))
-            && let Ok(mut p) = inst.plugin.lock()
-        {
-            p.all_notes_off();
+        if let Some(Some(inst)) = self.instruments.get(group).and_then(|r| r.get(sound)) {
+            inst.plugin.audio_all_notes_off();
         }
         let now = self.time;
         for o in self.note_offs.iter_mut().filter(|o| (o.1, o.2) == (group, sound) && o.0 > now) {
@@ -3888,7 +4334,15 @@ impl Engine {
                     a.next_id += 1;
                     a.next_id
                 });
-                let ev = ahead::Ev::NoteOn { id, pitch: e.pitch, velocity: e.velocity, gate, beats: self.position() / PPQ as f64 };
+                let ev = ahead::Ev::NoteOn {
+                    id,
+                    pitch: e.pitch,
+                    velocity: e.velocity,
+                    gate,
+                    beats: self.position() / PPQ as f64,
+                    live: false,
+                    skip: 0.0,
+                };
                 self.send_live(e.group, e.sound, ev);
             } else {
                 self.from_timeline = true;
@@ -4092,6 +4546,16 @@ impl Engine {
         self.recue();
     }
 
+    pub fn set_loop_range(&mut self, start: i64, end: i64) {
+        let start = start.max(0);
+        self.loop_range = (start, end.max(start));
+    }
+
+    fn loop_range(&self) -> (i64, i64) {
+        let end = if self.loop_range.1 > self.loop_range.0 { self.loop_range.1 } else { self.timeline.length };
+        (self.loop_range.0.min(end), end.min(self.timeline.length))
+    }
+
     /// The Audio plug-ins' loops as they'd be where the song now is (the last cue before
     /// it, for each): the song started or jumped into a pattern, past its start.
     fn recue(&mut self) {
@@ -4155,9 +4619,10 @@ impl Engine {
                 jump = None;
                 moved = true;
             }
+            let switch = (self.queued.is_some() && !switched).then(|| self.switch_tick(tl, frame)).flatten();
             if sequencing {
                 while let Some(e) = tl.events.get(next) {
-                    if self.frame_of(e.tick) > frame {
+                    if self.frame_of(e.tick) > frame || switch.is_some_and(|at| e.tick >= at) {
                         break;
                     }
                     if t >= skip {
@@ -4172,9 +4637,10 @@ impl Engine {
                     }
                     next += 1;
                 }
-                if next >= tl.events.len() && frame >= end {
+                let switch_now = switch.map(|at| self.frame_of(at)).filter(|&f| frame >= f);
+                if switch_now.is_some() || (next >= tl.events.len() && frame >= end) {
                     if self.queued.is_some() && !switched {
-                        frame -= end.min(frame);
+                        frame -= switch_now.unwrap_or(end).min(frame);
                         next = 0;
                         pass += 1;
                         switched = true;
@@ -4200,6 +4666,9 @@ impl Engine {
             if sequencing {
                 let mut target = tl.events.get(next).map_or(end, |e| self.frame_of(e.tick));
                 if let Some((at, _)) = jump {
+                    target = target.min(self.frame_of(at));
+                }
+                if let Some(at) = switch {
                     target = target.min(self.frame_of(at));
                 }
                 until = until.min(target.saturating_sub(frame).max(1));
@@ -4263,6 +4732,19 @@ impl Engine {
         (tick as f64 * self.samples_per_tick()).round().max(0.0) as u64
     }
 
+    /// Where a switch queued `frame` frames into timeline `tl` happens before its end, if
+    /// it does: the next multiple of its `switch_every` (where the scene's longest
+    /// pattern ends, inside the longer cycle of patterns looping by themselves).
+    fn switch_tick(&self, tl: &Timeline, frame: u64) -> Option<i64> {
+        let every = tl.switch_every;
+        if every <= 0 || every >= tl.length {
+            return None;
+        }
+        let k = (frame as f64 / self.samples_per_tick() / every as f64).floor() as i64;
+        let at = if k > 0 && self.frame_of(k * every) >= frame { k * every } else { (k + 1) * every };
+        (at < tl.length).then_some(at)
+    }
+
     /// Keep only the sounds for which `keep(group, sound)` is true (a solo).
     pub fn retain_sounds(&mut self, keep: impl Fn(usize, usize) -> bool) {
         for (g, sounds) in self.sounds.iter_mut().enumerate() {
@@ -4314,9 +4796,7 @@ impl Engine {
     /// using the same instances).
     pub fn release_plugins(&mut self) {
         for i in self.instruments.iter().flatten().flatten() {
-            if let Ok(mut p) = i.plugin.lock() {
-                p.all_notes_off();
-            }
+            i.plugin.audio_all_notes_off();
         }
         self.note_offs.clear();
     }
@@ -4339,9 +4819,12 @@ impl Engine {
         for i in self.instruments.iter().flatten().flatten() {
             // A Zhora is waited for (the screens hold it only for moments): a gate left
             // up on a modular drones.
-            let held = if i.cv_only { i.plugin.lock().ok() } else { i.plugin.try_lock().ok() };
-            if let Some(mut p) = held {
-                p.all_notes_off();
+            if i.cv_only {
+                if let Ok(mut p) = i.plugin.lock() {
+                    p.all_notes_off();
+                }
+            } else {
+                i.plugin.audio_all_notes_off();
             }
         }
         if let Some(r) = &mut self.repeater {
@@ -4609,10 +5092,8 @@ impl Engine {
         if let Some(Some(s)) = self.sounds.get_mut(group).and_then(|g| g.get_mut(sound)) {
             s.release_note(pitch);
         }
-        if let Some(Some(inst)) = self.instruments.get(group).and_then(|g| g.get(sound))
-            && let Ok(mut p) = inst.plugin.lock()
-        {
-            p.note_off(pitch);
+        if let Some(Some(inst)) = self.instruments.get(group).and_then(|g| g.get(sound)) {
+            inst.plugin.audio_note_off(pitch);
         }
         self.note_offs.retain(|o| !(o.1 == group && o.2 == sound && o.3 == pitch));
     }
@@ -4688,6 +5169,25 @@ impl Engine {
                     c.meters = Some((m.clone(), g, s));
                 }
             }
+        }
+    }
+
+    /// Route any internal EQs to the output's spectrum monitor.
+    pub fn set_fx_spectrum(&mut self, board: &Arc<eq_spectrum::EqSpectrum>) {
+        for (g, row) in self.fx.iter_mut().enumerate() {
+            for (s, chain) in row.iter_mut().enumerate() {
+                if let Some(chain) = chain {
+                    chain.spectrum = Some((board.clone(), SpectrumChain::Sound(g, s)));
+                }
+            }
+        }
+        for (g, bus) in self.buses.iter_mut().enumerate() {
+            if let Some(bus) = bus {
+                bus.chain.spectrum = Some((board.clone(), SpectrumChain::Group(g)));
+            }
+        }
+        if let Some(chain) = &mut self.master_fx {
+            chain.spectrum = Some((board.clone(), SpectrumChain::Master));
         }
     }
 
@@ -5019,6 +5519,8 @@ impl Engine {
                             velocity: e.velocity,
                             gate,
                             beats: frame as f64 / spt / PPQ as f64,
+                            live: false,
+                            skip: 0.0,
                         }
                     }
                 };
@@ -5412,7 +5914,8 @@ impl Engine {
                 | Live::RepeatPressure { .. }
                 | Live::MidiInputOut { .. }
                 | Live::ChokeAll
-                | Live::ChokeGroup { .. } => None,
+                | Live::ChokeGroup { .. }
+                | Live::ChokeSound { .. } => None,
             };
             if let Some((group, sound, pitch, velocity, length)) = note
                 && self.recorded.len() < RECORDED_ROOM
@@ -5452,6 +5955,7 @@ impl Engine {
             Live::RepeatPressure { .. } => {}
             Live::ChokeAll => self.choke_all(),
             Live::ChokeGroup { group } => self.choke_group(group),
+            Live::ChokeSound { group, sound } => self.choke_sound(group, sound),
         }
     }
 
@@ -5464,26 +5968,33 @@ impl Engine {
 
     /// Every voice of one Group's sounds ends, as [`Self::choke_all`] ends them.
     fn choke_group(&mut self, group: usize) {
-        let tps = 1.0 / self.samples_per_tick();
-        let sounds = self.fx.get(group).map_or(0, Vec::len);
-        for sound in 0..sounds {
-            let e = NoteEvent {
-                expr_at: 0,
-                roll: None,
-                tick: 0,
-                group,
-                sound,
-                pitch: 0,
-                velocity: 0,
-                length: 0,
-                probability: 100,
-                midi: Some(pads::CHOKE),
-                cue: None,
-                expr: None,
-                from: None,
-            };
-            self.trigger(e, tps);
+        for sound in 0..self.fx.get(group).map_or(0, Vec::len) {
+            self.choke_sound(group, sound);
         }
+    }
+
+    /// Every voice of one sound ends, as [`Self::choke_all`] ends them.
+    fn choke_sound(&mut self, group: usize, sound: usize) {
+        if self.fx.get(group).is_none_or(|g| sound >= g.len()) {
+            return;
+        }
+        let tps = 1.0 / self.samples_per_tick();
+        let e = NoteEvent {
+            expr_at: 0,
+            roll: None,
+            tick: 0,
+            group,
+            sound,
+            pitch: 0,
+            velocity: 0,
+            length: 0,
+            probability: 100,
+            midi: Some(pads::CHOKE),
+            cue: None,
+            expr: None,
+            from: None,
+        };
+        self.trigger(e, tps);
     }
 
     /// A live note on `sound`: choke what it chokes, then `play` it and the sounds it
@@ -5604,6 +6115,11 @@ impl Engine {
         }
     }
 
+    /// The master's level as a gain (what the recorder's monitor is heard through).
+    pub fn master_gain(&self) -> f32 {
+        self.master
+    }
+
     /// The external output the master plays on (Out n, from 0).
     pub fn master_bus(&self) -> Option<usize> {
         self.master_bus
@@ -5624,12 +6140,14 @@ impl Engine {
         self.midi_inputs_ahead(frames);
         self.follow_scene_tempo();
         let mut tps = 1.0 / self.samples_per_tick();
-        let mut end = self.frame_of(self.timeline.length);
+        let (loop_start, loop_end) = self.loop_range();
+        let start_frame = self.frame_of(loop_start);
+        let mut end = self.frame_of(loop_end);
         let mut done = 0;
         while done < frames {
             if self.follow_scene_tempo() {
                 tps = 1.0 / self.samples_per_tick();
-                end = self.frame_of(self.timeline.length);
+                end = self.frame_of(self.loop_range().1);
             }
             self.ahead_returns();
             self.fire_note_offs();
@@ -5641,9 +6159,12 @@ impl Engine {
                 self.seek(to);
             }
             if self.sequencing {
+                // A queued switch comes where the scene's longest pattern ends, which can
+                // be before the end of the cycle its patterns make.
+                let switch = self.queued.as_ref().and_then(|_| self.switch_tick(&self.timeline, self.frame));
                 // Events due now.
                 while let Some(&e) = self.timeline.events.get(self.next) {
-                    if self.frame_of(e.tick) > self.frame {
+                    if self.frame_of(e.tick) > self.frame || switch.is_some_and(|at| e.tick >= at) {
                         break;
                     }
                     let idx = self.next;
@@ -5659,21 +6180,23 @@ impl Engine {
                         self.from_timeline = false;
                     }
                 }
-                if self.next >= self.timeline.events.len() && self.frame >= end {
+                let switch_now = switch.map(|at| self.frame_of(at)).filter(|&f| self.frame >= f);
+                if switch_now.is_some() || (self.frame >= end && (self.looping || self.next >= self.timeline.events.len())) {
                     if let Some((mode, timeline)) = self.queued.take() {
-                        self.frame -= end.min(self.frame);
+                        self.frame -= switch_now.unwrap_or(end).min(self.frame);
                         self.next = 0;
                         self.pass += 1;
                         self.mode = mode;
                         self.timeline = timeline;
                         self.recue();
-                        end = self.frame_of(self.timeline.length);
+                        end = self.frame_of(self.loop_range().1);
                         continue;
                     }
                     if self.looping && end > 0 {
-                        self.frame -= end;
-                        self.next = 0;
+                        self.frame = start_frame + self.frame.saturating_sub(end);
+                        self.next = self.timeline.events.iter().position(|e| e.tick >= loop_start).unwrap_or(self.timeline.events.len());
                         self.pass += 1;
+                        self.recue();
                         continue;
                     }
                     self.sequencing = false;
@@ -5695,6 +6218,9 @@ impl Engine {
                 if let Some(at) = self.timeline.next_tempo(self.position() as i64) {
                     target = target.min(self.frame_of(at));
                 }
+                if let Some(at) = self.queued.as_ref().and_then(|_| self.switch_tick(&self.timeline, self.frame)) {
+                    target = target.min(self.frame_of(at));
+                }
                 until = until.min(target.saturating_sub(self.frame).max(1));
             }
             if let Some(at) = self.live.iter().map(|o| o.0).min() {
@@ -5713,7 +6239,10 @@ impl Engine {
             if let Some(at) = self.note_offs.iter().map(|o| o.0).min() {
                 until = until.min(at.saturating_sub(self.time).max(1));
             }
-            // (A note sent out over MIDI has no note-off here; CV follows its envelope by the frame.)
+            if let Some(at) = self.midi_offs.iter().map(|o| o.at).min() {
+                until = until.min(at.saturating_sub(self.time).max(1));
+            }
+            // CV follows its envelope by the frame.
             if self.cv_channels != 0
                 && let Some(at) = self.lfo_note_end()
             {
@@ -6198,8 +6727,9 @@ impl Engine {
         } else if e.midi == Some(pads::CHOKE) {
             self.lfo_release(e.group, e.sound, None);
         }
-        if e.midi.is_none() {
-            self.touch_start(e.group, e.sound, e.pitch, frames, tps, e.expr, e.expr_at);
+        match e.midi {
+            None => self.touch_start(e.group, e.sound, e.pitch, frames, tps, e.expr, e.expr_at),
+            Some(kind) => self.control_seen(e.group, e.sound, kind),
         }
         if midi_out && let Some(route) = self.midi_routes.get(e.group).and_then(|r| r.get(e.sound)).cloned().flatten() {
             match route {
@@ -6290,7 +6820,15 @@ impl Engine {
                             a.next_id
                         });
                         let gate = (e.length != HELD).then(|| ((e.length.max(1) as f64) / tps).max(1.0) as u64);
-                        ahead::Ev::NoteOn { id, pitch: e.pitch, velocity: e.velocity, gate, beats: self.position() / PPQ as f64 }
+                        ahead::Ev::NoteOn {
+                            id,
+                            pitch: e.pitch,
+                            velocity: e.velocity,
+                            gate,
+                            beats: self.position() / PPQ as f64,
+                            live: self.sequencing,
+                            skip: 0.0,
+                        }
                     }
                 };
                 self.send_live(e.group, e.sound, ev);
@@ -6301,14 +6839,8 @@ impl Engine {
             if let Some(Some(s)) = self.sounds.get_mut(e.group).and_then(|g| g.get_mut(e.sound)) {
                 s.control(kind);
             }
-            if let Some(Some(inst)) = self.instruments.get(e.group).and_then(|g| g.get(e.sound))
-                && let Ok(mut p) = inst.plugin.lock()
-            {
-                match kind {
-                    MidiKind::Controller { number, value } => p.control_change(number, value),
-                    MidiKind::PitchBend(v) => p.pitch_bend(v),
-                    MidiKind::ChannelPressure(v) => p.channel_pressure(v),
-                }
+            if let Some(Some(inst)) = self.instruments.get(e.group).and_then(|g| g.get(e.sound)) {
+                plugin_control(&inst.plugin, kind);
             }
             return;
         }
@@ -6316,9 +6848,9 @@ impl Engine {
             if inst.muted {
                 return;
             }
-            // Other threads hold an instance only for moments (a parameter, a note), so
-            // the audio thread waits for it rather than drop the note.
-            if let Ok(mut p) = inst.plugin.lock() {
+            // Drop missed attacks so they do not sound late, while leaving any
+            // earlier note's release scheduled when the instance is busy.
+            if let Ok(mut p) = inst.plugin.try_audio() {
                 p.note_on(e.pitch, e.velocity);
                 self.note_offs.retain(|o| !(o.1 == e.group && o.2 == e.sound && o.3 == e.pitch));
                 if e.length != HELD {
@@ -6328,11 +6860,13 @@ impl Engine {
             }
             return;
         }
-        let ctx = sampler::Context { tempo: self.tempo, beats: self.position() / PPQ as f64 };
+        let ctx = sampler::Context { tempo: self.tempo, beats: self.position() / PPQ as f64, live: self.sequencing && !self.from_timeline };
         let Some(Some(snd)) = self.sounds.get_mut(e.group).and_then(|g| g.get_mut(e.sound)) else { return };
         self.clock += 1;
         let id = self.clock;
-        snd.note_on(id, e.pitch, e.velocity.clamp(0, 127), &ctx);
+        snd.from_timeline = self.from_timeline;
+        snd.note_on_at(id, e.pitch, e.velocity.clamp(0, 127), &ctx, self.chase_skip);
+        snd.from_timeline = false;
         if e.length != HELD {
             let gate = ((e.length.max(1) as f64) / tps).max(1.0) as u64;
             self.note_offs.push((self.time + gate, e.group, e.sound, e.pitch, id));
@@ -6431,11 +6965,32 @@ impl Engine {
         t.stale = self.stale;
         t.sounds_ahead = self.sounds_ahead();
         t.ahead_underruns = self.ahead_underruns();
+        if t.loop_playing.len() != self.sounds.len() {
+            t.loop_playing.resize(self.sounds.len(), 0);
+        }
+        for (g, (mask, row)) in t.loop_playing.iter_mut().zip(&self.sounds).enumerate() {
+            let mut bits = 0u64;
+            let mrow = self.sound_muted.get(g);
+            for (s, smp) in row.iter().enumerate().take(64) {
+                let muted = mrow.and_then(|r| r.get(s)).copied().unwrap_or(false);
+                if !muted && smp.as_ref().is_some_and(|smp| smp.loop_playing()) {
+                    bits |= 1u64 << s;
+                }
+            }
+            *mask = bits;
+        }
         self.publish_heard(t);
         t.zones.resize(t.watch.len(), None);
         for (pos, &(g, s, z)) in t.zones.iter_mut().zip(&t.watch) {
             *pos = self.zone_position(g, s, z);
         }
+        t.morph = t.morph_watch.and_then(|(g, s)| self.morph_position(g, s));
+    }
+
+    /// Where the morph of sound `sound`'s layers is (0 to 1) for its newest note; `None`
+    /// with the morph off or nothing sounding.
+    pub fn morph_position(&self, group: usize, sound: usize) -> Option<f32> {
+        self.sounds.get(group)?.get(sound)?.as_ref()?.morph_position()
     }
 
     /// Where zone `zone` of sound `sound` in group `group` is playing (sample frames).
@@ -6511,9 +7066,7 @@ impl Engine {
             }
             match instruments.get(g).and_then(|r| r.get(s)).and_then(Option::as_ref) {
                 Some(i) => {
-                    if let Ok(mut p) = i.plugin.lock() {
-                        p.note_off(pitch);
-                    }
+                    i.plugin.audio_note_off(pitch);
                     false
                 }
                 None => false,
@@ -6977,7 +7530,8 @@ fn reuse_of(prev: &Project, project: &Project, g: usize, s: usize, sr: f64, plug
     let same_silence = muting(prev, g, s).silent == muting(project, g, s).silent;
     let mut r = Reuse::default();
     // The Sampler: the same, or the same zones (new settings).
-    if same_silence {
+    // (A New Sampler's own settings, its Slice Motion, are given it when it's made.)
+    if same_silence && old.new_sampler == new.new_sampler {
         match (&old.sampler, &new.sampler, synth_of(old), synth_of(new)) {
             (_, _, Some((a, pa)), Some((b, pb))) if a == b => {
                 r.sampler = true;
@@ -7127,6 +7681,15 @@ struct JobPtrs {
 unsafe impl Send for JobPtrs {}
 unsafe impl Sync for JobPtrs {}
 
+fn plugin_control(plugin: &Shared, kind: MidiKind) {
+    let (number, value) = match kind {
+        MidiKind::Controller { number, value } => (usize::from(number.min(127)), u16::from(value)),
+        MidiKind::PitchBend(value) => (129, value),
+        MidiKind::ChannelPressure(value) => (128, u16::from(value)),
+    };
+    plugin.audio_control(number, value);
+}
+
 /// Render one sound for `frames` frames into `b`: its Sampler voices (or the input it
 /// takes), then its plug-in instrument, each through the sound's effects. A Zhora makes
 /// only CV: its return, the input, goes through the effects alone.
@@ -7228,13 +7791,15 @@ fn render_sound(
             let n = (frames - done).min(MAX_BLOCK);
             let t = at_frame(done);
             let started = std::time::Instant::now();
-            let Ok(mut p) = inst.plugin.lock() else {
+            let mut p = inst.plugin.try_audio().ok();
+            let (l, r) = if let Some(p) = p.as_mut() {
+                let out = p.process(n, &t);
+                timed(&inst.plugin, started);
+                out
+            } else {
                 skipped();
-                done += n;
-                continue;
+                (&[][..], &[][..])
             };
-            let (l, r) = p.process(n, &t);
-            timed(&inst.plugin, started);
             let m = l.len().min(r.len()).min(n);
             match chain.as_deref_mut() {
                 Some(c) => {
@@ -7248,9 +7813,11 @@ fn render_sound(
                             c.r[f] += b.inp[(inp_at + done + f) * 2 + 1];
                         }
                     }
-                    take_strips(&p, &mut inst.extras, n, done, (1.0, 0.0, 0, 1.0));
-                    if let (Some(owner), Some(board)) = (inst.owner, &inst.heard) {
-                        hear(&p, owner, inst.scan, n, board);
+                    if let Some(p) = p.as_ref() {
+                        take_strips(p, &mut inst.extras, n, done, (1.0, 0.0, 0, 1.0));
+                        if let (Some(owner), Some(board)) = (inst.owner, &inst.heard) {
+                            hear(p, owner, inst.scan, n, board);
+                        }
                     }
                     drop(p);
                     c.run(n, &t, sc, done);
@@ -7270,9 +7837,11 @@ fn render_sound(
                             buf[(done + f) * 2 + 1] += b.inp[(inp_at + done + f) * 2 + 1];
                         }
                     }
-                    take_strips(&p, &mut inst.extras, n, done, (1.0, 0.0, 0, 1.0));
-                    if let (Some(owner), Some(board)) = (inst.owner, &inst.heard) {
-                        hear(&p, owner, inst.scan, n, board);
+                    if let Some(p) = p.as_ref() {
+                        take_strips(p, &mut inst.extras, n, done, (1.0, 0.0, 0, 1.0));
+                        if let (Some(owner), Some(board)) = (inst.owner, &inst.heard) {
+                            hear(p, owner, inst.scan, n, board);
+                        }
                     }
                 }
             }
@@ -7726,6 +8295,12 @@ mod tests {
             x_fade: 0,
             fade_in: 0,
             fade_out: 0,
+            sync: None,
+            lanes: None,
+            reverse: false,
+            once: false,
+            tail_ms: 0.0,
+            layer: None,
         };
         e.samples = vec![sample];
         e.sounds[0][0] = Some(SamplerRt::new(sampler::Settings::new(&model, e.sr), vec![zone.clone()], (1.0, 1.0), e.sr));
@@ -8005,6 +8580,7 @@ mod tests {
             exprs: Vec::new(),
             prob_locked: Vec::new(),
             tempos: Vec::new(),
+            switch_every: 0,
         };
         let out = render(&mut e, 1.0);
         let left: Vec<f32> = out.iter().step_by(2).map(|x| x * 100.0).collect();
@@ -8043,6 +8619,7 @@ mod tests {
             exprs: Vec::new(),
             prob_locked: Vec::new(),
             tempos: Vec::new(),
+            switch_every: 0,
         };
         let out = render(&mut e, 1.0);
         // The 8-point interpolator follows a ramp once its history is filled.
@@ -8205,6 +8782,167 @@ mod tests {
     fn adopt_at_1k(e: &mut Engine, p: &Project, q: &Project, cache: &mut SampleCache) {
         let (fresh, _) = Engine::new_after(q, Some((p, &[])), None, 1000, Mode::Scene(0), cache);
         drop(e.adopt(fresh, q));
+    }
+
+    /// A pattern turned off while the song plays: its long one-shot sample (2 s, longer
+    /// than a beat) stops at once, though a one-shot plays past its note's end; its short
+    /// hit (0.2 s) rings out.
+    #[test]
+    fn a_pattern_turned_off_stops_its_long_samples_and_lets_hits_ring() {
+        let dir = tempfile::tempdir().unwrap();
+        let (long, hit) = (dir.path().join("long.wav"), dir.path().join("hit.wav"));
+        edit::write_wav(&long, &sample::Sample { rate: 1000, frames: vec![[0.5, 0.5]; 2000] }).unwrap();
+        edit::write_wav(&hit, &sample::Sample { rate: 1000, frames: vec![[0.5, 0.5]; 200] }).unwrap();
+        let mut p = project();
+        let second = p.groups[0].sounds[0].clone();
+        p.groups[0].sounds.push(second);
+        for (s, (wav, len)) in [(&long, 2000), (&hit, 200)].into_iter().enumerate() {
+            let smp = p.groups[0].sounds[s].sampler.as_mut().unwrap();
+            smp.zones[0].sample = deckard_model::SampleRef { kind: 0, path: wav.to_string_lossy().into(), ..Default::default() };
+            smp.zones[0].play_range = (0, len - 1);
+            smp.set("envelope_type", 0.0);
+        }
+        p.groups[0].patterns[0].notes = (0..2)
+            .map(|sound| Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound,
+                position: 0,
+                length: PPQ / 4,
+                pitch: 60,
+                velocity: 127,
+                probability: 100,
+            })
+            .collect();
+        let mut off = p.clone();
+        off.scenes[0].patterns.clear();
+        let mut cache = SampleCache::default();
+        let mut e = loop_engine(&p, &mut cache);
+        let voices = |e: &Engine, s: usize| e.sounds[0][s].as_ref().unwrap().voices();
+        // Past the sixteenth's note-off: both one-shots still play.
+        let mut out = vec![0f32; 2 * 150];
+        e.process(&mut out);
+        assert!(voices(&e, 0) > 0 && voices(&e, 1) > 0, "both playing");
+        adopt_at_1k(&mut e, &p, &off, &mut cache);
+        let mut out = vec![0f32; 2 * 25];
+        e.process(&mut out);
+        assert_eq!(voices(&e, 0), 0, "the long sample stops within its 10 ms fade");
+        assert!(voices(&e, 1) > 0, "the hit rings out");
+        // The same sample on its pad, played live, isn't the pattern's: it plays on.
+        let mut e = loop_engine(&p, &mut cache);
+        let mut out = vec![0f32; 2 * 150];
+        e.process(&mut out);
+        e.note_on(0, 0, 62, 127, PPQ / 4);
+        e.process(&mut out[..2 * 10]);
+        assert_eq!(voices(&e, 0), 2, "the pattern's and the pad's");
+        adopt_at_1k(&mut e, &p, &off, &mut cache);
+        let mut out = vec![0f32; 2 * 25];
+        e.process(&mut out);
+        assert_eq!(voices(&e, 0), 1, "the pad's plays on");
+    }
+
+    /// A loop recorded into a pattern: a bar-long note on a sustaining Sampler, its sample
+    /// a slow ramp (the level says how far in it is), at 1 kHz and 120 BPM (a bar is 2000
+    /// frames). `on`: its pattern is in the scene.
+    fn loop_project(dir: &Path, on: bool) -> Project {
+        let wav = dir.join("loop.wav");
+        if !wav.exists() {
+            let frames = (0..8000).map(|i| [i as f32 / 10_000.0, i as f32 / 10_000.0]).collect();
+            edit::write_wav(&wav, &sample::Sample { rate: 1000, frames }).unwrap();
+        }
+        let mut p = project();
+        let smp = p.groups[0].sounds[0].sampler.as_mut().unwrap();
+        smp.zones[0].sample = deckard_model::SampleRef { kind: 0, path: wav.to_string_lossy().into(), ..Default::default() };
+        smp.zones[0].play_range = (0, 7999);
+        smp.set("envelope_type", 2.0);
+        smp.set("volume_envelope/release", 0.0);
+        p.groups[0].patterns[0].notes = vec![Note {
+            ratchet: Default::default(),
+            expr: None,
+            sound: 0,
+            position: 0,
+            length: 4 * PPQ,
+            pitch: 60,
+            velocity: 127,
+            probability: 100,
+        }];
+        if !on {
+            p.scenes[0].patterns.clear();
+        }
+        p
+    }
+
+    /// The loop's pattern taken out of the scene mid-bar: it stops at once, not at the
+    /// end of its note (the bar's end).
+    #[test]
+    fn a_loop_stops_when_its_pattern_is_taken_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let (p, q) = (loop_project(dir.path(), true), loop_project(dir.path(), false));
+        let mut cache = SampleCache::default();
+        let mut e = loop_engine(&p, &mut cache);
+        let mut out = vec![0f32; 2 * 1000];
+        e.process(&mut out);
+        assert!(out[2 * 999] > 0.01, "the loop plays: {}", out[2 * 999]);
+        adopt_at_1k(&mut e, &p, &q, &mut cache);
+        let mut out = vec![0f32; 2 * 500];
+        e.process(&mut out);
+        let loudest = out[2 * 20..].iter().fold(0f32, |m, x| m.max(x.abs()));
+        assert!(loudest < 1e-4, "silent within 20 ms, not at the bar's end: {loudest}");
+    }
+
+    /// Put back in mid-bar: it plays at once, from where it would be had it played all
+    /// along, not from the next bar. Short notes (hits) still wait for their next time.
+    #[test]
+    fn a_loop_comes_back_where_it_would_be_when_its_pattern_is_put_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let (p, q) = (loop_project(dir.path(), false), loop_project(dir.path(), true));
+        let mut cache = SampleCache::default();
+        // As it sounds having played from the start.
+        let mut all_along = loop_engine(&q, &mut cache);
+        let mut want = vec![0f32; 2 * 1500];
+        all_along.process(&mut want);
+        let mut e = loop_engine(&p, &mut cache);
+        let mut out = vec![0f32; 2 * 1500];
+        e.process(&mut out[..2 * 1000]);
+        assert!(out[..2 * 1000].iter().all(|x| x.abs() < 1e-6), "nothing before");
+        adopt_at_1k(&mut e, &p, &q, &mut cache);
+        e.process(&mut out[2 * 1000..]);
+        for i in [1020, 1200, 1499] {
+            assert!(out[2 * i] > 0.01, "playing at frame {i}: {}", out[2 * i]);
+            assert!((out[2 * i] - want[2 * i]).abs() < 2e-3, "at frame {i}: {} where it'd be {}", out[2 * i], want[2 * i]);
+        }
+        let mut hits = q.clone();
+        hits.groups[0].patterns[0].notes[0].length = 240;
+        let mut e = loop_engine(&p, &mut cache);
+        let mut out = vec![0f32; 2 * 1200];
+        e.process(&mut out[..2 * 100]);
+        adopt_at_1k(&mut e, &p, &hits, &mut cache);
+        e.process(&mut out[2 * 100..]);
+        assert!(out.iter().all(|x| x.abs() < 1e-6), "a hit isn't joined late");
+    }
+
+    /// The group switched mid-bar to another pattern with a loop of its own: the new
+    /// pattern's loop is joined where it would be and plays on (the old pattern's long
+    /// samples stop; the one just joined isn't among them).
+    #[test]
+    fn a_loop_joined_on_a_pattern_switch_plays_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = loop_project(dir.path(), true);
+        let mut other = p.groups[0].patterns[0].clone();
+        other.slot = 1;
+        other.notes[0].pitch = 62;
+        p.groups[0].patterns.push(other);
+        let mut q = p.clone();
+        q.scenes[0].patterns = vec![(0, 1)];
+        let mut cache = SampleCache::default();
+        let mut e = loop_engine(&p, &mut cache);
+        let mut out = vec![0f32; 2 * 1000];
+        e.process(&mut out);
+        adopt_at_1k(&mut e, &p, &q, &mut cache);
+        let mut out = vec![0f32; 2 * 500];
+        e.process(&mut out);
+        assert_eq!(e.sounds[0][0].as_ref().unwrap().voices(), 1, "the new pattern's loop plays");
+        assert!(out[2 * 499].abs() > 0.01, "and is heard: {}", out[2 * 499]);
     }
     #[test]
     fn beat_grace_catches_on_beat_unmute_and_pattern_switch_without_double_firing() {
@@ -8425,6 +9163,100 @@ mod tests {
         let onsets: Vec<usize> = (0..6000).filter(|&i| out[i * 2] > 0.5).collect();
         assert_eq!(onsets, [0, 500, 1000, 1500, 2000, 3000, 4000, 5000]);
         assert_eq!((e.mode(), e.queued()), (Mode::Scene(1), None));
+    }
+
+    /// `project()` plus group 1 with a silent pattern `len` ticks long, in scene 0.
+    fn with_odd_pattern(len: i64) -> Project {
+        let mut p = project();
+        p.groups.push(Group { patterns: vec![Pattern { length: len, ..Default::default() }], ..Default::default() });
+        p.scenes[0].patterns.push((1, 0));
+        p
+    }
+
+    /// A 1-bar and a 1:0:2 pattern each loop by themselves, as in Maschine's Ideas view:
+    /// the scene repeats when they line up again (9 bars), not when the longer one ends.
+    #[test]
+    fn a_scenes_patterns_loop_by_themselves() {
+        let odd = 4 * PPQ + 2 * PPQ / 4;
+        let mut p = with_odd_pattern(odd);
+        p.groups[1].patterns[0].notes = vec![Note {
+            expr: None,
+            sound: 0,
+            position: 0,
+            length: 240,
+            pitch: 60,
+            velocity: 127,
+            probability: 100,
+            ratchet: Default::default(),
+        }];
+        let t = timeline(&p, Mode::Scene(0));
+        assert_eq!((t.length, t.switch_every), (9 * 4 * PPQ, odd));
+        let at = |g: usize| t.events.iter().filter(|e| e.group == g).map(|e| e.tick).collect::<Vec<_>>();
+        assert_eq!(at(0), (0..36).map(|i| i * PPQ).collect::<Vec<_>>(), "the bar's quarters, every bar");
+        assert_eq!(at(1), (0..8).map(|i| i * odd).collect::<Vec<_>>());
+        // Lengths that would line up only after more than MAX_CYCLE_BARS: the longest sets it.
+        let p = with_odd_pattern(4 * PPQ + 1);
+        let t = timeline(&p, Mode::Scene(0));
+        assert_eq!((t.length, t.switch_every), (4 * PPQ + 1, 4 * PPQ + 1));
+        // Song sections still start every pattern from the top.
+        let mut p = with_odd_pattern(odd);
+        p.sections = vec![Section { scene: Some(0), length: odd, auto: true }];
+        assert_eq!(timeline(&p, Mode::Arrangement).length, odd);
+    }
+
+    /// Playing, the 1-bar pattern goes on past the 1:0:2 one's end: no restart there.
+    #[test]
+    fn a_shorter_pattern_doesnt_start_over_with_the_longest() {
+        let p = with_odd_pattern(4 * PPQ + 2 * PPQ / 4);
+        // 120 BPM at 1 kHz: a quarter is 500 frames, the 1:0:2 pattern 2250.
+        let mut e = click_engine_for(&p, 1000);
+        e.jump(&p, Mode::Scene(0));
+        e.looping = true;
+        let mut out = vec![0f32; 2 * 5000];
+        e.process(&mut out);
+        let onsets: Vec<usize> = (0..5000).filter(|&i| out[i * 2] > 0.5).collect();
+        assert_eq!(onsets, (0..10).map(|i| i * 500).collect::<Vec<_>>());
+    }
+
+    /// A launched scene still starts where the playing scene's longest pattern ends, not
+    /// at the end of the longer cycle its patterns make.
+    #[test]
+    fn a_launched_scene_starts_when_the_longest_pattern_ends() {
+        let mut p = with_odd_pattern(4 * PPQ + 2 * PPQ / 4);
+        let halves = (0..2)
+            .map(|i| Note {
+                expr: None,
+                sound: 0,
+                position: i * 2 * PPQ,
+                length: 240,
+                pitch: 60,
+                velocity: 127,
+                probability: 100,
+                ratchet: Default::default(),
+            })
+            .collect();
+        p.groups[0].patterns.push(Pattern { length: 4 * PPQ, notes: halves, ..Default::default() });
+        p.scenes.push(Scene { patterns: vec![(0, 1)], ..Default::default() });
+        let mut e = click_engine_for(&p, 1000);
+        e.jump(&p, Mode::Scene(0));
+        e.looping = true;
+        let mut out = vec![0f32; 2 * 6000];
+        e.process(&mut out[..2 * 700]);
+        e.queue(&p, Mode::Scene(1));
+        e.process(&mut out[2 * 700..]);
+        let onsets: Vec<usize> = (0..6000).filter(|&i| out[i * 2] > 0.5).collect();
+        assert_eq!(onsets, [0, 500, 1000, 1500, 2000, 2250, 3250, 4250, 5250], "scene 1 from 2250");
+        assert_eq!((e.mode(), e.queued()), (Mode::Scene(1), None));
+        // Queued in the second pass of the 1:0:2 pattern: at its end, 4500.
+        let mut e = click_engine_for(&p, 1000);
+        e.jump(&p, Mode::Scene(0));
+        e.looping = true;
+        let mut out = vec![0f32; 2 * 6000];
+        e.process(&mut out[..2 * 3000]);
+        e.queue(&p, Mode::Scene(1));
+        e.process(&mut out[2 * 3000..]);
+        let onsets: Vec<usize> = (0..6000).filter(|&i| out[i * 2] > 0.5).collect();
+        assert_eq!(onsets, [0, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5500], "scene 1 from 4500");
     }
 
     #[test]
@@ -8770,6 +9602,12 @@ mod tests {
                 x_fade: (rnd() * 3000.0) as usize,
                 fade_in: 0,
                 fade_out: 0,
+                sync: None,
+                lanes: None,
+                reverse: false,
+                once: false,
+                tail_ms: 0.0,
+                layer: None,
             };
             let mut fresh = SamplerRt::new(sampler::Settings::new(&model, sr), vec![zone], (1.0, 1.0), sr);
             fresh.adopt(old);
@@ -9178,6 +10016,496 @@ mod tests {
         }
         w.finalize().unwrap();
         path
+    }
+
+    /// A 120 BPM song whose sound 0 is a New Sampler playing a 4-beat 94 BPM loop in
+    /// `mode` (its zone told so, as analysis does). With the folder holding the loop.
+    fn new_sampler_project(mode: deckard_model::new_sampler::PlayMode) -> (tempfile::TempDir, Project, usize) {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = project();
+        p.tempo = 120.0;
+        let path: String = loop_wav(tmp.path(), 94.0, 4.0).to_string_lossy().into();
+        let frames = (48_000.0 * 60.0 / 94.0 * 4.0) as usize;
+        let snd = &mut p.groups[0].sounds[0];
+        snd.new_sampler = Some(Default::default());
+        let z = &mut snd.sampler.as_mut().unwrap().zones[0];
+        z.sample = deckard_model::SampleRef { kind: 0, path: path.clone(), ..Default::default() };
+        z.play_range = (0, frames as i64 - 1);
+        z.meta = Some(deckard_model::new_sampler::ZoneMeta { file: path, mode, bpm: Some(94.0), beats: Some(4.0), ..Default::default() });
+        (tmp, p, frames)
+    }
+
+    /// A New Sampler's layer zones get their envelopes and windows, and only the soloed
+    /// one is heard; the sound gets its morph.
+    #[test]
+    fn a_layered_sound_builds_layer_zones() {
+        use deckard_model::layers::{Layer, Morph};
+        let (_tmp, mut p, _) = new_sampler_project(deckard_model::new_sampler::PlayMode::Repitch);
+        let snd = &mut p.groups[0].sounds[0];
+        snd.new_sampler.as_mut().unwrap().morph = Morph { on: true, position: 0.25, ..Default::default() };
+        let smp = snd.sampler.as_mut().unwrap();
+        let mut second = smp.zones[0].clone();
+        smp.zones[0].meta.as_mut().unwrap().layer = Some(Layer { attack: 0.5, ..Default::default() });
+        second.meta.as_mut().unwrap().layer = Some(Layer { solo: true, window: [0.0, 0.5, 0.5, 1.0], ..Default::default() });
+        smp.zones.push(second);
+        let mut cache = SampleCache::default();
+        let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        let rt = e.sounds[0][0].as_ref().unwrap();
+        let (a, b) = (rt.zones[0].layer.unwrap(), rt.zones[1].layer.unwrap());
+        assert!(!a.on && b.on, "the soloed layer only");
+        assert_eq!(a.env.attack, 24_000);
+        assert_eq!(b.window, [0.0, 0.5, 0.5, 1.0]);
+        assert!((rt.morph_pos() - 0.25).abs() < 1e-6);
+        assert_eq!(e.morph_position(0, 0), None, "nothing sounds");
+        e.sounds[0][0].as_mut().unwrap().note_on(1, 60, 100, &sampler::Context { tempo: 120.0, beats: 0.0, live: false });
+        assert!(e.morph_position(0, 0).is_some());
+        // A sound without layers has no morph.
+        let (_tmp, plain, _) = new_sampler_project(deckard_model::new_sampler::PlayMode::Repitch);
+        let (e, _) = Engine::new(&plain, None, 48_000, Mode::Arrangement, &mut cache);
+        assert!(e.sounds[0][0].as_ref().unwrap().zones[0].layer.is_none());
+    }
+
+    /// A layer whose file is missing is left out; the others play, their windows and
+    /// mutes as they were.
+    #[test]
+    fn a_missing_layer_file_leaves_the_rest() {
+        use deckard_model::layers::Layer;
+        let (_tmp, mut p, _) = new_sampler_project(deckard_model::new_sampler::PlayMode::Repitch);
+        let smp = p.groups[0].sounds[0].sampler.as_mut().unwrap();
+        let w = deckard_model::layers::spread(3, Default::default());
+        let first = smp.zones[0].clone();
+        smp.zones = (0..3)
+            .map(|k| {
+                let mut z = first.clone();
+                z.meta.as_mut().unwrap().layer = Some(Layer { window: w[k], mute: k == 2, ..Default::default() });
+                z
+            })
+            .collect();
+        smp.zones[1].sample.path = "/nowhere/gone.wav".into();
+        let mut cache = SampleCache::default();
+        let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        let rt = e.sounds[0][0].as_ref().unwrap();
+        assert_eq!(rt.zones.len(), 2);
+        let (a, c) = (rt.zones[0].layer.unwrap(), rt.zones[1].layer.unwrap());
+        assert_eq!((a.window, c.window), (w[0], w[2]));
+        assert!(a.on && !c.on, "the third is still the muted one");
+    }
+
+    fn zone0(e: &Engine) -> &sampler::ZoneRt {
+        &e.sounds[0][0].as_ref().unwrap().zones[0]
+    }
+
+    /// A Sync zone is stretched as it plays: it stays its file, asks for no render, and a
+    /// change of tempo is only the engine's (a second at 141 BPM goes through half as much
+    /// again of a 94 BPM loop, at its pitch).
+    #[test]
+    fn a_sync_zone_is_stretched_as_it_plays() {
+        let (_tmp, mut p, frames) = new_sampler_project(deckard_model::new_sampler::PlayMode::Sync);
+        p.tempo = 141.0;
+        let mut cache = SampleCache::default();
+        let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        assert!(cache.wanted_renders().is_empty(), "nothing made ahead");
+        let z = zone0(&e);
+        assert_eq!(z.sample.frames.len(), frames, "the file itself");
+        assert_eq!(z.sync.as_ref().and_then(|s| s.live), Some(0.0));
+        e.sequencing = false;
+        e.note_hold(0, 0, 60, 100);
+        let mut out = vec![0f32; 2 * 4800];
+        let mut loud = 0f32;
+        for _ in 0..10 {
+            e.process(&mut out);
+            loud = out.iter().fold(loud, |m, v| m.max(v.abs()));
+        }
+        assert!(loud > 0.01, "it sounds");
+        let at = e.sounds[0][0].as_ref().unwrap().play_position(0).unwrap() as f64;
+        assert!((at - 72_000.0).abs() < 3000.0, "{at}");
+        // The zone's own speed: at half, half as far.
+        p.groups[0].sounds[0].sampler.as_mut().unwrap().zones[0].meta.as_mut().unwrap().speed = 0.5;
+        let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        e.sequencing = false;
+        e.note_hold(0, 0, 60, 100);
+        for _ in 0..10 {
+            e.process(&mut out);
+        }
+        let at = e.sounds[0][0].as_ref().unwrap().play_position(0).unwrap() as f64;
+        assert!((at - 36_000.0).abs() < 3000.0, "{at}");
+    }
+
+    /// A pattern's note sounding when the tempo changes ends where it's written, not at
+    /// the frame its end fell on at the tempo it began at (a 2-beat note of a 4-beat
+    /// loop: its end is the note's, not the sample's).
+    #[test]
+    fn a_note_sounding_through_a_tempo_change_keeps_its_length() {
+        let (_tmp, mut p, _) = new_sampler_project(deckard_model::new_sampler::PlayMode::Sync);
+        p.tempo = 240.0;
+        let smp = p.groups[0].sounds[0].sampler.as_mut().unwrap();
+        for (k, v) in [("envelope_type", 2.0), ("volume_envelope/sustain", 1.0), ("volume_envelope/release", 0.0)] {
+            smp.params.insert(k.into(), v);
+        }
+        let pat = &mut p.groups[0].patterns[0];
+        pat.notes.truncate(1);
+        pat.notes[0].length = 2 * PPQ;
+        let mut cache = SampleCache::default();
+        let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Pattern(0, 0), &mut cache);
+        let voices = |e: &Engine| e.sounds[0][0].as_ref().unwrap().voices();
+        // A beat at 240 (12,000 frames): the note has a beat to go.
+        play_frames(&mut e, 12_000);
+        assert_eq!(voices(&e), 1);
+        p.tempo = 120.0;
+        e.update(&p, None, &mut cache);
+        // Three quarters of a beat at 120: past where it ended at 240 (12,000 on).
+        play_frames(&mut e, 18_000);
+        assert_eq!(voices(&e), 1, "still held in its second beat");
+        play_frames(&mut e, 12_000);
+        assert_eq!(voices(&e), 0, "over at its end");
+        // The tempo raised: it ends sooner, with its beats.
+        let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Pattern(0, 0), &mut cache);
+        play_frames(&mut e, 12_000);
+        p.tempo = 240.0;
+        e.update(&p, None, &mut cache);
+        // A beat and a half to go: 18,000 frames at 240 (36,000 at 120).
+        play_frames(&mut e, 12_000);
+        assert_eq!(voices(&e), 1, "in its second beat");
+        play_frames(&mut e, 12_000);
+        assert_eq!(voices(&e), 0, "over at its end, not a beat and a half on");
+    }
+
+    /// A Sync note sounding when the tempo changes stays with the song: its beats fall
+    /// on the song's after the change as before (the stretcher, fed ahead for the tempo
+    /// it began at, isn't left ahead of the song or behind it).
+    #[test]
+    fn a_stretched_note_stays_on_the_beat_through_a_tempo_change() {
+        // Where the hits of an 8-beat 94 BPM loop (a burst on each beat) are heard.
+        let onsets = |from: f64, to: f64, first: usize| -> Vec<i64> {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("hits.wav");
+            let spec = hound::WavSpec { channels: 2, sample_rate: 48_000, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+            let mut w = hound::WavWriter::create(&path, spec).unwrap();
+            let beat = 48_000.0 * 60.0 / 94.0;
+            let frames = (beat * 8.0) as usize;
+            for i in 0..frames {
+                let into = i as f64 % beat;
+                let v = if into < 480.0 { (i as f32 / 48_000.0 * 2000.0 * std::f32::consts::TAU).sin() * 0.8 } else { 0.0 };
+                w.write_sample(v).unwrap();
+                w.write_sample(v).unwrap();
+            }
+            w.finalize().unwrap();
+            let path: String = path.to_string_lossy().into();
+            let mut p = project();
+            p.tempo = from;
+            let snd = &mut p.groups[0].sounds[0];
+            snd.new_sampler = Some(Default::default());
+            let z = &mut snd.sampler.as_mut().unwrap().zones[0];
+            z.sample = deckard_model::SampleRef { kind: 0, path: path.clone(), ..Default::default() };
+            z.play_range = (0, frames as i64 - 1);
+            z.meta = Some(deckard_model::new_sampler::ZoneMeta {
+                file: path,
+                mode: deckard_model::new_sampler::PlayMode::Sync,
+                bpm: Some(94.0),
+                beats: Some(8.0),
+                ..Default::default()
+            });
+            let mut cache = SampleCache::default();
+            let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+            e.sequencing = false;
+            e.note_hold(0, 0, 60, 100);
+            let mut heard = Vec::new();
+            let mut out = vec![0f32; 2 * 64];
+            let mut run = |e: &mut Engine, n: usize, heard: &mut Vec<f32>| {
+                for _ in 0..n / 64 {
+                    e.process(&mut out);
+                    heard.extend(out.chunks(2).map(|f| f[0].abs()));
+                }
+            };
+            run(&mut e, first, &mut heard);
+            p.tempo = to;
+            e.update(&p, None, &mut cache);
+            run(&mut e, 200_000, &mut heard);
+            // A hit: loud after 2,000 quiet frames.
+            let mut at = Vec::new();
+            let mut quiet = 2000;
+            for (i, v) in heard.iter().enumerate() {
+                if *v > 0.2 {
+                    if quiet >= 2000 {
+                        at.push(i as i64);
+                    }
+                    quiet = 0;
+                } else {
+                    quiet += 1;
+                }
+            }
+            at
+        };
+        // Two beats at 188 (15,319 frames each, 30,656 in whole blocks), then 94: the
+        // third beat on comes every 30,638 frames from there.
+        let slow = onsets(188.0, 94.0, 30_656);
+        for (k, want) in [(2, 30_656 - 18), (3, 30_656 - 18 + 30_638), (4, 30_656 - 18 + 2 * 30_638)] {
+            assert!((slow[k] - want).abs() < 600, "188 to 94, beat {}: {} for {want} ({slow:?})", k + 1, slow[k]);
+        }
+        // A beat at 94 (30,656 frames: 18 into its second), then 188.
+        let fast = onsets(94.0, 188.0, 30_656);
+        for (k, want) in [(2, 30_656 + 15_310), (3, 30_656 + 15_310 + 15_319), (4, 30_656 + 15_310 + 2 * 15_319)] {
+            assert!((fast[k] - want).abs() < 600, "94 to 188, beat {}: {} for {want} ({fast:?})", k + 1, fast[k]);
+        }
+    }
+
+    /// A start point (a zone that plays to its file's end) set to reverse plays from
+    /// there back to the file's beginning; a slice with an end of its own, its own frames.
+    #[test]
+    fn a_reversed_start_point_plays_back_to_the_beginning() {
+        let (_tmp, mut p, frames) = new_sampler_project(deckard_model::new_sampler::PlayMode::Repitch);
+        let half = frames as i64 / 2;
+        let z = &mut p.groups[0].sounds[0].sampler.as_mut().unwrap().zones[0];
+        z.play_range = (half, frames as i64 - 1);
+        z.meta.as_mut().unwrap().reverse = true;
+        let mut cache = SampleCache::default();
+        let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        assert!(zone0(&e).reverse);
+        assert_eq!(zone0(&e).play, (0, half as usize));
+        p.groups[0].sounds[0].sampler.as_mut().unwrap().zones[0].play_range = (half, frames as i64 - 100);
+        let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        assert_eq!(zone0(&e).play, (half as usize, frames - 99));
+    }
+
+    /// A slice's one-shot reaches the engine, and a reversed start point that loops keeps
+    /// its place (its loop is what plays backwards).
+    #[test]
+    fn a_slice_is_a_one_shot_or_a_loop() {
+        let (_tmp, mut p, frames) = new_sampler_project(deckard_model::new_sampler::PlayMode::Repitch);
+        let half = frames as i64 / 2;
+        let z = &mut p.groups[0].sounds[0].sampler.as_mut().unwrap().zones[0];
+        z.play_range = (half, frames as i64 - 1);
+        z.meta.as_mut().unwrap().once = true;
+        let mut cache = SampleCache::default();
+        let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        assert!(zone0(&e).once);
+        assert_eq!((zone0(&e).tail_ms, e.sounds[0][0].as_ref().unwrap().motion), (0.0, deckard_model::new_sampler::Motion::Off));
+        // Its tail and the sound's Slice Motion reach the engine too.
+        p.groups[0].sounds[0].sampler.as_mut().unwrap().zones[0].meta.as_mut().unwrap().tail = 250.0;
+        p.groups[0].sounds[0].new_sampler.as_mut().unwrap().motion = deckard_model::new_sampler::Motion::Random;
+        let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        assert_eq!((zone0(&e).tail_ms, e.sounds[0][0].as_ref().unwrap().motion), (250.0, deckard_model::new_sampler::Motion::Random));
+        let z = &mut p.groups[0].sounds[0].sampler.as_mut().unwrap().zones[0];
+        z.meta.as_mut().unwrap().reverse = true;
+        z.loop_active = true;
+        z.loop_range = (half, half + 999);
+        let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        assert_eq!(zone0(&e).play, (half as usize, frames));
+        assert_eq!(zone0(&e).looped, Some((half as usize, half as usize + 1000)));
+    }
+
+    /// A Sync zone plays its own sample in time (repitched) and asks for its render;
+    /// given it, it plays the render: as long as 4 beats at 120, in time at 120.
+    #[test]
+    fn a_sync_zone_asks_then_plays_its_render() {
+        let (_tmp, p, frames) = new_sampler_project(deckard_model::new_sampler::PlayMode::Sync);
+        let mut cache = SampleCache::default();
+        cache.stretch_ahead(true);
+        let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        let z = zone0(&e);
+        assert_eq!((z.sample.frames.len(), z.sync.as_ref().unwrap().tempo), (frames, 94.0), "its own sample, in time at 94");
+        let jobs = cache.wanted_renders();
+        assert_eq!(jobs.len(), 1);
+        let (e2, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        drop(e2);
+        assert!(cache.wanted_renders().is_empty(), "asked once until made");
+        for j in &jobs {
+            let r = j.run();
+            cache.add_render(j, r);
+        }
+        let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        let z = zone0(&e);
+        let want = (frames as f64 * 94.0 / 120.0).round() as usize;
+        assert_eq!((z.sample.frames.len(), z.play), (want, (0, want)));
+        assert_eq!(z.sync.as_ref().unwrap().tempo, 120.0);
+        // Another tempo asks for another render.
+        let mut faster = p.clone();
+        faster.tempo = 130.0;
+        let (_e, _) = Engine::new(&faster, None, 48_000, Mode::Arrangement, &mut cache);
+        assert_eq!(cache.wanted_renders().len(), 1);
+    }
+
+    /// An export makes the renders it needs before it plays: none are left wanted, and
+    /// what it plays is the stretched loop.
+    #[test]
+    fn an_export_waits_for_its_renders() {
+        for mode in [deckard_model::new_sampler::PlayMode::Sync, deckard_model::new_sampler::PlayMode::Keys] {
+            let (_tmp, p, _) = new_sampler_project(mode);
+            let mut cache = SampleCache::default();
+            cache.stretch_ahead(true);
+            let fmt = export::Format { rate: 48_000, ..Default::default() };
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            export::render(&p, None, Mode::Arrangement, 0.0, &fmt, &mut cache, &cancel, &mut |_| {}).unwrap();
+            assert!(cache.wanted_renders().is_empty(), "nothing still wanted");
+            assert!(!cache.renders.is_empty(), "the render was made");
+            let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+            assert_eq!(zone0(&e).sync.as_ref().unwrap().tempo, 120.0, "the engine it played had the render");
+            assert!(cache.wanted_renders().is_empty());
+        }
+    }
+
+    /// A zone's stem lanes are loaded with it; in Sync each is stretched as the sample
+    /// is (asked for with it; with a lane muted the zone waits for them all).
+    #[test]
+    fn stem_lanes_load_and_stretch_with_the_zone() {
+        use deckard_model::new_sampler::{PlayMode, StemLane};
+        for mode in [PlayMode::Repitch, PlayMode::Sync] {
+            let (tmp, mut p, frames) = new_sampler_project(mode);
+            let stem = |name: &str| -> String {
+                let path = tmp.path().join(name);
+                edit::write_wav(&path, &Sample { rate: 48_000, frames: vec![[0.1; 2]; frames] }).unwrap();
+                path.to_string_lossy().into()
+            };
+            let meta = p.groups[0].sounds[0].sampler.as_mut().unwrap().zones[0].meta.as_mut().unwrap();
+            meta.stems[0] = Some(StemLane { mute: true, ..StemLane::new(stem("d.wav")) });
+            meta.stems[3] = Some(StemLane::new(stem("l.wav")));
+            meta.stems[1] = Some(StemLane::new("/nowhere/v.wav".into()));
+            let mut cache = SampleCache::default();
+            cache.stretch_ahead(true);
+            let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+            let l = zone0(&e).lanes.clone().expect("lanes");
+            assert_eq!(l.samples.iter().map(Option::is_some).collect::<Vec<_>>(), [true, false, false, true], "a missing file is no lane");
+            assert_eq!(l.levels, [0.0, 0.0, 0.0, 1.0]);
+            assert_eq!(l.samples[0].as_ref().unwrap().frames.len(), frames);
+            if mode == PlayMode::Sync {
+                let jobs = cache.wanted_renders();
+                assert_eq!(jobs.len(), 3, "the sample's render and a render a lane");
+                // The sample's comes first: a lane is muted, so the zone waits for its
+                // lanes' and plays as it is till then (never whole).
+                cache.add_render(&jobs[0], jobs[0].run());
+                let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+                let z = zone0(&e);
+                assert_eq!(z.sample.frames.len(), frames, "not the render yet");
+                assert_eq!(z.lanes.as_ref().expect("its lanes").levels, [0.0, 0.0, 0.0, 1.0]);
+                assert!(cache.wanted_renders().is_empty(), "asked for once");
+                for j in &jobs[1..] {
+                    cache.add_render(j, j.run());
+                }
+                let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+                let z = zone0(&e);
+                let l = z.lanes.as_ref().expect("stretched lanes");
+                assert_eq!(l.samples[3].as_ref().unwrap().frames.len(), z.sample.frames.len(), "as long as the zone's render");
+                assert_eq!(l.levels, [0.0, 0.0, 0.0, 1.0]);
+            }
+        }
+    }
+
+    /// A zone stretched as it plays: its playhead goes on to the end of the sample, as
+    /// the sound does (the stretcher gives its last frames after it's fed the last).
+    #[test]
+    fn a_stretched_zones_playhead_reaches_the_end() {
+        let (_tmp, p, frames) = new_sampler_project(deckard_model::new_sampler::PlayMode::Sync);
+        let mut cache = SampleCache::default();
+        let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        e.sequencing = false;
+        e.note_hold(0, 0, 60, 100);
+        let mut out = vec![0f32; 2 * 240];
+        let (mut last, mut blocks) = (0usize, 0);
+        loop {
+            e.process(&mut out);
+            match e.zone_position(0, 0, 0) {
+                Some(at) => {
+                    assert!(at + 600 >= last, "it goes on: {at} after {last}");
+                    last = last.max(at);
+                }
+                None if last > 0 => break,
+                None => {}
+            }
+            blocks += 1;
+            assert!(blocks < 4000, "it ends");
+        }
+        assert!(last + 1000 >= frames, "the playhead stopped at {last} of {frames}");
+    }
+
+    /// A Sync zone playing the second half of its file: the playhead is in the sample's
+    /// frames (from the start marker on), not the render's (from 0), before the render
+    /// comes and after.
+    #[test]
+    fn a_sync_zones_playhead_is_in_the_samples_frames() {
+        let (_tmp, mut p, frames) = new_sampler_project(deckard_model::new_sampler::PlayMode::Sync);
+        let half = frames as i64 / 2;
+        p.groups[0].sounds[0].sampler.as_mut().unwrap().zones[0].play_range = (half, frames as i64 - 1);
+        let mut cache = SampleCache::default();
+        cache.stretch_ahead(true);
+        let at = |cache: &mut SampleCache, blocks: usize| {
+            let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, cache);
+            e.sequencing = false;
+            e.note_hold(0, 0, 60, 100);
+            let mut out = vec![0f32; 2 * 4800];
+            for _ in 0..blocks {
+                e.process(&mut out);
+            }
+            e.zone_position(0, 0, 0).expect("it plays") as i64
+        };
+        let early = at(&mut cache, 1);
+        assert!((half..half + 9000).contains(&early), "repitched: {early} from {half}");
+        for j in cache.wanted_renders() {
+            cache.add_render(&j, j.run());
+        }
+        // 0.1 s of the render (4800 frames at 120) is 120/94 as much of the sample.
+        let one = at(&mut cache, 1);
+        assert!((one - half - 6128).abs() < 300, "rendered: {one} from {half}");
+        let three = at(&mut cache, 3);
+        assert!((three - half - 3 * 6128).abs() < 400, "rendered: {three} from {half}");
+    }
+
+    /// Chops of one sample, each from its own start to the sample's end: one render
+    /// between them, each zone playing it from its own place.
+    #[test]
+    fn chops_of_a_sample_share_a_render() {
+        let (_tmp, mut p, frames) = new_sampler_project(deckard_model::new_sampler::PlayMode::Sync);
+        let zones = &mut p.groups[0].sounds[0].sampler.as_mut().unwrap().zones;
+        let mut chop = zones[0].clone();
+        chop.play_range = (frames as i64 / 2, frames as i64 - 1);
+        (chop.key_range, chop.root_key) = ((61, 61), 61);
+        zones[0].key_range = (60, 60);
+        zones.push(chop);
+        let mut cache = SampleCache::default();
+        cache.stretch_ahead(true);
+        let _ = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        let jobs = cache.wanted_renders();
+        assert_eq!(jobs.len(), 1, "one render for both");
+        assert_eq!(jobs[0].key.range, (0, frames));
+        cache.add_render(&jobs[0], jobs[0].run());
+        let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        assert!(cache.wanted_renders().is_empty());
+        let z = &e.sounds[0][0].as_ref().unwrap().zones;
+        assert!(Arc::ptr_eq(&z[0].sample, &z[1].sample));
+        let len = z[0].sample.frames.len();
+        assert_eq!(z[0].play, (0, len));
+        assert_eq!(z[1].play.1, len);
+        assert!(z[1].play.0.abs_diff(len / 2) <= 2, "{:?} of {len}", z[1].play);
+    }
+
+    /// Keys asks for the notes' renders around the root, nearest first.
+    #[test]
+    fn keys_asks_for_its_notes() {
+        let (_tmp, p, _) = new_sampler_project(deckard_model::new_sampler::PlayMode::Keys);
+        let mut cache = SampleCache::default();
+        cache.stretch_ahead(true);
+        let _ = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        let base = cache.wanted_renders();
+        assert_eq!(base.len(), 1, "the root's render first");
+        cache.add_render(&base[0], base[0].run());
+        let _ = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        let notes = cache.wanted_renders();
+        assert_eq!(notes.len(), 24);
+        let shifts: Vec<f64> = notes.iter().take(3).map(|j| j.semitones).collect();
+        assert_eq!(shifts, [1.0, -1.0, 2.0]);
+    }
+
+    /// Repitch zones, and a plain Sampler's zones whatever their meta, play as before.
+    #[test]
+    fn repitch_zones_are_untouched() {
+        let (_tmp, p, frames) = new_sampler_project(deckard_model::new_sampler::PlayMode::Repitch);
+        let mut cache = SampleCache::default();
+        let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        assert!(zone0(&e).sync.is_none() && zone0(&e).sample.frames.len() == frames);
+        let (_tmp, mut p, _) = new_sampler_project(deckard_model::new_sampler::PlayMode::Sync);
+        p.groups[0].sounds[0].new_sampler = None;
+        let (e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        assert!(zone0(&e).sync.is_none());
+        assert!(cache.wanted_renders().is_empty());
     }
 
     /// A 120 BPM song whose sound 0 is an Audio plug-in playing a 4-beat 94 BPM loop
@@ -9796,6 +11124,41 @@ mod tests {
         drop(e.adopt(fresh, &plain));
         blocks(&mut e, 1);
         assert!((f64::from(cutoff(&e)) - knob).abs() < 1e-4, "{} vs {knob}", cutoff(&e));
+    }
+
+    /// The mod wheel (CC 1 coming in to the sound) moves the Sampler's cutoff, and stays
+    /// where it was left; another sound's wheel doesn't count.
+    #[test]
+    fn the_mod_wheel_moves_the_samplers_cutoff() {
+        use deckard_model::mod_matrix::ModSource;
+        let (_tmp, mut p) = eight_project();
+        let mut r = route(ModSource::ModWheel, 0, "Sampler", field("cutoff"));
+        (r.low, r.high) = (0.2, 0.8);
+        p.groups[0].sounds[1].mod_routes = vec![r];
+        let mut cache = SampleCache::default();
+        let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        let cutoff = |e: &Engine| e.sounds[0][1].as_ref().unwrap().settings_cutoff();
+        let wheel = |e: &mut Engine, sound, value| {
+            let kind = MidiKind::Controller { number: 1, value };
+            e.schedule(0, Live::ControlIn { group: 0, sound, kind, thru: false, record: false });
+            blocks(e, 2);
+        };
+        blocks(&mut e, 2);
+        assert!((cutoff(&e) - 0.2).abs() < 1e-4, "at rest: Low ({})", cutoff(&e));
+        wheel(&mut e, 1, 127);
+        assert!((cutoff(&e) - 0.8).abs() < 1e-4, "{}", cutoff(&e));
+        blocks(&mut e, 20);
+        assert!((cutoff(&e) - 0.8).abs() < 1e-4, "it stays: {}", cutoff(&e));
+        wheel(&mut e, 0, 0);
+        assert!((cutoff(&e) - 0.8).abs() < 1e-4, "another sound's wheel: {}", cutoff(&e));
+        wheel(&mut e, 1, 0);
+        assert!((cutoff(&e) - 0.2).abs() < 1e-4, "{}", cutoff(&e));
+        // A rebuilt engine (an edit) keeps the wheel where it is.
+        wheel(&mut e, 1, 127);
+        let (fresh, _) = Engine::new_after(&p, Some((&p, &[])), None, 48_000, Mode::Arrangement, &mut cache);
+        drop(e.adopt(fresh, &p));
+        blocks(&mut e, 2);
+        assert!((cutoff(&e) - 0.8).abs() < 1e-4, "after an edit: {}", cutoff(&e));
     }
 
     /// Pressure moves a drum synth's parameter.
@@ -11741,6 +13104,53 @@ mod tests {
         assert!(held <= 10f32.powf(-40.05 / 20.0) * 1.01, "the new ceiling holds it down: {held}");
     }
 
+    #[test]
+    fn internal_eq_spectrum_captures_the_selected_slot_before_and_after_processing() {
+        let board = Arc::new(eq_spectrum::EqSpectrum::default());
+        let transport = Transport { tempo: 120.0, playing: false, quarters: 0.0, numerator: 4, denominator: 4 };
+        let rate = 48_000.0;
+        let params = vec![("output_gain".into(), -0.5)];
+        let frames = deckard_plugins::spectrum::FRAMES;
+        for (route, owner) in [
+            (SpectrumChain::Sound(1, 2), Owner::Chain(1, 2, 3)),
+            (SpectrumChain::Group(1), Owner::Group(1, 3)),
+            (SpectrumChain::Master, Owner::Master(3)),
+        ] {
+            let fx = FxUnit::Internal {
+                class: "EQ".into(),
+                params: params.clone(),
+                fx: fx::make("EQ", &params, rate).unwrap(),
+                glide: glide::Glide::new(&params, rate),
+                modded: params.clone(),
+                hit: false,
+                modulated: false,
+            };
+            let mut chain = bare_chain(vec![Unit::new(fx, 3, Vec::new(), true)], rate);
+            chain.spectrum = Some((board.clone(), route));
+            let mut run = || {
+                for offset in (0..frames).step_by(128) {
+                    for i in 0..128 {
+                        let x = (std::f32::consts::TAU * (offset + i) as f32 / 64.0).sin() * 0.5;
+                        chain.l[i] = x;
+                        chain.r[i] = -x;
+                    }
+                    chain.run(128, &transport, &[], 0);
+                }
+            };
+            let mut other = board.watch(Owner::Master(7));
+            run();
+            assert!(other.receive().is_none());
+            let mut watched = board.watch(owner);
+            run();
+            let window = watched.receive().expect("the selected slot's window");
+            let peak = |channel| window.iter().map(|f| f[channel]).fold(0.0f32, f32::max);
+            assert!((peak(0) - 0.5).abs() < 0.001);
+            assert!((peak(1) - 0.5).abs() < 0.001);
+            assert!(peak(2) > 0.0 && peak(2) < 0.45, "the EQ attenuates the captured signal");
+            assert!((peak(2) - peak(3)).abs() < 0.001);
+        }
+    }
+
     /// An effect that keeps the last value of its first setting (as its output).
     struct LastSet(Arc<std::sync::Mutex<Vec<f64>>>);
     impl fx::Effect for LastSet {
@@ -11781,6 +13191,7 @@ mod tests {
             dr: vec![0.0; MAX_BLOCK],
             fade: 0,
             meters: None,
+            spectrum: None,
             tap: Vec::new(),
             sl: vec![0.0; MAX_BLOCK],
             sr: vec![0.0; MAX_BLOCK],
@@ -12048,6 +13459,7 @@ mod tests {
             params: &[],
             pages: &[],
             make: |_| Box::new(Duck),
+            scope: false,
         };
 
         let run = |on_group: bool, with_source: bool, sc_gain: f64| {
@@ -12478,6 +13890,7 @@ mod tests {
         params: &[],
         pages: &[],
         make: |_| Box::new(Split::default()),
+        scope: false,
     };
 
     static SPLIT_INSTRUMENT: deckard_plugins::native::Class = deckard_plugins::native::Class {
@@ -12487,11 +13900,12 @@ mod tests {
         params: &[],
         pages: &[],
         make: |_| Box::new(Split { instrument: true, ..Default::default() }),
+        scope: false,
     };
 
     pub(crate) fn split_plugin(class: &'static deckard_plugins::native::Class) -> Shared {
         let id = deckard_plugins::state::PluginId::parse(&class.plugin_id(), class.name).expect("an id");
-        Arc::new(Mutex::new(deckard_plugins::Plugin::native(class, id, class.name, 1000.0)))
+        deckard_plugins::Plugin::native(class, id, class.name, 1000.0).shared()
     }
 
     /// [`Split`] as an effect in `owner`'s slot of `p`, listening as the engine sets it.
@@ -12533,6 +13947,90 @@ mod tests {
 
     fn about(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-4
+    }
+
+    #[derive(Default)]
+    struct HeldTestInstrument(u128);
+
+    impl deckard_plugins::native::Engine for HeldTestInstrument {
+        fn set_param(&mut self, _: u32, _: f64) {}
+        fn note_on(&mut self, pitch: u8, _: u8) {
+            self.0 |= 1 << pitch;
+        }
+        fn note_off(&mut self, pitch: u8) {
+            self.0 &= !(1 << pitch);
+        }
+        fn reset(&mut self) {
+            self.0 = 0;
+        }
+        fn process(&mut self, l: &mut [f32], r: &mut [f32], _: &Transport) {
+            let level = self.0.count_ones() as f32 / 8.0;
+            l.fill(level);
+            r.fill(level);
+        }
+    }
+
+    static HELD_TEST_INSTRUMENT: deckard_plugins::native::Class = deckard_plugins::native::Class {
+        cid: [9; 16],
+        name: "Held Test Instrument",
+        instrument: true,
+        params: &[],
+        pages: &[],
+        make: |_| Box::<HeldTestInstrument>::default(),
+        scope: false,
+    };
+
+    // Hold the instance as the UI would. The timeout lets a blocking regression
+    // fail on its output instead of hanging the test suite.
+    fn with_editor_lock(plugin: &Shared, f: impl FnOnce()) {
+        std::thread::scope(|scope| {
+            let (ready, acquired) = std::sync::mpsc::channel();
+            let (done, release) = std::sync::mpsc::channel();
+            scope.spawn(move || {
+                let _lock = plugin.lock().unwrap();
+                ready.send(()).unwrap();
+                let _ = release.recv_timeout(std::time::Duration::from_secs(3));
+            });
+            acquired.recv().unwrap();
+            f();
+            let _ = done.send(());
+        });
+    }
+
+    #[test]
+    fn busy_instrument_keeps_input_running_and_releases_only_the_ended_notes() {
+        let mut e = split_engine(|_| {});
+        let plugin = split_plugin(&HELD_TEST_INSTRUMENT);
+        e.sounds[0][0] = None;
+        e.instruments[0][0] = Some(InstrumentRt::new(plugin.clone(), (1.0, 1.0), false));
+        e.note_hold(0, 0, 60, 127);
+        e.note_hold(0, 0, 72, 127);
+        assert!(about(split_block(&mut e, 0.25).0.0, 0.5));
+        with_editor_lock(&plugin, || {
+            e.note_release(0, 0, 60); // Preserve this off.
+            e.note_hold(0, 0, 65, 127); // A missed on never plays late.
+            assert!(about(split_block(&mut e, 0.25).0.0, 0.25));
+        });
+        assert!(about(split_block(&mut e, 0.25).0.0, 0.375), "only pitch 72 remains");
+        with_editor_lock(&plugin, || {
+            e.stop();
+            assert!(about(split_block(&mut e, 0.25).0.0, 0.25));
+        });
+        assert!(about(split_block(&mut e, 0.25).0.0, 0.25), "stop releases the remaining pitch");
+    }
+
+    #[test]
+    fn busy_master_effect_passes_the_dry_mix() {
+        let mut e = split_engine(|_| {});
+        let FxUnit::Plugin { plugin, .. } = &e.master_fx.as_ref().unwrap().units[0].fx else { unreachable!() };
+        let plugin = plugin.clone();
+        let mut telemetry = Telemetry::default();
+        with_editor_lock(&plugin, || {
+            assert!(about(split_block(&mut e, 0.25).0.0, 0.25), "the dry mix passes the busy effect");
+            assert!(heard_now(&mut e, &mut telemetry).is_empty(), "the busy effect did not render");
+        });
+        assert!(about(split_block(&mut e, 0.25).0.0, 0.25));
+        assert_eq!(heard_now(&mut e, &mut telemetry), [master_heard(1), master_heard(2)]);
     }
 
     fn heard_now(e: &mut Engine, t: &mut Telemetry) -> Vec<Heard> {
@@ -12673,6 +14171,25 @@ mod tests {
         c.extra_outs[0].level = 0.5;
         let r = reuse_of(&b, &c, 0, 0, 1000.0, &deckard_plugins::Host::default());
         assert!(r.chain && r.instrument, "a level is no new strip");
+    }
+
+    /// Slice Motion changed alone (the Sampler itself the same) makes the Sampler anew
+    /// on an edit: one kept would go on playing the Motion it was made with.
+    #[test]
+    fn a_new_motion_remakes_the_sampler() {
+        use deckard_model::new_sampler::Motion;
+        let (_tmp, a, _) = new_sampler_project(deckard_model::new_sampler::PlayMode::Repitch);
+        let host = deckard_plugins::Host::default();
+        assert!(reuse_of(&a, &a.clone(), 0, 0, 48_000.0, &host).sampler, "nothing changed: kept");
+        let mut b = a.clone();
+        b.groups[0].sounds[0].new_sampler.as_mut().unwrap().motion = Motion::Next;
+        assert!(!reuse_of(&a, &b, 0, 0, 48_000.0, &host).sampler, "Motion on");
+        assert!(!reuse_of(&b, &a, 0, 0, 48_000.0, &host).sampler, "and off again");
+        // (New settings alone keep it, as before.)
+        let mut c = b.clone();
+        c.groups[0].sounds[0].sampler.as_mut().unwrap().tune += 1.0;
+        let r = reuse_of(&b, &c, 0, 0, 48_000.0, &host);
+        assert!(r.sampler && r.settings.is_some());
     }
 
     /// A bypassed plug-in makes no sound, so none is heard.
@@ -13075,6 +14592,7 @@ mod tests {
         params: &[],
         pages: &[],
         make: |_| Box::new(Pressed::default()),
+        scope: false,
     };
 
     /// Channel pressure reaches a plug-in instrument (the woosh's Z on Pigments), as
@@ -13514,6 +15032,39 @@ mod tests {
         e.process_outputs(&mut out, &mut ext);
         assert!(out.iter().all(|x| x.abs() < 1e-6), "not on the master: {out:?}");
         assert!(ext[1][100].abs() > 0.1, "on Out 2: {:?}", ext[1]);
+    }
+
+    #[test]
+    fn midi_note_tail_releases_at_its_deadline_past_the_last_bar() {
+        let mut p = project();
+        let bar = 4 * PPQ;
+        p.sections[0].length = bar;
+        p.groups[0].sounds[0].sampler = None;
+        p.groups[0].sounds[0].channel.midi_out = deckard_model::MidiDest::Port("Synth".into());
+        let pattern = &mut p.groups[0].patterns[0];
+        let mut note = pattern.notes[0].clone();
+        note.position = bar - 60;
+        note.length = 100;
+        pattern.notes = vec![note, Note { position: bar + 42, pitch: 61, ..note }];
+
+        // At 1920 Hz and 120 BPM one tick is one frame. The gate ends 40 frames
+        // past the bar, partway through the second process call.
+        let mut cache = SampleCache::default();
+        for (mode, looping) in [(Mode::Arrangement, false), (Mode::Scene(0), true)] {
+            let (mut e, _) = Engine::new(&p, None, 1920, mode, &mut cache);
+            e.looping = looping;
+            let (tx, rx) = std::sync::mpsc::sync_channel(16);
+            e.midi_tx = Some(tx);
+            e.process(&mut vec![0.0; 2 * (bar as usize + 39)]);
+            let on = rx.try_recv().expect("late note in the last bar plays");
+            assert_eq!(on.bytes(), &[0x90, 60, 127]);
+            assert!(rx.try_recv().is_err(), "the note is still held past the bar");
+
+            e.process(&mut [0.0; 16]);
+            let off = rx.try_recv().expect("note-off is sent inside the block containing its deadline");
+            assert_eq!(off.bytes(), &[0x80, 60, 0]);
+            assert!(rx.try_recv().is_err(), "the note that starts beyond the pattern length stays silent");
+        }
     }
 
     /// A sound sends its notes to its MIDI output: its channel, transposed, with
@@ -14213,6 +15764,14 @@ mod tests {
         e.play_live(Live::ChokeGroup { group: 0 });
         e.process(&mut out);
         assert_eq!((voices(&e, 0), voices(&e, 1)), (0, 0), "its own Group's choke ends both");
+        // One sound's choke ends its own voices only.
+        e.play_live(on(0));
+        e.play_live(on(1));
+        e.process(&mut out);
+        e.play_live(Live::ChokeSound { group: 0, sound: 1 });
+        e.play_live(Live::ChokeSound { group: 0, sound: 99 });
+        e.process(&mut out);
+        assert_eq!((voices(&e, 0), voices(&e, 1)), (1, 0), "the sound's choke ends its voices, not its neighbour's");
     }
 
     #[test]
@@ -14726,6 +16285,58 @@ mod tests {
         // Input 0.5 -> Split bus 1 (x0.5 = 0.25) -> strip (level 1.0) -> Sound(0, 1) (HalfGainEffect x0.5 = 0.125).
         let (master, _) = s.block(0.5);
         assert!(near(master.0, 0.125) && near(master.1, 0.125), "strip->sound bus got={master:?}, want 0.125");
+    }
+
+    #[test]
+    fn telemetry_tracks_active_sampler_loops_until_released_or_choked() {
+        let mut p = project();
+        let s0 = p.groups[0].sounds[0].clone();
+        p.groups[0].sounds.push(s0);
+        p.groups[0].sounds[0].channel.choke_group = 1;
+        p.groups[0].sounds[0].channel.choke_mode = 0;
+        p.groups[0].sounds[1].channel.choke_group = 1;
+        p.groups[0].sounds[1].channel.choke_mode = 0;
+        let mut e = click_engine_for(&p, 48_000);
+        e.sequencing = false;
+        set_sample(&mut e, vec![[0.4, 0.4]; 24_000], &[("envelope_type", 2.0)], true);
+        // Give sound 1 a non-looped one-shot in Choke Group 1.
+        let s1_smp = deckard_model::Sampler { envelope_type: 0, ..Default::default() };
+        let z1 = sampler::ZoneRt {
+            sample: Arc::new(sample::Sample { rate: 48_000, frames: vec![[0.4, 0.4]; 12_000] }),
+            root: 60,
+            keys: (0, 127),
+            vels: (0, 127),
+            gain: 1.0,
+            pan: 0.0,
+            tune: 0.0,
+            play: (0, 12_000),
+            looped: None,
+            x_fade: 0,
+            fade_in: 0,
+            fade_out: 0,
+            sync: None,
+            lanes: None,
+            reverse: false,
+            once: false,
+            tail_ms: 0.0,
+            layer: None,
+        };
+        e.sounds[0][1] = Some(SamplerRt::new(sampler::Settings::new(&s1_smp, 48_000.0), vec![z1], (1.0, 1.0), 48_000.0));
+
+        let mut out = vec![0.0f32; 2 * 512];
+        let mut t = Telemetry::with_room();
+
+        e.play_live(Live::NoteOn { group: 0, sound: 0, pitch: 60, velocity: 100, length: i64::MAX });
+        e.process(&mut out);
+        e.publish(&mut t);
+        assert_eq!(t.loop_playing[0] & 1, 1, "looped sustaining voice publishes loop_playing");
+
+        // Choking with sound 1 (Choke Group 1) stops sound 0's loop highlight and leaves non-looped sound 1 unflagged.
+        e.play_live(Live::NoteOn { group: 0, sound: 1, pitch: 60, velocity: 100, length: i64::MAX });
+        e.process(&mut out);
+        e.publish(&mut t);
+        assert_eq!(t.loop_playing[0] & 1, 0, "choked loop clears loop_playing immediately");
+        assert_eq!(t.loop_playing[0] & 2, 0, "non-looped one-shot does not set loop_playing");
     }
 }
 

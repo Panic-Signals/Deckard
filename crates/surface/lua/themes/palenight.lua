@@ -37,9 +37,11 @@ return {
     button_off = PANEL,
     arrow_off = LINE,
     bar = DEEP,
-    wave_off = PANEL,
-    wave_selection = LINE,
-    slice_focus = LINE,
+    -- A waveform where it isn't played is dim, not gone; the ground behind what's
+    -- selected (and the focused slice) is barely off black.
+    wave_off = { 0x2e, 0x2d, 0x48 },
+    wave_selection = { 0x0b, 0x0b, 0x12 },
+    slice_focus = { 0x0f, 0x0f, 0x18 },
     meter_empty = PANEL,
     marker = CYAN,
     zone_white = PANEL,

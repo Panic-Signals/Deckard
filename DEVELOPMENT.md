@@ -16,6 +16,13 @@ mise run build
 ./target/debug/deckard ["path/to/project.mxprj"]   # or drop a file on the window
 ```
 
+A debug build is slow at audio work. To build with optimizations and run the result in
+one step, on any system:
+
+```sh
+mise run release:run
+```
+
 The build and the other tasks (tests, releases, lint) are defined in `mise.toml`, with
 usage at its top. Use `mise run` rather than calling `cargo` directly: `cargo` comes from
 mise's pinned Rust, so it isn't on `PATH` in a plain shell.
@@ -92,8 +99,8 @@ cargo test --offline -p <crate> [filter]      # e.g. -p deckard-doc, -p deckard 
 Run the full suite once, at the end of a branch. CI runs it on all three systems.
 
 - **Formatting:** `cargo fmt` uses `rustfmt.toml` (140 columns). CI's lint step runs
-  `cargo fmt --all --check`, together with actionlint on the workflows and shellcheck
-  on the scripts (`mise run lint`).
+  `cargo fmt --all --check`, together with actionlint on the workflows, shellcheck
+  on the scripts and the file size check (`mise run lint`; [Where code goes](#where-code-goes)).
 - **Tests that need local data:** tests that need a Maschine install or projects skip
   themselves when it isn't there.
 - **Settings:** tests use a settings folder of their own, never the user's.
@@ -119,6 +126,38 @@ Run the full suite once, at the end of a branch. CI runs it on all three systems
 | `crates/stems` | `deckard-stems` | Stem separation (Demucs v4 through demucs-rs) |
 | `crates/stretch` | `deckard-stretch` | Time-stretching and pitch-shifting (Signalsmith Stretch, vendored) |
 
+## Where code goes
+
+`apps/viewer/src/main.rs` and `crates/engine/src/lib.rs` take most of the project's
+edits, and two pull requests that edit the same lines conflict. So new code goes into a
+file for its topic, not into those two:
+
+- **Tests go in their own file:** `src/<topic>_tests.rs` beside the code (as
+  `apps/viewer/src/chop_tests.rs` is), declared with `#[cfg(test)] mod <topic>_tests;`.
+  Never inline in `main.rs` or a crate's `lib.rs`. A crate's top-level `tests/` folder
+  is for Cargo's integration tests, which can't see private items; unit tests don't go
+  there.
+- **A feature's code goes in that feature's file**, as its own `impl App` or
+  `impl Engine` block or its own type. Add a file when none fits.
+- **A feature's state goes in the feature's own struct** where it has one, not in a new
+  field on `App` or `Engine`.
+- **A dispatcher arm is one call** into the feature's file (`surface_act`,
+  `sampling_act`, `arrange` and the like).
+- **Don't move or reformat code you aren't changing.** Code is moved out of the large
+  files one topic at a time, in pull requests that do nothing else.
+
+`scripts/check-file-sizes.sh` (part of `mise run lint`, so CI runs it) enforces two
+things. A `.rs` file may have at most 3,000 lines; the files that are over that today are
+listed in `scripts/file-size-limits.txt` with the most lines each may have, a little over
+its present length, and a pull request that moves code out of one lowers its limit. And
+a file listed in `scripts/no-inline-tests.txt` must not have a line that starts with
+`#[test]`; a file joins that list when its tests have been moved out. The other rules
+are for whoever writes and reviews the code.
+
+Commits that only move code are listed in `.git-blame-ignore-revs`. Run
+`git config blame.ignoreRevsFile .git-blame-ignore-revs` once, and `git blame` looks
+past them.
+
 ## Documentation map
 
 - **Project format:**
@@ -142,7 +181,10 @@ Run the full suite once, at the end of a branch. CI runs it on all three systems
     expression editor, LFOs, LFO envelopes).
 - **Controllers:**
   - [docs/controller-api.md](docs/controller-api.md): the Lua API for DECKARD's
-    controller scripts (MK3 pages, themes, MIDI devices).
+    controller scripts (MK3 pages, themes, MIDI devices), and its "Plug-in mappings"
+    chapter: pictures on the MK3 from a plug-in's parameters.
+  - `docs/superpowers/specs/2026-11-15-plugin-mappings-design.md`: the plug-in mappings
+    and MK3 widgets design, with the display measurements.
   - [docs/launchpad-pro-mk3.md](docs/launchpad-pro-mk3.md): the Launchpad Pro MK3 script
     and its hardware checklist.
   - [docs/mk3-usb.md](docs/mk3-usb.md): the MK3's USB protocol.
@@ -191,6 +233,10 @@ to the crate's and is shown in About DECKARD.
   `cargo llvm-cov --workspace --cobertura --output-path coverage.xml` and
   `diff-cover coverage.xml --compare-branch=main --fail-under=70`. Tests that skip
   themselves without a Maschine install still count against you on CI.
+  A pull request that only moves code between files is labelled `move-only` and isn't
+  held to the 70%, since a moved line counts as a new one; a maintainer adds the label
+  after checking that nothing but the code's place changed, then re-runs the Patch
+  coverage job if it had already failed.
 - **Release builds:** `release.yml` builds all three when a release is published,
   versioned from the release's name (else its tag; a leading `v` is dropped), and
   attaches them to the release. It can also be run by hand with a version, which keeps
@@ -223,7 +269,7 @@ deckard [file.mxprj] [--screenshot out.png] [--view ideas|song|mix|lfos]
         [--lanes-dialog] [--plugin-window] [--input FILE]
         [--scripts DIR] [--controller M3] [--press BUTTON_X]... [--hold BUTTON_X]... [--pad N]...
 deckard --write-icon OUT.png [SIZE] [--icon-style television|letter]  # draw the app icon and exit
-deckard --goodbye OUT.png               # draw what the MK3's screens show after closing
+deckard --goodbye OUT.png               # draw the standby picture (closing leaves the screens black)
 ```
 
 - **`--screenshot`** renders, saves a PNG and exits: after 2 s when playing, or after
@@ -458,6 +504,46 @@ cargo run --release --offline -p deckard-plugins --example plugin-state file.mxp
 ./target/release/deckard file.mxprj --group 7 --sound 0 --plugin-window
 ```
 
+### plugin-probe
+
+`plugin-probe` (`crates/plugins/src/bin/plugin-probe.rs`) hosts one plug-in in its own
+process, with a time limit (`--timeout`, 60 s by default), and prints JSON, so a plug-in
+that crashes or hangs takes only the probe with it. It never opens a project or touches
+DECKARD's settings. It's for writing plug-in mappings
+([docs/controller-api.md](docs/controller-api.md#plug-in-mappings)).
+
+```sh
+cargo run --release -p deckard-plugins --bin plugin-probe -- list
+cargo run --release -p deckard-plugins --bin plugin-probe -- dump "Acme Ladder" --out ladder.json
+cargo run --release -p deckard-plugins --bin plugin-probe -- measure "Acme Ladder" --recipe recipe.json
+```
+
+- **`list`:** the installed plug-ins DECKARD can host.
+- **`dump <name or plugin_id>`:** each parameter's id, title, units, steps and default, and its
+  text at 64 evenly spaced values, so a mapping can check what a knob says in real units.
+  `--state <file>` loads an NKS preset or ensemble first.
+- **`measure <plugin> --recipe <file>`:** plays an instrument and measures what its knobs do,
+  for a plug-in whose text gives no units (a knob reading "0-10"). A recipe is JSON:
+  `note`, a `setup` of parameter ids to normalised values, and `steps`, each with a `name`,
+  a `kind`, a `param` and the `points` to sweep it over, and a `setup` of its own. The
+  output lists each point and a `{ "table", ... }` taper for a mapping. The kinds:
+  - `cutoff`: the frequency where the output's spectrum peaks (set noise through the filter
+    with high resonance);
+  - `attack`: the time to reach 90% of the level the note holds with the parameter at 0;
+  - `decay`: the time from the peak to 10% of it, up to 40 s;
+  - `bright_attack`, `bright_decay`: the same measured on the output above about 2 kHz, for a
+    filter envelope's times. A ballpark.
+
+**The black-box rule.** Everything about a plug-in is learned only by hosting it: its
+parameter list, the text it gives for each value, and what its audio does. Never from its
+files, from the private data inside presets, or from its artwork, and never by taking the
+plug-in apart. That holds for every plug-in, Native Instruments' included. Shipped mappings
+use only parameter ids, names and units.
+
+The `plugin-mapping` Claude Code skill (`.claude/skills/plugin-mapping/`) drafts a mapping from
+a dump, and `scripts/mapping-check.sh` renders a mapping's pages against a saved dump and
+checks its names.
+
 ### DECKARD's own plug-ins
 
 Replicant (`replicant.rs`), Plaits (`plaits.rs`, around `crates/mi`) and Zhora
@@ -494,6 +580,27 @@ Pro MK3).
   Folder) overrides any file by path, and DECKARD reloads a script when it's saved.
 - **API:** see [docs/controller-api.md](docs/controller-api.md).
 - **Tests:** Rust tests drive the shipped scripts with made-up MK3 events.
+
+#### Widgets and mappings
+
+The MK3's pictures (a filter's response, an envelope, an EQ) are drawn in Rust, in
+`crates/surface/src/widget/`: one file per widget, `layout.rs` (the generic patterns that
+put pictures over any page's knobs) and `mapping.rs` (the plug-in mapping format). Scripts
+reach them through `screen:widget` and `screen:pictures`. The user-facing format is in
+[docs/controller-api.md](docs/controller-api.md#plug-in-mappings); the design, and the
+measurements of the MK3's display link behind the rectangles `crates/mk3` sends, are in
+`docs/superpowers/specs/2026-11-15-plugin-mappings-design.md`.
+
+- **Golden images:** each widget is drawn on the `maschine` and `lcd` themes at every width it
+  can span, and compared with the PNGs in `crates/surface/tests/golden/`. After changing a
+  widget, refresh them with `DECKARD_GOLDEN=update cargo test -p deckard-surface widget::`,
+  look at the changed images, and commit them with the change.
+- **Adding a widget:** a Rust file in `widget/` (a doc comment table of its inputs, `from_lua`
+  and `draw`, flat look first, `focus` and `<input>_mod` handled), a line in `draw_lua`,
+  and golden cases for each width and for each focus name.
+- **Writing a mapping:** the `plugin-mapping` Claude Code skill
+  (`.claude/skills/plugin-mapping/`) and `scripts/mapping-check.sh` (renders a mapping's
+  pages against a saved parameter dump and checks its names) help; see "plugin-probe" below.
 
 ### Maschine's own scripts (`crates/lua-host`)
 

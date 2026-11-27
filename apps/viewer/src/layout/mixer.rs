@@ -62,6 +62,7 @@ struct Strip {
     muted: bool,
     cue: bool,
     focused: bool,
+    selected: bool,
     meter: (f32, f32),
     /// Held peaks (left, right).
     peak: (f32, f32),
@@ -456,6 +457,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
             muted: x.muted,
             cue: false,
             focused: false,
+            selected: false,
             meter: app.extra_meters.get(i).copied().unwrap_or((0.0, 0.0)),
             peak: held(Channel::Extra(i)),
             slots: Vec::new(),
@@ -482,6 +484,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
                     muted: snd.muted,
                     cue: snd.cue,
                     focused: app.sound == s,
+                    selected: app.is_sound_selected(app.group, s),
                     meter: app.meters.get(app.group).and_then(|r| r.get(s)).copied().unwrap_or((0.0, 0.0)),
                     peak: held(Channel::Sound(app.group, s)),
                     slots: snd.slots.clone(),
@@ -507,6 +510,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
                 muted: gr.muted,
                 cue: gr.cue,
                 focused: app.group == g,
+                selected: app.group == g,
                 meter: gmeter(g),
                 peak: held(Channel::Group(g)),
                 slots: gr.slots.clone(),
@@ -545,6 +549,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
             muted: gr.muted,
             cue: gr.cue,
             focused: true,
+            selected: true,
             meter: gmeter(app.group),
             peak: held(Channel::Group(app.group)),
             slots: gr.slots.clone(),
@@ -567,6 +572,7 @@ pub fn mixer(ui: &mut Ui, app: &App, doc: &deckard_doc::Document, rect: Rect, ac
             muted: false,
             cue: false,
             focused: false,
+            selected: false,
             meter: app.master_meter,
             peak: held(Channel::Master),
             slots: p.master_slots.clone(),
@@ -690,10 +696,11 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
     let vis = |x: Rect| x.intersect(clip);
     // Body.
     let body = Rect::from_min_max(Pos2::new(r.left(), r.top() + HEAD + 4.0), r.max);
-    let body_fill = match (extra, st.focused) {
-        (Some(_), _) => EXTRA_BG,
-        (None, true) => crate::layout::grey(0x14),
-        (None, false) => s05(),
+    let body_fill = match (extra, st.focused, st.selected) {
+        (Some(_), _, _) => EXTRA_BG,
+        (None, true, _) => crate::layout::grey(0x14),
+        (None, false, true) => crate::layout::grey(0x1c),
+        (None, false, false) => s05(),
     };
     painter.rect_filled(if extra.is_some() { r } else { body }, 0.0, body_fill);
     painter.vline(r.right() + 0.5, r.y_range(), Stroke::new(1.0, Color32::BLACK));
@@ -701,20 +708,26 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
     // Header: ID and mini meter, then the name.
     let head = Rect::from_min_size(r.min, Vec2::new(r.width(), HEAD));
     let mute_col = mute_col();
-    let (bg, id_ink, name_ink) = match (st.focused && !master, st.muted) {
+    let (bg, id_ink, name_ink) = match (st.focused && !master, st.selected && !master, st.muted) {
         _ if extra.is_some() => (EXTRA_BG, EXTRA_INK, if st.muted { white(142) } else { white(245) }),
-        (true, false) => {
+        (true, _, false) => {
             let on = super::lcd_readable(st.color).unwrap_or(Color32::from_black_alpha(245));
             (st.color, on, on)
         }
-        (true, true) => {
+        (true, _, true) => {
             let on = super::lcd_readable(mute_col).unwrap_or(Color32::from_black_alpha(245));
             (mute_col, on, on)
         }
-        (false, true) => (if sounds { s00() } else { s05() }, mute_col, white(142)),
-        (false, false) => (if matches!(st.ch, Channel::Sound(..)) { s00() } else { s05() }, st.color, white(245)),
+        (false, true, true) => (s02(), mute_col, white(190)),
+        (false, true, false) => (s02(), st.color, white(255)),
+        (false, false, true) => (if sounds { s00() } else { s05() }, mute_col, white(142)),
+        (false, false, false) => (if matches!(st.ch, Channel::Sound(..)) { s00() } else { s05() }, st.color, white(245)),
     };
     painter.rect_filled(head, 0.0, bg);
+    if st.selected && !st.focused && !master && extra.is_none() {
+        let accent = if st.muted { mute_col } else { st.color };
+        painter.rect_filled(Rect::from_min_size(head.min, Vec2::new(head.width(), 2.0)), 0.0, accent);
+    }
     let row1 = Rect::from_min_size(Pos2::new(head.left() + 4.0, head.top()), Vec2::new(37.0, 20.0));
     if master {
         painter.text(Pos2::new(head.left() + 4.0, head.top() + 10.0), Align2::LEFT_CENTER, "MASTER", font(11.0), white(245));
@@ -770,7 +783,15 @@ fn strip(ui: &mut Ui, app: &App, painter: &Painter, r: Rect, clip: Rect, st: &St
         if resp.clicked() {
             match st.ch {
                 Channel::Group(g) => acts.push(Act::FocusGroup(g)),
-                Channel::Sound(_, s) => acts.push(Act::FocusSound(s)),
+                Channel::Sound(g, s) => {
+                    if g == app.group {
+                        let (shift, toggle) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
+                        acts.push(Act::ClickSound { sound: s, shift, toggle });
+                    } else {
+                        acts.push(Act::FocusGroup(g));
+                        acts.push(Act::FocusSound(s));
+                    }
+                }
                 Channel::Master | Channel::Extra(_) => {}
             }
         }
@@ -1305,7 +1326,7 @@ fn slot_rows(
         acts.push(Act::FocusChainSlot(chain, usize::MAX));
     }
     let instruments = is_sound && st.slots.is_empty();
-    egui::Popup::menu(&resp).style(crate::layout::menu_style).show(|ui| super::add_menu(ui, app, instruments, acts));
+    egui::Popup::menu(&resp).style(crate::layout::menu_style).show(|ui| super::add_menu_in(ui, app, chain, instruments, acts));
 }
 
 /// Which optional parts of the strips the Mixer shows.
@@ -1434,6 +1455,75 @@ mod tests {
         h.get_by_label("Bass Synth").click();
         h.run_steps(3);
         assert_eq!(doc.borrow().project().groups[0].sounds[1].slots[0].module, "BassSynth", "{}", h.state().status);
+    }
+
+    #[test]
+    fn copy_and_paste_an_effect_between_group_strips() {
+        use deckard_doc::{Chain, NewModule};
+        use egui_kittest::kittest::Queryable;
+
+        let mut app = crate::App::default();
+        app.new_project();
+        app.mixer = true;
+        app.mixer_sounds = false;
+        let doc = app.doc.clone().unwrap();
+        let target = doc.borrow_mut().add_group().unwrap();
+        doc.borrow_mut().add_slot_in(Chain::Group(0), 0, &NewModule::Effect("Compressor")).unwrap();
+        doc.borrow_mut().set_slot_active_in(Chain::Group(0), 0, false).unwrap();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1500.0, 930.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(|ui, app: &mut crate::App| app.frame(ui), app);
+        h.run_steps(3);
+        let at = add_row(&h, Channel::Group(0), 0);
+        right_click_at(&mut h, at);
+        h.get_by_label("Copy").click();
+        h.run_steps(3);
+        let at = add_row(&h, Channel::Group(target), 0);
+        click_at(&mut h, at);
+        h.get_by_label("Paste").click();
+        h.run_steps(3);
+        let d = doc.borrow();
+        let slots = d.chain_slots(Chain::Group(target)).unwrap();
+        assert_eq!(slots.len(), 1, "{}", h.state().status);
+        assert_eq!(slots[0].module, "Compressor");
+        assert!(!slots[0].active);
+        assert_eq!(d.chain_slots(Chain::Group(0)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn right_click_paste_replaces_the_instrument_and_keeps_effects() {
+        use deckard_doc::{Chain, NewModule};
+        use egui_kittest::kittest::Queryable;
+
+        let mut app = crate::App::default();
+        app.new_project();
+        (app.mixer, app.mixer_sounds) = (true, true);
+        let doc = app.doc.clone().unwrap();
+        let source = Chain::Sound(0, 1);
+        let target = Chain::Sound(0, 2);
+        let instrument = NewModule::Instrument { class: "BassSynth".into(), params: Vec::new() };
+        doc.borrow_mut().add_slot_in(source, 0, &instrument).unwrap();
+        doc.borrow_mut().add_slot_in(target, 0, &NewModule::Sampler).unwrap();
+        doc.borrow_mut().add_slot_in(target, 1, &NewModule::Effect("Compressor")).unwrap();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1500.0, 930.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(|ui, app: &mut crate::App| app.frame(ui), app);
+        h.run_steps(3);
+        let at = add_row(&h, Channel::Sound(0, 1), 0);
+        right_click_at(&mut h, at);
+        h.get_by_label("Copy").click();
+        h.run_steps(3);
+        let at = add_row(&h, Channel::Sound(0, 2), 0);
+        right_click_at(&mut h, at);
+        h.get_by_label("Paste").click();
+        h.run_steps(3);
+
+        let modules = |d: &deckard_doc::Document| d.chain_slots(target).unwrap().iter().map(|s| s.module.clone()).collect::<Vec<_>>();
+        assert_eq!(modules(&doc.borrow()), ["BassSynth", "Compressor"], "{}", h.state().status);
+        assert!(doc.borrow_mut().undo());
+        assert_eq!(modules(&doc.borrow()), ["Sampler", "Compressor"]);
     }
 
     fn right_click_at(h: &mut egui_kittest::Harness<'static, crate::App>, pos: egui::Pos2) {

@@ -168,7 +168,7 @@ impl Document {
         let result = self.apply("Drop Extra Outputs", ops);
         if let (Some(before), Some(pruned)) = (before, self.undo.pop()) {
             let label = before.label.clone();
-            self.undo.push(super::Step::merged(&label, &[before, pruned]));
+            self.undo.push(super::Step::merged_owned(&label, vec![before, pruned]));
         }
         result
     }

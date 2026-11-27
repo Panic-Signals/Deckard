@@ -7,11 +7,29 @@ use super::*;
 use deckard_engine::sample::Sample;
 use std::sync::Arc;
 
-pub const TABS: [&str; 4] = ["RECORD", "EDIT", "SLICE", "ZONE"];
+pub const TABS: [&str; 5] = ["RECORD", "EDIT", "SLICE", "ZONE", "LAYERS"];
+/// The order the tabs are drawn in: LAYERS where SLICE would be (a sound has one or the
+/// other), before ZONE.
+pub const TAB_ORDER: [usize; 5] = [0, 1, 2, 4, 3];
+
+pub mod layers;
+
+/// Which of the tabs sound (`g`, `s`) offers, its sample a zone's (`zone`) or an Audio
+/// plug-in's take (`take`): only RECORD without a sample; RECORD and EDIT for a take;
+/// LAYERS for a Sampler Preview in Layers (even an empty one), which has no SLICE.
+pub fn tab_shown(p: &Project, g: usize, s: usize, tab: usize, zone: bool, take: bool) -> bool {
+    match tab {
+        0 => true,
+        4 => crate::layers::can_layer(p, g, s),
+        2 => zone && !take && !crate::layers::can_layer(p, g, s),
+        1 => zone,
+        _ => zone && !take,
+    }
+}
 
 /// The fewest frames the waveform zooms in to.
 const MIN_VIEW: f64 = 64.0;
-const EDIT_BUTTONS: [(&str, EditOp); 14] = [
+const EDIT_BUTTONS: [(&str, EditOp); 15] = [
     ("TRUNCATE", EditOp::Truncate),
     ("NORM.", EditOp::Normalize),
     ("REVERSE", EditOp::Reverse),
@@ -24,13 +42,19 @@ const EDIT_BUTTONS: [(&str, EditOp); 14] = [
     ("PASTE", EditOp::Paste),
     ("DUPL.", EditOp::Duplicate),
     ("STRETCH", EditOp::Stretch),
+    ("MUNGE", EditOp::Munge),
     ("STEMS", EditOp::Stems),
     ("AUTO LOOP", EditOp::AutoLoop),
 ];
-pub const SLICE_MODES: [&str; 4] = ["Split", "Grid", "Detect", "Manual"];
-pub const SPLIT_COUNTS: [usize; 4] = [4, 8, 16, 32];
+pub const SLICE_MODES: [&str; 6] = ["Split", "Grid", "Detect", "Manual", "Find", "Random"];
+/// How many starts Find looks for.
+pub const FIND_COUNTS: [usize; 5] = [4, 8, 16, 32, 64];
+pub const SPLIT_COUNTS: [usize; 5] = [4, 8, 16, 32, 64];
 pub const GRID_DIVS: [(u32, &str); 4] = [(4, "1/4"), (8, "1/8"), (16, "1/16"), (32, "1/32")];
 pub const PATTERN_MODES: [&str; 3] = ["Create Pattern", "Replace Pattern", "No Pattern"];
+/// Where APPLY puts the slices: the keys of this sound, or the pads of new groups.
+pub const APPLY_TO: [&str; 2] = ["Keys", "Pads"];
+pub const NOTE_ORDERS: [&str; 2] = ["In order", "Shuffled"];
 
 /// An edit of the selection (or, without one, the play range).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +71,8 @@ pub enum EditOp {
     Paste,
     Duplicate,
     Stretch,
+    /// Open the munge bar (swing, eighths taken out).
+    Munge,
     /// Find a loop in the play range that joins smoothly, and switch it on.
     AutoLoop,
     /// Separate the sample into drums, bass, other and vocals, into a new group (or stop
@@ -80,11 +106,24 @@ pub struct SamplingState {
     pub stereo: bool,
     /// Visible frames [start, end), of the sample shown (`None`: all of it).
     pub view: Option<(f64, f64)>,
+    /// What each zone showed when it was last looked at (by `sample_key`).
+    pub views: std::collections::HashMap<(usize, usize, usize, String), (f64, f64)>,
     pub selection: Option<(usize, usize)>,
+    /// The selection was made by hand on EDIT (not the one a sample comes up with):
+    /// Split and Grid start from it.
+    pub selected: bool,
     pub clipboard: Option<Sample>,
     /// Slice starts (frames), sorted.
     pub slices: Vec<usize>,
     pub slice_mode: usize,
+    /// Find's count (`FIND_COUNTS`).
+    pub find: usize,
+    /// Random's count (`FIND_COUNTS`), and what its picks come from: RE-ROLL moves it on.
+    pub random: usize,
+    pub seed: u64,
+    /// Find's and Random's slices that stay through a re-roll or another count (frames,
+    /// each one of `slices`).
+    pub kept: Vec<usize>,
     pub split: usize,
     pub grid: usize,
     pub sensitivity: f64,
@@ -92,8 +131,18 @@ pub struct SamplingState {
     /// The SLICE tool removes instead of adding.
     pub remove_tool: bool,
     pub pattern_mode: usize,
+    /// Where APPLY puts the slices (`APPLY_TO`), and whether its notes play them shuffled.
+    pub apply_to: usize,
+    pub shuffle: bool,
+    /// Shuffled APPLYs so far: each gets another order.
+    pub shuffles: u64,
+    /// APPLY's slices each play on to the sample's end (start points, as Serato's
+    /// cues), not to the next slice. Unset: so for a New Sampler, not for a Sampler.
+    pub slice_to_end: Option<bool>,
     /// Stretch settings while the stretch bar is open.
     pub stretch: Option<Stretch>,
+    /// Munge settings while the munge bar is open.
+    pub munge: Option<deckard_engine::munge::Munge>,
     /// Zone tab: the map (else the focused zone's sample) and the zone list.
     pub zone_map: bool,
     pub zone_list: bool,
@@ -103,6 +152,18 @@ pub struct SamplingState {
     peaks: Vec<[(f32, f32); 2]>,
     /// Where the focused zone plays (frames).
     pub playhead: Option<usize>,
+    /// TAP's times (seconds), the latest count.
+    pub taps: Vec<f64>,
+    /// QUANTIZE's grid (`beat::WARP_GRIDS`) and strength (0..1).
+    pub warp_grid: usize,
+    pub warp_strength: f64,
+    /// The focused zone's stem lanes, and whether they're folded into one waveform.
+    pub lanes: [Option<LaneView>; 4],
+    pub lanes_mix: bool,
+    /// LAYERS: each layer's waveform, where each is playing, and where the morph is.
+    pub layers: Vec<Option<LaneView>>,
+    pub layer_heads: Vec<Option<usize>>,
+    pub morph_at: Option<f32>,
 }
 
 impl Default for SamplingState {
@@ -111,23 +172,42 @@ impl Default for SamplingState {
             tab: 1,
             stereo: true,
             view: None,
+            views: Default::default(),
             selection: None,
+            selected: false,
             clipboard: None,
             slices: Vec::new(),
             slice_mode: 0,
+            find: 2,
+            random: 2,
+            seed: 0,
+            kept: Vec::new(),
             split: 1,
             grid: 2,
             sensitivity: 0.5,
             zero_x: true,
             remove_tool: false,
             pattern_mode: 2,
+            apply_to: 0,
+            shuffle: false,
+            shuffles: 0,
+            slice_to_end: None,
             stretch: None,
+            munge: None,
             zone_map: true,
             zone_list: true,
             sample: None,
             sample_key: None,
             peaks: Vec::new(),
             playhead: None,
+            taps: Vec::new(),
+            warp_grid: 2,
+            warp_strength: 1.0,
+            lanes: Default::default(),
+            lanes_mix: false,
+            layers: Vec::new(),
+            layer_heads: Vec::new(),
+            morph_at: None,
         }
     }
 }
@@ -135,30 +215,103 @@ impl Default for SamplingState {
 /// Frames per peak block.
 const BLOCK: usize = 256;
 
+fn peaks_of(sample: &Sample) -> Vec<[(f32, f32); 2]> {
+    sample
+        .frames
+        .chunks(BLOCK)
+        .map(|c| {
+            let mut p = [(f32::MAX, f32::MIN); 2];
+            for f in c {
+                for ch in 0..2 {
+                    p[ch] = (p[ch].0.min(f[ch]), p[ch].1.max(f[ch]));
+                }
+            }
+            p
+        })
+        .collect()
+}
+
+/// (min, max) per channel of `frames` over [a, b), from `peaks` when it's long.
+fn column_of(frames: &[[f32; 2]], peaks: &[[(f32, f32); 2]], a: usize, b: usize) -> [(f32, f32); 2] {
+    let b = b.min(frames.len());
+    if a >= b {
+        return [(0.0, 0.0); 2];
+    }
+    let mut p = [(f32::MAX, f32::MIN); 2];
+    if b - a >= BLOCK * 2 {
+        for blk in &peaks[a / BLOCK..b.div_ceil(BLOCK).min(peaks.len())] {
+            for ch in 0..2 {
+                p[ch] = (p[ch].0.min(blk[ch].0), p[ch].1.max(blk[ch].1));
+            }
+        }
+    } else {
+        for f in &frames[a..b] {
+            for ch in 0..2 {
+                p[ch] = (p[ch].0.min(f[ch]), p[ch].1.max(f[ch]));
+            }
+        }
+    }
+    p
+}
+
 impl SamplingState {
-    /// Show `sample` (for `key`), computing its peak blocks.
+    /// Show `sample` (for `key`), computing its peak blocks. The part of it shown stays
+    /// where it was looked at: a zone come back to shows what it showed, another zone of
+    /// the same file (a slice) or of another file the same stretch of frames (as much of
+    /// it as there is); an edit that changes the sample's length shows all of it.
     pub fn set_sample(&mut self, key: (usize, usize, usize, String), sample: Arc<Sample>) {
         let changed = self.sample_key.as_ref().is_none_or(|k| (k.0, k.1, k.2) != (key.0, key.1, key.2));
-        self.peaks = sample
-            .frames
-            .chunks(BLOCK)
-            .map(|c| {
-                let mut p = [(f32::MAX, f32::MIN); 2];
-                for f in c {
-                    for ch in 0..2 {
-                        p[ch] = (p[ch].0.min(f[ch]), p[ch].1.max(f[ch]));
-                    }
-                }
-                p
-            })
-            .collect();
+        let len = sample.frames.len();
         if changed {
-            self.view = None;
+            // Another zone of the same file (a slice of it) keeps the slices shown.
+            let same_file = self.sample_key.as_ref().is_some_and(|k| (k.0, k.1, &k.3) == (key.0, key.1, &key.3));
+            if let (Some(old), Some(v)) = (self.sample_key.take(), self.view) {
+                self.views.insert(old, v);
+            }
+            let fit = |(a, b): (f64, f64)| {
+                let span = (b - a).min(len as f64);
+                let a = a.clamp(0.0, len as f64 - span);
+                (span < len as f64 && span >= 16.0).then_some((a, a + span))
+            };
+            self.view = self.views.get(&key).copied().or(self.view).and_then(fit);
             self.selection = None;
-            self.slices.clear();
+            self.selected = false;
+            if !same_file {
+                self.slices.clear();
+                self.kept.clear();
+            }
+        } else if self.len() != len {
+            self.view = None;
         }
+        self.peaks = peaks_of(&sample);
         self.sample = Some(sample);
         self.sample_key = Some(key);
+    }
+
+    /// Whether APPLY's slices play to the sample's end: as set, else so for a New Sampler.
+    pub fn slices_to_end(&self, new_sampler: bool) -> bool {
+        self.slice_to_end.unwrap_or(new_sampler)
+    }
+
+    /// No sample to show (what the last one showed is kept for when it comes back).
+    pub fn clear_sample(&mut self) {
+        if let (Some(old), Some(v)) = (self.sample_key.take(), self.view) {
+            self.views.insert(old, v);
+        }
+        self.sample = None;
+    }
+
+    /// Frames [lo, hi) (a zone's play range) brought into what's shown, at the same
+    /// zoom, when none of it is there.
+    pub fn reveal(&mut self, lo: f64, hi: f64) {
+        let len = self.len() as f64;
+        if let Some((a, b)) = self.view
+            && (hi <= a || lo >= b)
+        {
+            let span = b - a;
+            let a = (lo - span * 0.1).clamp(0.0, (len - span).max(0.0));
+            self.view = Some((a, a + span));
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -172,32 +325,156 @@ impl SamplingState {
 
     /// (min, max) per channel over frames [a, b).
     pub(crate) fn column(&self, a: usize, b: usize) -> [(f32, f32); 2] {
-        let Some(s) = &self.sample else { return [(0.0, 0.0); 2] };
-        let b = b.min(s.frames.len());
-        if a >= b {
-            return [(0.0, 0.0); 2];
-        }
-        let mut p = [(f32::MAX, f32::MIN); 2];
-        if b - a >= BLOCK * 2 {
-            for blk in &self.peaks[a / BLOCK..b.div_ceil(BLOCK).min(self.peaks.len())] {
-                for ch in 0..2 {
-                    p[ch] = (p[ch].0.min(blk[ch].0), p[ch].1.max(blk[ch].1));
+        self.sample.as_ref().map_or([(0.0, 0.0); 2], |s| column_of(&s.frames, &self.peaks, a, b))
+    }
+
+    /// The same of stem lane `k`.
+    pub(crate) fn lane_column(&self, k: usize, a: usize, b: usize) -> [(f32, f32); 2] {
+        self.lanes[k].as_ref().map_or([(0.0, 0.0); 2], |l| column_of(&l.sample.frames, &l.peaks, a, b))
+    }
+
+    /// Show the stem lanes in `files`, loading (with `load`) those not shown yet.
+    pub fn set_lanes(&mut self, files: [Option<String>; 4], mut load: impl FnMut(&str) -> Option<Arc<Sample>>) {
+        for (k, file) in files.into_iter().enumerate() {
+            match file {
+                Some(f) if self.lanes[k].as_ref().is_some_and(|l| l.file == f) => {}
+                Some(f) => {
+                    self.lanes[k] = load(&f).map(|sample| LaneView { peaks: peaks_of(&sample), file: f, sample });
                 }
-            }
-        } else {
-            for f in &s.frames[a..b] {
-                for ch in 0..2 {
-                    p[ch] = (p[ch].0.min(f[ch]), p[ch].1.max(f[ch]));
-                }
+                None => self.lanes[k] = None,
             }
         }
-        p
     }
 }
 
-/// What the Sampling view asks for.
+impl LaneView {
+    /// Its sample's peaks (min, max a channel) over frames `a..b`.
+    pub fn column(&self, a: usize, b: usize) -> [(f32, f32); 2] {
+        column_of(&self.sample.frames, &self.peaks, a, b)
+    }
+}
+
+impl SamplingState {
+    /// The layers' waveforms, for these files (a file already shown is kept).
+    pub fn set_layers(&mut self, files: Vec<String>, mut load: impl FnMut(&str) -> Option<Arc<Sample>>) {
+        let mut old = std::mem::take(&mut self.layers);
+        self.layers = files
+            .into_iter()
+            .enumerate()
+            .map(|(k, f)| match old.get_mut(k).and_then(Option::take) {
+                Some(l) if l.file == f => Some(l),
+                _ => old
+                    .iter_mut()
+                    .find(|l| l.as_ref().is_some_and(|l| l.file == f))
+                    .and_then(Option::take)
+                    .or_else(|| load(&f).map(|sample| LaneView { peaks: peaks_of(&sample), file: f, sample })),
+            })
+            .collect();
+    }
+}
+
+/// What's done to a stem lane (roadmap 2b). `Clear` takes them all off the zone.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LaneAct {
+    Mute,
+    Solo,
+    Gain(f64),
+    /// Take this stem away: the others are all that plays.
+    Delete,
+    Clear,
+}
+
+/// What's done to a layer of a New Sampler sound (`deckard_model::layers`). Level, pan
+/// and tune are the zone's own, as stored.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LayerAct {
+    Focus,
+    Mute,
+    Solo,
+    Level(f64),
+    Pan(f64),
+    Tune(f64),
+    Root(i64),
+    /// Seconds.
+    Attack(f64),
+    Decay(f64),
+    /// 0 to 1.
+    Sustain(f64),
+    Release(f64),
+    /// Its window's point (0: A … 3: D) put here on the morph.
+    Window(usize, f64),
+    Remove,
+    Duplicate,
+    /// To this lane.
+    MoveTo(usize),
+    /// These files from this lane on: an empty lane gets a layer, a full one another
+    /// sample.
+    Files(Vec<std::path::PathBuf>),
+}
+
+/// What's done to a layered sound's morph, and to all its layers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MorphAct {
+    On(bool),
+    Position(f64),
+    Sync(bool),
+    Bars(f64),
+    Seconds(f64),
+    Shape(deckard_model::layers::Shape),
+    Depth(f64),
+    Reset(bool),
+    Fade(deckard_model::layers::Fade),
+    /// The windows spread evenly again.
+    Spread,
+    /// Every layer over these keys.
+    Keys(i64, i64),
+    /// Choose files for the next empty lanes.
+    Add,
+}
+
+/// The stem lanes' colours, in their order: Drums, Vocals, Bass, Leads.
+pub const LANE_COLOURS: [Color32; 4] = [
+    Color32::from_rgb(0xf2, 0xa2, 0x3c),
+    Color32::from_rgb(0xe8, 0x58, 0x8a),
+    Color32::from_rgb(0x5a, 0x9c, 0xf2),
+    Color32::from_rgb(0x62, 0xc7, 0x8a),
+];
+
+/// A stem lane's waveform: its file, sample and peak blocks.
+pub struct LaneView {
+    pub file: String,
+    pub sample: Arc<Sample>,
+    peaks: Vec<[(f32, f32); 2]>,
+}
+
 #[derive(Debug, Clone)]
 pub enum SamplingAct {
+    /// TYPE: the focused Sampler Preview's mode asked for. A sound with a sample asks
+    /// first ([`SamplingAct::SamplerAnswer`]): the change loses its changes.
+    Sampler(deckard_model::new_sampler::SamplerMode),
+    /// The mode change asked for: gone ahead with (`true`), or dropped.
+    SamplerAnswer(bool),
+    /// A layer of the focused sound (its lane, from 0).
+    Layer(usize, LayerAct),
+    /// Its layers' morph, and what's the sound's.
+    Morph(MorphAct),
+    /// STEMS into a new group, whatever the zone (Maschine's way).
+    StemsToGroup,
+    /// Pick stem files for the focused zone's lanes.
+    LoadStems,
+    /// A stem lane of the focused zone.
+    Lane(usize, LaneAct),
+    /// The lanes folded into one waveform, or stacked.
+    LanesMix(bool),
+    /// The zone's root (`.1`) and/or tempo (`.2`) as stem lane `.0` alone has them.
+    LaneHear(usize, bool, bool),
+    /// Drag the sample (or stem lane `.0`) out of the window as a file: the part
+    /// selected, else the part the zone plays; `true`: all of it.
+    DragOut(Option<usize>, bool),
+    /// SLICE: hear the slice this frame is in.
+    PlaySliceAt(usize),
+    /// Play the focused zone on this key, or stop it if it sounds.
+    Audition(i64),
     Open(bool),
     Tab(usize),
     Stereo,
@@ -207,8 +484,24 @@ pub enum SamplingAct {
     StretchOpen(bool),
     SetStretch(Stretch),
     StretchApply,
+    MungeOpen(bool),
+    SetMunge(deckard_engine::munge::Munge),
+    MungeApply,
+    /// Play the munged range without keeping it.
+    MungeHear,
     SliceMode(usize),
     SplitCount(usize),
+    FindCount(usize),
+    RandomCount(usize),
+    /// Random picks again (the kept slices stay).
+    Reroll,
+    /// Keep slice `.0` through re-rolls, or no longer (Find and Random).
+    KeepSlice(usize),
+    /// A slice at the playhead (Manual, while the sample plays); `true`: exactly there,
+    /// not on the sample's nearest 1/8 note.
+    Catch(bool),
+    /// Slice `.0` onto the group's next empty sound, over all its keys.
+    KeyShift(usize),
     GridDiv(usize),
     Sensitivity(f64),
     ZeroX(bool),
@@ -219,6 +512,12 @@ pub enum SamplingAct {
     ClearSlices,
     ApplySlices,
     PatternMode(usize),
+    /// APPLY to keys (0) or pads (`APPLY_TO`); its notes shuffled; the slices as files.
+    ApplyTo(usize),
+    NoteOrder(bool),
+    ExportSlices,
+    /// APPLY's slices play to the sample's end (else to the next slice).
+    SliceToEnd(bool),
     FocusZone(usize),
     AddZones,
     RemoveZone(usize),
@@ -226,6 +525,38 @@ pub enum SamplingAct {
     ZoneMap(bool),
     ZoneList(bool),
     Record(RecordAct),
+    /// How the focused New Sampler zone plays.
+    PlayMode(deckard_model::new_sampler::PlayMode),
+    /// The focused New Sampler zone's tempo, length or root, set by hand.
+    Meta(deckard_model::new_sampler::ZoneMeta),
+    /// The sound's Slice Motion.
+    Motion(deckard_model::new_sampler::Motion),
+    /// What a note does with the focused New Sampler slice: held, a one-shot or a loop.
+    Plays(deckard_model::new_sampler::Plays),
+    /// TAP, at this time (seconds).
+    Tap(f64),
+    /// The song's tempo set to the sample's.
+    ToProject(f64),
+    /// Analyse the part selected (else the part the zone plays) again: its tempo and root.
+    Reanalyze,
+    /// The focused New Sampler zone's warp markers.
+    Warp(WarpAct),
+}
+
+/// What the warp controls do (roadmap 1e).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WarpAct {
+    /// Markers on the sample's hits (each on the beat it falls on now).
+    Detect,
+    /// Move them toward the grid (`SamplingState::warp_grid`, `warp_strength`).
+    Quantize,
+    Clear,
+    /// A marker at this frame; marker `.0` removed; marker `.0` moved to beat `.1`.
+    Add(usize),
+    Remove(usize),
+    Move(usize, f64),
+    Strength(f64),
+    Grid(usize),
 }
 
 /// Recording controls.
@@ -242,6 +573,10 @@ pub enum RecordAct {
     ScanMidi,
     FocusTake(usize),
     DeleteTake(usize),
+    /// Take `.0` onto lane `.1` of the focused sound (past its layers: a new one).
+    TakeToLayer(usize, usize),
+    /// The focused take onto the layer LAYER was turned to.
+    ApplyLayer,
 }
 
 fn sact(a: SamplingAct) -> Act {
@@ -278,21 +613,32 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, Color32::BLACK);
     let gcol = sound_color(p, app.group, app.sound);
-    let edited = edited(p, (app.group, app.sound, app.zone));
+    // In Layers a take on no layer is edited before it has one: shown as a take is
+    // (RECORD and EDIT), though no zone holds it.
+    let edited = match app.shown_take() {
+        Some((_, file)) => {
+            let sample = deckard_model::SampleRef { kind: 0, path: file.to_string_lossy().into(), ..Default::default() };
+            let z = deckard_model::Zone { sample, ..Default::default() };
+            Some((usize::MAX, z, Target::Zone(app.group, app.sound, usize::MAX), true))
+        }
+        None => edited(p, (app.group, app.sound, app.zone)),
+    };
     let (zi, zone, zt, take) = match &edited {
         Some((zi, z, t, take)) => (*zi, Some(z), *t, *take),
         None => (0, None, Target::Zone(app.group, app.sound, 0), false),
     };
-    // An Audio plug-in's take: RECORD and EDIT only.
-    let tab = if take { st.tab.min(1) } else { st.tab };
+    // The tab asked for, if this sound has it (else EDIT, or RECORD with no sample).
+    let shown = |i: usize| tab_shown(p, app.group, app.sound, i, zone.is_some(), take);
+    let tab = if shown(st.tab) { st.tab } else { usize::from(zone.is_some()) };
 
     // Header: the tabs (only RECORD until the sound has a sample).
     let header = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 37.0));
     painter.rect_filled(header, 0.0, s00());
     let mut x = header.left() + 12.0;
-    for (i, name) in TABS.iter().enumerate() {
-        if i > 0 && zone.is_none() || i > 1 && take {
-            break;
+    for i in TAB_ORDER {
+        let name = &TABS[i];
+        if !shown(i) {
+            continue;
         }
         let w = 14.0 + name.len() as f32 * 7.5;
         let r = Rect::from_min_size(Pos2::new(x, header.top() + 8.0), Vec2::new(w, 22.0));
@@ -344,26 +690,97 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
             }
         }
     }
+    // TYPE: which sampler a Sampler Preview is.
+    if let Some(mode) = crate::layers::mode_of(p, app.group, app.sound) {
+        use deckard_model::new_sampler::SamplerMode;
+        let (w, gap) = (64.0, 4.0);
+        let right = header.right() - if tab == 3 && zone.is_some() { 152.0 } else { 12.0 };
+        let x0 = right - 3.0 * w - 2.0 * gap;
+        painter.text(Pos2::new(x0 - 8.0, header.top() + 19.0), Align2::RIGHT_CENTER, "TYPE", font(10.0), white(142));
+        let busy = app.recorder.busy();
+        for (k, m) in SamplerMode::ALL.into_iter().enumerate() {
+            let r = Rect::from_min_size(Pos2::new(x0 + k as f32 * (w + gap), header.top() + 9.0), Vec2::new(w, 20.0));
+            let tip = match m {
+                SamplerMode::Original => "Original: what Maschine's Sampler does, and no more",
+                SamplerMode::Advanced => "Advanced: Sync and Keys, stems on a zone's lanes, reverse, slices that play on",
+                SamplerMode::Layers => "Layers: every sample is a layer, morphed between",
+            };
+            let resp = ui.interact(r, ui.id().with(("sampler-mode", k)), if busy { Sense::hover() } else { Sense::click() }).on_hover_text(
+                if busy {
+                    "The mode can't be changed while recording".to_string()
+                } else {
+                    format!("{tip}. Changing the mode of a sound with a sample keeps that sample and loses its other changes")
+                },
+            );
+            let on = m == mode;
+            painter.rect_filled(
+                r,
+                2.0,
+                if on {
+                    s03()
+                } else if resp.hovered() && !busy {
+                    s02()
+                } else {
+                    s01()
+                },
+            );
+            painter.text(r.center(), Align2::CENTER_CENTER, m.name().to_uppercase(), font(10.0), if on { white(245) } else { white(142) });
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("deckard-sampler-mode", k)), r));
+            if resp.clicked() && !on {
+                acts.push(sact(SamplingAct::Sampler(m)));
+            }
+        }
+    }
     // Info bar: play, name, duration, stereo/mono.
     let info = Rect::from_min_size(Pos2::new(rect.left(), header.bottom() + 1.0), Vec2::new(rect.width(), 16.0));
     painter.rect_filled(info, 0.0, s00());
     if let (Some(z), Some(s)) = (zone, &st.sample) {
-        let play = Rect::from_min_size(Pos2::new(info.left() + 4.0, info.top()), Vec2::splat(16.0));
-        let resp = ui.interact(play, ui.id().with("samp-play"), Sense::click_and_drag()).on_hover_text("Hold to play the sample");
-        painter.rect_filled(play, 2.0, gcol);
-        triangle(&painter, play.center(), 4.0, Color32::BLACK);
-        if resp.is_pointer_button_down_on() && !app.held.is_some_and(|h| h == (app.group, app.sound, z.root_key)) {
-            acts.push(Act::HoldPitch(app.group, app.sound, z.root_key));
+        // PLAY / STOP: the zone on its own key, as its pad plays it; again to stop it.
+        let play = Rect::from_min_size(Pos2::new(info.left() + 4.0, info.top()), Vec2::new(30.0, 16.0));
+        let sounding = st.playhead.is_some();
+        let resp = ui.interact(play, ui.id().with("samp-play"), Sense::click()).on_hover_text(if sounding {
+            "Stop the sample (Shift+Space)"
+        } else {
+            "Play the sample (Shift+Space)"
+        });
+        painter.rect_filled(play, 2.0, if resp.hovered() { crate::layout::ink() } else { gcol });
+        if sounding {
+            painter.rect_filled(Rect::from_center_size(play.center(), Vec2::splat(7.0)), 0.0, Color32::BLACK);
+        } else {
+            triangle(&painter, play.center(), 4.0, Color32::BLACK);
+        }
+        if resp.clicked() {
+            acts.push(sact(SamplingAct::Audition(z.root_key)));
         }
         let name = z.sample.path.rsplit(['/', '\\']).next().unwrap_or("");
         let t = painter.text(Pos2::new(play.right() + 6.0, info.center().y), Align2::LEFT_CENTER, name, font(12.0), gcol);
-        painter.text(
-            Pos2::new(t.right() + 12.0, info.center().y),
+        // Out of the window, as a file: onto another sampler, a track, the Finder.
+        let grip = Rect::from_min_size(Pos2::new(t.right() + 8.0, info.top() + 1.0), Vec2::new(40.0, 14.0));
+        let resp = ui.interact(grip, ui.id().with("samp-drag-out"), Sense::drag()).on_hover_text(
+            "Drag this onto another application (a sampler, a track, the Finder): the part selected, else the part this zone plays, as a WAV. Alt-drag: the whole file",
+        );
+        painter.rect_filled(grip, 2.0, if resp.hovered() || resp.dragged() { s03() } else { s01() });
+        painter.text(grip.center(), Align2::CENTER_CENTER, "DRAG", font(9.0), if resp.hovered() { white(245) } else { white(200) });
+        if resp.drag_started() {
+            acts.push(sact(SamplingAct::DragOut(None, ui.input(|i| i.modifiers.alt))));
+        }
+        let d = painter.text(
+            Pos2::new(grip.right() + 10.0, info.center().y),
             Align2::LEFT_CENTER,
             frames_text(s.frames.len(), s.rate),
             font(12.0),
             white(142),
         );
+        // A New Sampler zone: what analysis found (its tempo, its root, how it plays).
+        if !take && crate::layers::own(p, app.group, app.sound) {
+            painter.text(
+                Pos2::new(d.right() + 12.0, info.center().y),
+                Align2::LEFT_CENTER,
+                crate::analysis::readout(z.meta.as_ref()),
+                font(12.0),
+                white(200),
+            );
+        }
         let tog = Rect::from_min_size(Pos2::new(info.right() - 60.0, info.top()), Vec2::new(50.0, 16.0));
         let resp = ui.interact(tog, ui.id().with("samp-stereo"), Sense::click()).on_hover_text("Show the two channels, or their mix");
         painter.text(
@@ -385,12 +802,307 @@ pub fn panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, acts: &mut Vec<Act
             white(142),
         );
     }
-    let body = Rect::from_min_max(Pos2::new(rect.left(), info.bottom() + 1.0), rect.max);
+    let mut body = Rect::from_min_max(Pos2::new(rect.left(), info.bottom() + 1.0), rect.max);
+    // A New Sampler zone's tempo and pitch, over its EDIT and SLICE pages.
+    let new_sampler = !take && crate::layers::advanced(p, app.group, app.sound);
+    if let (true, 1 | 2, Some(z), Some(s)) = (new_sampler, tab, zone, &st.sample) {
+        let bar = Rect::from_min_size(body.min, Vec2::new(body.width(), 62.0));
+        beat_bar(ui, app, bar, z, zt, s.frames.len() as f64 / s.rate.max(1) as f64, gcol, acts);
+        body = Rect::from_min_max(Pos2::new(body.left(), bar.bottom() + 1.0), body.max);
+    }
     match tab {
         0 => record_tab(ui, app, p, body, gcol, acts),
         1 => edit_tab(ui, app, body, zi, zone, zt, take, gcol, acts),
         2 => slice_tab(ui, app, body, zi, zone, gcol, acts),
+        4 => layers::layers_tab(ui, app, p, body, gcol, acts),
         _ => zone_tab(ui, app, p, body, zi, gcol, acts),
+    }
+}
+
+/// A New Sampler zone's tempo and pitch (roadmap 1d), Serato's header: its BPM and
+/// length in beats (linked; ×2, ½, TAP, SET PROJECT BPM), its root note (set by hand, it's
+/// locked) and the note it plays at (its Tune), and how it plays (REPITCH, SYNC, KEYS).
+#[allow(clippy::too_many_arguments)]
+fn beat_bar(ui: &mut Ui, app: &App, bar: Rect, z: &deckard_model::Zone, zt: Target, seconds: f64, gcol: Color32, acts: &mut Vec<Act>) {
+    use crate::beat;
+    use deckard_model::new_sampler::{PlayMode, ZoneMeta};
+    let painter = ui.painter_at(bar);
+    painter.rect_filled(bar, 0.0, s00());
+    let Some(m) = z.meta.clone() else {
+        painter.text(Pos2::new(bar.left() + 12.0, bar.center().y), Align2::LEFT_CENTER, "Analysing…", font(12.0), white(142));
+        return;
+    };
+    let y = bar.top() + 4.0;
+    let mut x = bar.left() + 12.0;
+    let meta = |m: ZoneMeta| sact(SamplingAct::Meta(m));
+    let bpm = m.bpm;
+    let (m1, m2) = (m.clone(), m.clone());
+    let mut fields = vec![field("BPM", bpm.map_or("—".into(), |b| format!("{b:.2}")), move |n| {
+        meta(beat::with_bpm(&m1, bpm.unwrap_or(120.0) + n * 0.1, seconds))
+    })];
+    fields[0].tip = "The sample's tempo: drag (Shift: finer); right-click to set the project's tempo to it";
+    let m8 = m.clone();
+    fields[0].enter = read(move |t| value_entry::plain(t).filter(|v| *v > 0.0).map(|v| meta(beat::with_bpm(&m8, v, seconds))));
+    fields[0].menu = bpm.map(|b| -> (String, Box<dyn Fn() -> Act>) {
+        (format!("Set the project's tempo to {b:.2} BPM"), Box::new(move || sact(SamplingAct::ToProject(b))))
+    });
+    let beats = m.beats;
+    let mut bf = field("BEATS", beats.map_or("—".into(), |b| format!("{}", (b * 100.0).round() / 100.0)), move |n| {
+        let b = beats.map_or(4.0, f64::round) + n;
+        beat::with_beats(&m2, b.max(1.0), seconds).map_or(Act::Nothing, meta)
+    });
+    bf.tip = "The sample's length in beats: drag to fit it to whole beats (its tempo follows)";
+    let m9 = m.clone();
+    bf.enter = read(move |t| beat::with_beats(&m9, value_entry::plain(t)?, seconds).map(meta));
+    fields.push(bf);
+    x = group_box(ui, &painter, x, y, "TEMPO", &fields, acts);
+    let small = |x: f32, row: f32, w: f32| Rect::from_min_size(Pos2::new(x, y + row * 28.0), Vec2::new(w, 25.0));
+    let has = bpm.is_some();
+    if tool_button(ui, &painter, small(x, 0.0, 36.0), "×2", has, false, "beat-x2") {
+        acts.push(meta(beat::with_bpm(&m, bpm.unwrap_or(0.0) * 2.0, seconds)));
+    }
+    if tool_button(ui, &painter, small(x, 1.0, 36.0), "½", has, false, "beat-half") {
+        acts.push(meta(beat::with_bpm(&m, bpm.unwrap_or(0.0) / 2.0, seconds)));
+    }
+    x += 40.0;
+    // Nudge: a hundredth of a BPM.
+    for (row, label, by, id) in [(0.0, "+", 0.01, "beat-nudge-up"), (1.0, "−", -0.01, "beat-nudge-down")] {
+        if tool_button(ui, &painter, small(x, row, 24.0), label, has, false, id) {
+            acts.push(meta(beat::with_bpm(&m, bpm.unwrap_or(120.0) + by, seconds)));
+        }
+    }
+    x += 28.0;
+    if tool_button(ui, &painter, small(x, 0.0, 112.0), "TAP", true, false, "beat-tap") {
+        acts.push(sact(SamplingAct::Tap(ui.input(|i| i.time))));
+    }
+    let tp = small(x, 1.0, 112.0);
+    if tool_button(ui, &painter, tp, "SET PROJECT BPM", has, false, "beat-to-project") {
+        acts.push(sact(SamplingAct::ToProject(bpm.unwrap_or(120.0))));
+    }
+    if let Some(b) = bpm {
+        ui.interact(tp, ui.id().with("beat-to-project-tip"), Sense::hover())
+            .on_hover_text(format!("Set the project's tempo to this sample's: {b:.2} BPM"));
+    }
+    x += 116.0;
+    let ra = small(x, 0.0, 84.0);
+    if tool_button(ui, &painter, ra, "REANALYZE", true, false, "beat-reanalyze") {
+        acts.push(sact(SamplingAct::Reanalyze));
+    }
+    ui.interact(ra, ui.id().with("beat-reanalyze-tip"), Sense::hover()).on_hover_text(
+        "Work out the tempo and the root again, from the part selected (else the part this slice plays): a section of a song may have its own",
+    );
+    x += 96.0;
+    // Pitch: the root (detected, or set and locked) and the note it plays at.
+    let root = m.root;
+    let m3 = m.clone();
+    let start_root = root.unwrap_or(z.root_key.clamp(0, 127) as u8);
+    let root_text = match root {
+        Some(r) if m.root_guess => format!("{}?", crate::analysis::note_name(r)),
+        Some(r) if m.cents.abs() >= 1.0 => format!("{} {:+.0} ct", crate::analysis::note_name(r), m.cents).replace('-', "−"),
+        Some(r) => crate::analysis::note_name(r),
+        None => "—".into(),
+    };
+    let mut rf = field(if m.root_locked { "ROOT (SET)" } else { "ROOT" }, root_text, move |n| {
+        meta(beat::with_root(&m3, (i64::from(start_root) + n as i64).clamp(0, 127) as u8))
+    });
+    rf.tip = if m.root_guess {
+        "The sample's root note, a guess (no key stood out): drag to set it, or right-click a stem's name to hear it there"
+    } else {
+        "The sample's root note: drag to set it (then analysis leaves it)"
+    };
+    let m10 = m.clone();
+    rf.enter = note_in(move |k| meta(beat::with_root(&m10, k.clamp(0, 127) as u8)));
+    let mut pitch = vec![rf];
+    if let Some(r) = root {
+        let cents = m.cents;
+        let target = beat::target_of(r, cents, z.tune);
+        let mut tf = field("PLAYS AT", crate::analysis::note_name(target.clamp(0, 127) as u8), move |n| {
+            Act::SetParam(zt, "tune", beat::tune_for(r, cents, (target + n as i64).clamp(0, 127)).clamp(-36.0, 36.0))
+        });
+        tf.tip = if m.mode == PlayMode::Repitch {
+            "The note it plays at: drag to re-tune it (in Repitch, Tune changes the length too)"
+        } else {
+            "The note it plays at: drag to re-tune it (its length stays)"
+        };
+        tf.enter = note_in(move |k| Act::SetParam(zt, "tune", beat::tune_for(r, cents, k.clamp(0, 127)).clamp(-36.0, 36.0)));
+        pitch.push(tf);
+    }
+    x = group_box(ui, &painter, x, y, "PITCH", &pitch, acts);
+    let key = app.scale.0;
+    let tip = format!(
+        "Tune it to the song's key: the nearest {}",
+        crate::analysis::note_name(key.rem_euclid(12) as u8 + 60).trim_end_matches(|c: char| c.is_ascii_digit() || c == '-')
+    );
+    let mk = small(x, 0.0, 78.0);
+    if tool_button(ui, &painter, mk, "MATCH KEY", root.is_some(), false, "beat-match-key")
+        && let Some(r) = root
+    {
+        acts.push(Act::SetParam(zt, "tune", beat::match_tune(r, m.cents, key).clamp(-36.0, 36.0)));
+    }
+    ui.interact(mk, ui.id().with("beat-match-key-tip"), Sense::hover()).on_hover_text(tip);
+    x += 86.0;
+    if beat::WARPS {
+        // Warp markers: on the hits, quantized, cleared.
+        let st = &app.sampling;
+        let (grid, strength) = (st.warp_grid, st.warp_strength);
+        let grids: Vec<String> = beat::WARP_GRIDS.iter().map(|g| g.1.to_string()).collect();
+        let mut sf = field("STRENGTH", format!("{:.0} %", strength * 100.0), move |n| {
+            sact(SamplingAct::Warp(WarpAct::Strength((strength + n * 0.05).clamp(0.0, 1.0))))
+        });
+        sf.tip = "How far QUANTIZE moves the markers toward the grid";
+        sf.enter = num(|v| sact(SamplingAct::Warp(WarpAct::Strength((v / 100.0).clamp(0.0, 1.0)))));
+        let warp_fields = [choice_field("GRID", grids, grid, |k| sact(SamplingAct::Warp(WarpAct::Grid(k)))), sf];
+        x = group_box(ui, &painter, x, y, if m.warps.is_empty() { "WARP" } else { "WARP (ON)" }, &warp_fields, acts);
+        // What each does, on hover (the buttons themselves are the tool bar's).
+        let tip = |r: Rect, id: &str, text: &str| {
+            ui.interact(r, ui.id().with(("warp-tip", id)), Sense::hover()).on_hover_text(text.to_string());
+        };
+        let r = small(x, 0.0, 70.0);
+        if tool_button(ui, &painter, r, "MARKERS", has, false, "warp-detect") {
+            acts.push(sact(SamplingAct::Warp(WarpAct::Detect)));
+        }
+        tip(
+            r,
+            "detect",
+            "Put a warp marker on each hit. A marker holds that moment of the sample on a beat; nothing moves until one is dragged or QUANTIZE is pressed",
+        );
+        let r = small(x, 1.0, 70.0);
+        if tool_button(ui, &painter, r, "QUANTIZE", !m.warps.is_empty(), false, "warp-quantize") {
+            acts.push(sact(SamplingAct::Warp(WarpAct::Quantize)));
+        }
+        tip(
+            r,
+            "quantize",
+            "Move each marker's hit onto the nearest GRID line (by STRENGTH): a loose loop plays in time. Heard in Sync and Keys",
+        );
+        x += 74.0;
+        let r = small(x, 0.0, 50.0);
+        if tool_button(ui, &painter, r, "CLEAR", !m.warps.is_empty(), false, "warp-clear") {
+            acts.push(sact(SamplingAct::Warp(WarpAct::Clear)));
+        }
+        tip(r, "clear", "Take every warp marker away: the sample plays at its own timing again");
+        x += 54.0;
+    }
+    // How it plays.
+    x += 8.0;
+    for (k, (label, mode, tip)) in [
+        ("REPITCH", PlayMode::Repitch, "Pitch and speed together: Tune changes the length"),
+        ("SYNC", PlayMode::Sync, "In time with the song: Tune keeps the length"),
+        ("KEYS", PlayMode::Keys, "In time with the song; notes change the pitch and keep the length"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let b = Rect::from_min_size(Pos2::new(x + k as f32 * 74.0, y + 14.0), Vec2::new(70.0, 30.0));
+        let usable = mode == PlayMode::Repitch || has;
+        let on = m.mode == mode;
+        let resp = ui.interact(b, ui.id().with(("samp-mode", label)), Sense::click()).on_hover_text(if usable {
+            tip
+        } else {
+            "No tempo: set one first"
+        });
+        painter.rect_filled(
+            b,
+            3.0,
+            if on {
+                gcol
+            } else if resp.hovered() && usable {
+                s02()
+            } else {
+                s01()
+            },
+        );
+        let col = if on {
+            Color32::BLACK
+        } else if usable {
+            white(200)
+        } else {
+            white(60)
+        };
+        painter.text(b.center(), Align2::CENTER_CENTER, label, font(11.0), col);
+        if resp.clicked() && usable && !on {
+            acts.push(sact(SamplingAct::PlayMode(mode)));
+        }
+    }
+    x += 3.0 * 74.0 + 4.0;
+    // Backwards, this zone alone.
+    let rv = Rect::from_min_size(Pos2::new(x, y + 14.0), Vec2::new(70.0, 30.0));
+    let resp = ui
+        .interact(rv, ui.id().with("samp-reverse"), Sense::click())
+        .on_hover_text("Play this slice backwards (a start point plays from there back to the sample's beginning)");
+    painter.rect_filled(
+        rv,
+        3.0,
+        if m.reverse {
+            gcol
+        } else if resp.hovered() {
+            s02()
+        } else {
+            s01()
+        },
+    );
+    painter.text(rv.center(), Align2::CENTER_CENTER, "REVERSE", font(11.0), if m.reverse { Color32::BLACK } else { white(200) });
+    if resp.clicked() {
+        acts.push(meta(ZoneMeta { reverse: !m.reverse, ..m.clone() }));
+    }
+    x += 78.0;
+    // What a note does with it: held, a one-shot, a loop.
+    {
+        use deckard_model::new_sampler::Plays;
+        let cur = Plays::ALL.iter().position(|p| *p == Plays::of(z)).unwrap_or(0);
+        let mut f = choice_field("PLAYS", Plays::ALL.iter().map(|p| p.label().to_string()).collect(), cur, |k| {
+            sact(SamplingAct::Plays(Plays::ALL[k.min(2)]))
+        });
+        f.tip = "Hold: it plays while the pad is held. One shot: a tap plays it through to its end (E, the next slice at first). Loop: it goes round while the pad is held (the LOOP frame, this slice at first)";
+        // Its tail: what it does at its end.
+        use deckard_model::new_sampler::{Motion, TAIL_MAX};
+        let (m6, m7, tail) = (m.clone(), m.clone(), m.tail_ms());
+        let mut tf = field("TAIL", if tail > 0.0 { format!("{tail:.0} ms") } else { "Off".into() }, move |n| {
+            meta(ZoneMeta { tail: (tail / 10.0 + n).round().clamp(0.0, TAIL_MAX / 10.0) * 10.0, ..m6.clone() })
+        });
+        tf.tip = "A tail for a slice that ends abruptly: at its end it plays back from there this long, fading out (a slice that loops has none; right-click: off)";
+        tf.menu = Some(("No tail".to_string(), Box::new(move || meta(ZoneMeta { tail: 0.0, ..m7.clone() }))));
+        let m11 = m.clone();
+        tf.enter = Some(Box::new(move |typed, shown| {
+            let ms = if typed.trim().eq_ignore_ascii_case("off") { 0.0 } else { value_entry::time(typed, shown, true)? * 1000.0 };
+            Some(meta(ZoneMeta { tail: ms.round().clamp(0.0, TAIL_MAX), ..m11.clone() }))
+        }));
+        // The sound's: which of its slices a note plays.
+        let motion = app
+            .doc
+            .as_ref()
+            .and_then(|d| d.borrow().project().groups.get(app.group)?.sounds.get(app.sound)?.new_sampler)
+            .map_or(Motion::Off, |n| n.motion);
+        let cur = Motion::ALL.iter().position(|x| *x == motion).unwrap_or(0);
+        let mut mf = choice_field("MOTION", Motion::ALL.iter().map(|x| x.label().to_string()).collect(), cur, |k| {
+            sact(SamplingAct::Motion(Motion::ALL[k.min(2)]))
+        });
+        mf.tip = "Slice Motion, for the whole sound. Next: every note plays the next of its slices, whichever key it is. Random: any but the one before. Each plays at its own pitch";
+        x = group_box(ui, &painter, x, y, "SLICE", &[f, tf, mf], acts);
+    }
+    // Its own speed against the song's (Sync and Keys: the stretcher's).
+    if m.mode != PlayMode::Repitch && has {
+        let (m4, sp) = (m.clone(), m.speed_factor());
+        let mut f = field("SPEED", format!("{:.0} %", sp * 100.0), move |n| {
+            meta(ZoneMeta { speed: ((sp * 100.0 + n).round() / 100.0).clamp(0.25, 4.0), ..m4.clone() })
+        });
+        f.tip = "How fast this slice goes against the song, its pitch unmoved: 100 % is in time, 50 % half speed, 200 % double (right-click: back to 100 %)";
+        let m12 = m.clone();
+        f.enter = num(move |v| meta(ZoneMeta { speed: (v.round() / 100.0).clamp(0.25, 4.0), ..m12.clone() }));
+        let m5 = m.clone();
+        f.menu = Some(("Back to 100 % (in time)".to_string(), Box::new(move || meta(ZoneMeta { speed: 1.0, ..m5.clone() }))));
+        x = group_box(ui, &painter, x, y, "STRETCH", &[f], acts);
+    }
+    // Sync: the grid notes played live start on.
+    if m.mode == PlayMode::Sync {
+        use deckard_model::new_sampler::StartGrid;
+        let cur = StartGrid::ALL.iter().position(|g| *g == m.start).unwrap_or(0);
+        let m4 = m.clone();
+        let mut gf = choice_field("START", StartGrid::ALL.iter().map(|g| g.label().to_string()).collect(), cur, move |k| {
+            meta(ZoneMeta { start: StartGrid::ALL[k.min(StartGrid::ALL.len() - 1)], ..m4.clone() })
+        });
+        gf.tip = "Notes played while the song runs start on this grid: a little early waits, a little late catches up";
+        group_box(ui, &painter, x, y, "SYNC", &[gf], acts);
     }
 }
 
@@ -420,12 +1132,84 @@ fn wave(
     let xf = |x: f32| (v0 + ((x - w.left()) / w.width()) as f64 * (v1 - v0)).clamp(0.0, len as f64);
     painter.rect_filled(timeline, 0.0, s00());
     painter.rect_filled(w, 0.0, s00());
+    // Timeline: a New Sampler zone with a tempo shows its bars and beats (lines through
+    // the waveform, bars brighter); others, seconds.
+    let map = zone.meta.as_ref().and_then(|m| deckard_model::new_sampler::BeatMap::of(m, sample.rate));
+    let grid = map.as_ref().map(|m| crate::beat::beats_in(m, v0, v1));
+    if let Some(beats) = grid.as_ref().filter(|b| !b.is_empty()) {
+        let px = w.width() as f64 / beats.len() as f64;
+        for &(f, bar, beat) in beats {
+            let x = fx(f);
+            let downbeat = beat == 1;
+            if !downbeat && px < 6.0 {
+                continue;
+            }
+            painter.vline(x, w.y_range(), Stroke::new(1.0, if downbeat { white(40) } else { white(16) }));
+            painter.vline(x, (timeline.bottom() - if downbeat { 10.0 } else { 5.0 })..=timeline.bottom(), Stroke::new(1.0, white(120)));
+            if downbeat || px > 40.0 {
+                let label = if downbeat { format!("{bar}") } else { format!("{bar}.{beat}") };
+                painter.text(
+                    Pos2::new(x + 3.0, timeline.top() + 1.0),
+                    Align2::LEFT_TOP,
+                    label,
+                    font(9.0),
+                    white(if downbeat { 200 } else { 110 }),
+                );
+            }
+        }
+    }
+    // Where the warp markers' lines go (x, beat): drawn over the waveform, below.
+    let mut warp_lines: Vec<(f32, f64)> = Vec::new();
+    // Warp markers: a line through the waveform and a handle on the timeline. Drag a
+    // handle to move its beat (the grid moves past it), double-click it to remove it;
+    // double-click the timeline for a new one.
+    if crate::beat::WARPS
+        && let (Some(m), Some(map)) = (zone.meta.as_ref(), map.as_ref())
+    {
+        let warp_col = Color32::from_rgb(0xf2, 0xc1, 0x4e);
+        let per = sample.rate as f64 * 60.0 / m.bpm.unwrap_or(120.0);
+        let frames_per_px = (v1 - v0) / w.width().max(1.0) as f64;
+        let mut on_handle = false;
+        for (i, wp) in m.warps.iter().enumerate() {
+            let f = wp.frame as f64;
+            if f < v0 || f > v1 {
+                continue;
+            }
+            let x = fx(f);
+            warp_lines.push((x, wp.beat));
+            let h = Rect::from_center_size(Pos2::new(x, timeline.center().y), Vec2::new(9.0, timeline.height()));
+            painter.add(egui::Shape::convex_polygon(
+                vec![Pos2::new(x - 4.5, h.top()), Pos2::new(x + 4.5, h.top()), Pos2::new(x, h.bottom())],
+                warp_col,
+                Stroke::NONE,
+            ));
+            let resp = ui
+                .interact(h, ui.id().with(("warp", i)), Sense::click_and_drag())
+                .on_hover_text(format!("Warp marker on beat {:.2}: drag to move its beat, double-click to remove it", wp.beat + 1.0));
+            on_handle |= resp.hovered();
+            if resp.double_clicked() {
+                acts.push(sact(SamplingAct::Warp(WarpAct::Remove(i))));
+            } else if resp.dragged() && resp.drag_delta().x != 0.0 {
+                let fine = if ui.input(|i| i.modifiers.shift) { 0.1 } else { 1.0 };
+                let d = resp.drag_delta().x as f64 * frames_per_px / per * fine;
+                acts.push(sact(SamplingAct::Warp(WarpAct::Move(i, wp.beat + d))));
+            }
+        }
+        let tl = ui.interact(timeline, ui.id().with("warp-timeline"), Sense::click());
+        if !on_handle
+            && tl.double_clicked()
+            && let Some(p) = tl.interact_pointer_pos()
+        {
+            acts.push(sact(SamplingAct::Warp(WarpAct::Add(xf(p.x) as usize))));
+        }
+        let _ = map;
+    }
     // Timeline: seconds.
     let secs = (v1 - v0) / sample.rate.max(1) as f64;
     let step =
         [0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0].into_iter().find(|s| secs / s <= 10.0).unwrap_or(60.0);
     let mut t = (v0 / sample.rate as f64 / step).ceil() * step;
-    while t * (sample.rate as f64) < v1 {
+    while grid.as_ref().is_none_or(Vec::is_empty) && t * (sample.rate as f64) < v1 {
         let x = fx(t * sample.rate as f64);
         painter.vline(x, (timeline.bottom() - 8.0)..=timeline.bottom(), Stroke::new(1.0, white(92)));
         painter.text(
@@ -448,8 +1232,22 @@ fn wave(
     if looped {
         painter.rect_filled(Rect::from_x_y_ranges(fx(la)..=fx(lb), w.y_range()), 0.0, gcol.gamma_multiply(0.18));
     }
-    // The waveform: per column, (min, max) per channel.
-    let chans: Vec<Rect> = if st.stereo {
+    // The waveform: per column, (min, max) per channel; a zone with stem lanes, a row a
+    // lane (mono), in the lane's colour, dimmed when it's silent.
+    let stems = zone
+        .meta
+        .as_ref()
+        .filter(|m| m.has_stems() && !st.lanes_mix)
+        .map(|m| (&m.stems, deckard_model::new_sampler::lane_levels(&m.stems)));
+    let lane_rows: Vec<usize> =
+        stems.as_ref().map_or_else(Vec::new, |(l, _)| (0..4).filter(|&k| l[k].is_some() && st.lanes[k].is_some()).collect());
+    let chans: Vec<Rect> = if !lane_rows.is_empty() {
+        let n = lane_rows.len() as f32;
+        let h = (w.height() - (n - 1.0)) / n;
+        (0..lane_rows.len())
+            .map(|i| Rect::from_min_size(Pos2::new(w.left(), w.top() + i as f32 * (h + 1.0)), Vec2::new(w.width(), h)))
+            .collect()
+    } else if st.stereo {
         let h = (w.height() - 1.0) / 2.0;
         vec![
             Rect::from_min_size(w.min, Vec2::new(w.width(), h)),
@@ -459,11 +1257,28 @@ fn wave(
         vec![w]
     };
     let cols = w.width().max(1.0) as usize;
-    let colour = |f: usize| {
+    let colour = |k: usize, f: usize| {
         let inside = (f as f64) >= lo && (f as f64) < hi;
-        if inside || st.selection.is_some_and(|(s0, s1)| f >= s0 && f < s1) { gcol } else { s03() }
+        if !(inside || st.selection.is_some_and(|(s0, s1)| f >= s0 && f < s1)) {
+            return s03();
+        }
+        match (lane_rows.get(k), &stems) {
+            (Some(&lane), Some((_, levels))) => LANE_COLOURS[lane].gamma_multiply(if levels[lane] > 0.0 { 1.0 } else { 0.25 }),
+            _ => gcol,
+        }
     };
-    let level = |p: [(f32, f32); 2], k: usize| if st.stereo { p[k] } else { ((p[0].0 + p[1].0) * 0.5, (p[0].1 + p[1].1) * 0.5) };
+    let mono = |p: [(f32, f32); 2]| ((p[0].0 + p[1].0) * 0.5, (p[0].1 + p[1].1) * 0.5);
+    // Row `k`'s (min, max) over frames [a, b), and its value at frame `f`.
+    let peak = |k: usize, a: usize, b: usize| match lane_rows.get(k) {
+        Some(&lane) => mono(st.lane_column(lane, a, b)),
+        None if st.stereo => st.column(a, b)[k],
+        None => mono(st.column(a, b)),
+    };
+    let point = |k: usize, f: usize| match lane_rows.get(k) {
+        Some(&lane) => st.lanes[lane].as_ref().and_then(|l| l.sample.frames.get(f)).map_or(0.0, |x| (x[0] + x[1]) * 0.5),
+        None if st.stereo => sample.frames[f][k],
+        None => (sample.frames[f][0] + sample.frames[f][1]) * 0.5,
+    };
     let y_of = |cr: &Rect, v: f32| cr.center().y - v.clamp(-1.0, 1.0) * cr.height() * 0.48;
     let mut outlines: Vec<Vec<crate::sampler_ui::WaveCol>> = vec![Vec::with_capacity(cols); chans.len()];
     // Up to a few frames per pixel the signal's shape shows: draw it as a line through
@@ -473,11 +1288,9 @@ fn wave(
         let first = (v0.floor() as usize).saturating_sub(2);
         let last = ((v1.ceil() as usize) + 2).min(len - 1);
         for f in first..=last {
-            let fr = sample.frames[f];
-            let p = [(fr[0], fr[0]), (fr[1], fr[1])];
             for (k, cr) in chans.iter().enumerate() {
-                let y = y_of(cr, level(p, k).0);
-                outlines[k].push(crate::sampler_ui::WaveCol { x: fx(f as f64), top: y, bottom: y, color: colour(f) });
+                let y = y_of(cr, point(k, f));
+                outlines[k].push(crate::sampler_ui::WaveCol { x: fx(f as f64), top: y, bottom: y, color: colour(k, f) });
             }
         }
     } else {
@@ -487,15 +1300,14 @@ fn wave(
             if a >= len {
                 break;
             }
-            // One frame more, so neighbouring columns overlap and the shape stays joined.
-            let p = st.column(a, b + 1);
             for (k, cr) in chans.iter().enumerate() {
-                let (mn, mx) = level(p, k);
+                // One frame more, so neighbouring columns overlap and the shape stays joined.
+                let (mn, mx) = peak(k, a, b + 1);
                 outlines[k].push(crate::sampler_ui::WaveCol {
                     x: w.left() + c as f32 + 0.5,
                     top: y_of(cr, mx),
                     bottom: y_of(cr, mn),
-                    color: colour(a),
+                    color: colour(k, a),
                 });
             }
         }
@@ -511,12 +1323,30 @@ fn wave(
     for cr in &chans {
         painter.hline(w.x_range(), cr.center().y, Stroke::new(1.0, crate::layout::grey(30)));
     }
+    // Warp markers' lines, over the waveform and the selection, each with the beat it
+    // holds (bar.beat) where there's room before the next.
+    let warp_col = Color32::from_rgb(0xf2, 0xc1, 0x4e);
+    for (i, &(x, beat)) in warp_lines.iter().enumerate() {
+        painter.vline(x, w.y_range(), Stroke::new(1.0, warp_col.gamma_multiply(0.85)));
+        if warp_lines.get(i + 1).is_none_or(|n| n.0 - x > 34.0) {
+            let (bar, in_bar) = ((beat / 4.0).floor(), beat.rem_euclid(4.0) + 1.0);
+            let text = format!("{}.{in_bar:.2}", bar as i64 + 1).trim_end_matches('0').trim_end_matches('.').to_string();
+            let at = Pos2::new(x + 3.0, w.bottom() - 13.0);
+            let g = painter.layout_no_wrap(text, font(9.0), warp_col);
+            painter.rect_filled(Rect::from_min_size(at, g.size()).expand(1.0), 2.0, Color32::from_black_alpha(190));
+            painter.galley(at, g, warp_col);
+        }
+    }
     // Slice markers.
     if slices {
         for (i, &s) in st.slices.iter().enumerate() {
             let x = fx(s as f64);
             painter.vline(x, w.y_range(), Stroke::new(1.0, white(164)));
             painter.text(Pos2::new(x + 3.0, w.top() + 2.0), Align2::LEFT_TOP, (i + 1).to_string(), font(9.0), white(142));
+            // A kept slice (it stays through re-rolls): a block on its line.
+            if matches!(st.slice_mode, 4 | 5) && st.kept.contains(&s) {
+                painter.rect_filled(Rect::from_min_size(Pos2::new(x - 3.0, w.top() + 15.0), Vec2::splat(7.0)), 1.0, white(230));
+            }
         }
     }
     // Loop frame and S/E markers.
@@ -543,6 +1373,92 @@ fn wave(
     // Interaction: drag a marker (S/E, loop edges or body, a slice), else select (or,
     // on the Slice tab, add/remove slices).
     let resp = ui.interact(w, ui.id().with("sample-wave"), Sense::click_and_drag());
+    // Stem lanes: each row's name, M (mute), S (solo) and gain (drag it), over its
+    // waveform; LANES / MIX folds them into the one waveform and back.
+    if let Some(m) = zone.meta.as_ref().filter(|m| m.has_stems()) {
+        let small = |ui: &mut Ui, r: Rect, text: &str, on: Option<Color32>, id: (&str, usize), tip: &str| {
+            let resp = ui.interact(r, ui.id().with(id), Sense::click()).on_hover_text(tip.to_string());
+            let fill = on.unwrap_or(if resp.hovered() { s03() } else { s01() });
+            painter.rect_filled(r, 2.0, fill);
+            painter.text(r.center(), Align2::CENTER_CENTER, text, font(9.0), if on.is_some() { Color32::BLACK } else { white(200) });
+            resp.clicked()
+        };
+        for (i, &lane) in lane_rows.iter().enumerate() {
+            let Some(l) = &m.stems[lane] else { continue };
+            let cr = chans[i];
+            let col = LANE_COLOURS[lane];
+            let y = cr.top() + 2.0;
+            let name = Rect::from_min_size(Pos2::new(cr.left() + 18.0, y), Vec2::new(46.0, 14.0));
+            // Its name: dragged, the stem goes out of the window as a file.
+            let nr = ui.interact(name, ui.id().with(("lane-drag-out", lane)), Sense::click_and_drag()).on_hover_text(
+                "Drag this stem onto another application: the part selected, else the part this zone plays, as a WAV (Alt-drag: the whole stem). Right-click: the root or tempo as this stem has it",
+            );
+            painter.rect_filled(name, 2.0, if nr.hovered() || nr.dragged() { s03() } else { Color32::from_black_alpha(170) });
+            painter.text(name.center(), Align2::CENTER_CENTER, deckard_model::new_sampler::LANE_NAMES[lane].to_uppercase(), font(9.0), col);
+            if nr.drag_started() {
+                acts.push(sact(SamplingAct::DragOut(Some(lane), ui.input(|i| i.modifiers.alt))));
+            }
+            // What analysis hears in this stem alone (the bass for the root, the drums
+            // for the tempo, say).
+            nr.context_menu(|ui| {
+                let stem = deckard_model::new_sampler::LANE_NAMES[lane];
+                for (label, root, tempo) in
+                    [("Root from this stem", true, false), ("Tempo from this stem", false, true), ("Analyse from this stem", true, true)]
+                {
+                    if ui
+                        .button(label)
+                        .on_hover_text(format!("Set it as the {stem} stem alone has it: the part selected, else the part this zone plays"))
+                        .clicked()
+                    {
+                        acts.push(sact(SamplingAct::LaneHear(lane, root, tempo)));
+                        ui.close();
+                    }
+                }
+            });
+            let mr = Rect::from_min_size(Pos2::new(name.right() + 2.0, y), Vec2::splat(14.0));
+            if small(ui, mr, "M", l.mute.then_some(col), ("lane-m", lane), "Mute this stem") {
+                acts.push(sact(SamplingAct::Lane(lane, LaneAct::Mute)));
+            }
+            let sr = Rect::from_min_size(Pos2::new(mr.right() + 2.0, y), Vec2::splat(14.0));
+            if small(ui, sr, "S", l.solo.then_some(Color32::from_rgb(0xf2, 0xc1, 0x4e)), ("lane-s", lane), "Solo this stem") {
+                acts.push(sact(SamplingAct::Lane(lane, LaneAct::Solo)));
+            }
+            let gr = Rect::from_min_size(Pos2::new(sr.right() + 2.0, y), Vec2::new(44.0, 14.0));
+            let g = ui
+                .interact(gr, ui.id().with(("lane-g", lane)), Sense::click_and_drag())
+                .on_hover_text("This stem's level: drag up or down, double-click for 0 dB");
+            painter.rect_filled(gr, 2.0, if g.hovered() || g.dragged() { s03() } else { Color32::from_black_alpha(170) });
+            let db = if l.gain > 0.0005 { format!("{:+.1} dB", 20.0 * l.gain.log10()).replace('-', "−") } else { "−∞".into() };
+            painter.text(gr.center(), Align2::CENTER_CENTER, db, font(9.0), white(200));
+            let xr = Rect::from_min_size(Pos2::new(gr.right() + 2.0, y), Vec2::splat(14.0));
+            if small(ui, xr, "×", None, ("lane-x", lane), "Delete this stem: the others are all that plays (undo brings it back)") {
+                acts.push(sact(SamplingAct::Lane(lane, LaneAct::Delete)));
+            }
+            if g.double_clicked() {
+                acts.push(sact(SamplingAct::Lane(lane, LaneAct::Gain(1.0))));
+            } else if g.dragged() && g.drag_delta().y != 0.0 {
+                // Half a dB a pixel, down to silence at −60.
+                let now = if l.gain > 0.0005 { 20.0 * l.gain.log10() } else { -60.0 };
+                let to = (now - f64::from(g.drag_delta().y) * 0.5).clamp(-60.0, 6.0);
+                acts.push(sact(SamplingAct::Lane(lane, LaneAct::Gain(if to <= -60.0 { 0.0 } else { 10f64.powf(to / 20.0) }))));
+            }
+        }
+        let fold = Rect::from_min_size(Pos2::new(w.right() - 18.0 - 44.0, w.bottom() - 16.0), Vec2::new(44.0, 14.0));
+        if small(
+            ui,
+            fold,
+            if st.lanes_mix { "LANES" } else { "MIX" },
+            None,
+            ("lane-fold", 0),
+            "The stems stacked, or folded into one waveform",
+        ) {
+            acts.push(sact(SamplingAct::LanesMix(!st.lanes_mix)));
+        }
+        let rm = Rect::from_min_size(Pos2::new(fold.left() - 60.0, fold.top()), Vec2::new(58.0, 14.0));
+        if small(ui, rm, "NO STEMS", None, ("lane-clear", 0), "Take the stems off this zone (their files stay)") {
+            acts.push(sact(SamplingAct::Lane(0, LaneAct::Clear)));
+        }
+    }
     let drag_id = ui.id().with("sample-wave-drag");
     #[derive(Clone, Copy)]
     enum Grab {
@@ -583,13 +1499,14 @@ fn wave(
         Grab::Loop(_) => Some(egui::CursorIcon::Grab),
         Grab::Select(_) => None,
     };
-    if resp.drag_started()
+    if resp.drag_started_by(egui::PointerButton::Primary)
         && let Some(pos) = ui.input(|i| i.pointer.press_origin())
     {
         ui.data_mut(|d| d.insert_temp(drag_id, Some(grab_at(pos))));
     }
     // The pointer shows what can be dragged (and keeps showing it while dragging).
-    let held = if resp.dragged() { ui.data(|d| d.get_temp::<Option<Grab>>(drag_id)).flatten() } else { None };
+    let held =
+        if resp.dragged_by(egui::PointerButton::Primary) { ui.data(|d| d.get_temp::<Option<Grab>>(drag_id)).flatten() } else { None };
     let shown = match (held, resp.hover_pos()) {
         (Some(Grab::Loop(_)), _) => Some(egui::CursorIcon::Grabbing),
         (Some(g), _) => cursor(g),
@@ -599,10 +1516,20 @@ fn wave(
     if let Some(c) = shown {
         ui.ctx().set_cursor_icon(c);
     }
-    if resp.dragged()
+    if resp.dragged_by(egui::PointerButton::Primary)
         && let (Some(Some(grab)), Some(pos)) = (ui.data(|d| d.get_temp::<Option<Grab>>(drag_id)), resp.interact_pointer_pos())
     {
-        let f = xf(pos.x).round();
+        // A zone with a tempo: markers snap to its beats (the finest lines a few pixels
+        // apart); SHIFT moves them freely.
+        let free = ui.input(|i| i.modifiers.shift);
+        let snap = |f: f64| match map.as_ref().filter(|_| !free) {
+            Some(m) => {
+                let div = crate::beat::snap_division(m, f, 8.0 * (v1 - v0) / w.width().max(1.0) as f64);
+                crate::beat::snap(m, f, div).clamp(0.0, len as f64)
+            }
+            None => f,
+        };
+        let f = snap(xf(pos.x).round());
         let last = len as f64 - 1.0;
         match grab {
             Grab::Start => acts.push(Act::SetParam(zt, "play_range/low", f.min(hi - 2.0).max(0.0))),
@@ -611,12 +1538,13 @@ fn wave(
             Grab::LoopEnd => acts.push(Act::SetParam(zt, "loop_range/high", (f - 1.0).clamp(la + 1.0, hi - 1.0))),
             Grab::Loop(off) => {
                 let n = lb - la;
-                let a = (f - off).clamp(lo, hi - n);
+                let a = snap(xf(pos.x).round() - off).clamp(lo, hi - n);
                 acts.push(Act::SetParam(zt, "loop_range/low", a));
                 acts.push(Act::SetParam(zt, "loop_range/high", a + n - 1.0));
             }
             Grab::Slice(i) => acts.push(sact(SamplingAct::MoveSlice(i, f as usize))),
             Grab::Select(from) => {
+                let from = snap(from);
                 let (a, b) = (from.min(f) as usize, from.max(f) as usize);
                 acts.push(sact(SamplingAct::Select((b > a).then_some((a, b)))));
             }
@@ -627,13 +1555,52 @@ fn wave(
     {
         let f = xf(pos.x) as usize;
         if slices {
-            acts.push(sact(if st.remove_tool { SamplingAct::RemoveSliceAt(f) } else { SamplingAct::SliceAt(f) }));
+            // Manual: the tool chosen cuts or joins (ALT: hear the slice); else a click
+            // plays the slice under it.
+            let tool = st.slice_mode == 3 && !ui.input(|i| i.modifiers.alt);
+            acts.push(sact(match (tool, st.remove_tool) {
+                (true, true) => SamplingAct::RemoveSliceAt(f),
+                (true, false) => SamplingAct::SliceAt(f),
+                _ => SamplingAct::PlaySliceAt(f),
+            }));
         } else {
             acts.push(sact(SamplingAct::Select(None)));
         }
     }
     if resp.double_clicked() && !slices {
         acts.push(sact(SamplingAct::Select(Some((lo as usize, hi as usize)))));
+    }
+    // SLICE, right-clicked: the slice under the pointer kept (Find, Random), or key shifted.
+    if slices {
+        let at = ui.id().with("slice-menu-at");
+        if resp.secondary_clicked()
+            && let Some(pos) = resp.interact_pointer_pos()
+        {
+            ui.data_mut(|d| d.insert_temp(at, xf(pos.x).max(0.0) as usize));
+        }
+        resp.context_menu(|ui| {
+            let f = ui.data(|d| d.get_temp::<usize>(at)).unwrap_or(0);
+            let i = st.slices.iter().rposition(|&s| s <= f).unwrap_or(0);
+            if matches!(st.slice_mode, 4 | 5) {
+                let kept = st.slices.get(i).is_some_and(|s| st.kept.contains(s));
+                if ui
+                    .button(if kept { "Don't keep slice" } else { "Keep slice" })
+                    .on_hover_text("A kept slice stays where it is when the others are picked again")
+                    .clicked()
+                {
+                    acts.push(sact(SamplingAct::KeepSlice(i)));
+                    ui.close();
+                }
+            }
+            if ui
+                .button("Key Shift to new sound")
+                .on_hover_text("This slice on the group's next empty sound, over all its keys: play it in keyboard mode")
+                .clicked()
+            {
+                acts.push(sact(SamplingAct::KeyShift(i)));
+                ui.close();
+            }
+        });
     }
     // Zoom with the wheel (around the pointer), scroll with a horizontal swipe.
     if resp.hovered() {
@@ -691,11 +1658,28 @@ fn group_box(ui: &Ui, painter: &Painter, x: f32, y: f32, title: &str, fields: &[
         fx += widths[i] + 4.0;
         painter.text(Pos2::new(fr.left() + 2.0, fr.top() + 6.0), Align2::LEFT_CENTER, f.label, font(9.0), white(110));
         let value = elide(painter, &f.value, 12.0, fr.width() - 4.0 - if f.choice.is_some() { 10.0 } else { 0.0 });
-        let mut resp = ui.interact(fr, ui.id().with(("field", title, i)), Sense::click_and_drag());
-        resp = if value != f.value { resp.on_hover_text(format!("{}\n{}", f.value, f.tip)) } else { resp.on_hover_text(f.tip) };
+        // (By its label and row too: two boxes on a tab may share a title, as SLICE's do.)
+        let fid = ui.id().with(("field", title, f.label, i, y.round() as i32));
+        let mut resp = ui.interact(fr, fid, Sense::click_and_drag());
+        let tip = if f.enter.is_some() { format!("{}\nDouble-click to type it", f.tip) } else { f.tip.to_string() };
+        resp = if value != f.value { resp.on_hover_text(format!("{}\n{tip}", f.value)) } else { resp.on_hover_text(tip) };
         ui.data_mut(|d| d.insert_temp(egui::Id::new(("deckard-sample-field", title.to_string(), f.label.to_string())), fr));
         if let Some(what) = f.typed {
             value_entry::gestures(ui, &resp, what, &f.value, acts);
+        } else if let Some(read) = &f.enter
+            && let Some(text) = value_entry::entry(ui, &resp, &f.value)
+            && text.trim() != f.value.trim()
+            && let Some(a) = read(&text, &f.value)
+        {
+            acts.push(a);
+        }
+        if let Some((text, act)) = &f.menu {
+            resp.context_menu(|ui| {
+                if ui.button(text).clicked() {
+                    acts.push(act());
+                    ui.close();
+                }
+            });
         }
         if resp.hovered() || resp.dragged() {
             painter.rect_filled(fr, 2.0, white(8));
@@ -721,7 +1705,7 @@ fn group_box(ui: &Ui, painter: &Painter, x: f32, y: f32, title: &str, fields: &[
         if resp.dragged() {
             let fine = ui.input(|i| i.modifiers.shift);
             let d = -resp.drag_delta().y / if fine { 10.0 } else { 1.0 };
-            let id = ui.id().with(("field-acc", title, i));
+            let id = fid.with("acc");
             let acc = ui.data(|dd| dd.get_temp::<f32>(id)).unwrap_or(0.0) + d;
             let steps = (acc / 4.0).trunc();
             ui.data_mut(|dd| dd.insert_temp(id, acc - steps * 4.0));
@@ -782,10 +1766,49 @@ struct Field<'a> {
     choice: Option<Choice<'a>>,
     /// A double-click types it (value_entry).
     typed: Option<value_entry::What>,
+    /// A double-click types it: what the text typed sets (given the text shown too);
+    /// `None` when it can't be read.
+    enter: Enter<'a>,
+    /// A right-click offers this: its text and what it does.
+    menu: Option<(String, Box<dyn Fn() -> Act + 'a>)>,
 }
 
 fn field<'a>(label: &'a str, value: String, step: impl Fn(f64) -> Act + 'a) -> Field<'a> {
-    Field { label, value, tip: "Drag up or down (Shift: fine)", step: Box::new(step), click: None, choice: None, typed: None }
+    Field {
+        label,
+        value,
+        tip: "Drag up or down (Shift: fine)",
+        step: Box::new(step),
+        click: None,
+        choice: None,
+        typed: None,
+        enter: None,
+        menu: None,
+    }
+}
+
+/// What typing a field's value does: the edit for the text typed (and the text shown).
+type Enter<'a> = Option<Box<dyn Fn(&str, &str) -> Option<Act> + 'a>>;
+
+/// Typed as text, read by `f`.
+fn read<'a>(f: impl Fn(&str) -> Option<Act> + 'a) -> Enter<'a> {
+    Some(Box::new(move |typed, _| f(typed)))
+}
+
+/// Typed as a number (a unit after it is ignored).
+fn num<'a>(f: impl Fn(f64) -> Act + 'a) -> Enter<'a> {
+    read(move |t| value_entry::plain(t).map(&f))
+}
+
+/// Typed as a note: its name or its number.
+fn note_in<'a>(f: impl Fn(i64) -> Act + 'a) -> Enter<'a> {
+    read(move |t| value_entry::note(t).map(&f))
+}
+
+/// Typed as a time, `f` given seconds: a plain number is in the unit shown, else
+/// milliseconds if `ms`.
+fn secs<'a>(ms: bool, f: impl Fn(f64) -> Act + 'a) -> Enter<'a> {
+    Some(Box::new(move |typed, shown| value_entry::time(typed, shown, ms).map(&f)))
 }
 
 /// A position in the sample, in samples: dragged, or typed with a double-click. Shift
@@ -859,6 +1882,8 @@ fn choice_field<'a>(label: &'a str, options: Vec<String>, cur: usize, pick: impl
         click: None,
         choice: Some((options, cur, Box::new(move |k| pick(k)))),
         typed: None,
+        enter: None,
+        menu: None,
     }
 }
 
@@ -873,6 +1898,8 @@ fn toggle_field<'a>(label: &'a str, on: bool, act: impl Fn() -> Act + 'a) -> Fie
         click: Some(Box::new(move || a())),
         choice: None,
         typed: None,
+        enter: None,
+        menu: None,
     }
 }
 
@@ -948,25 +1975,89 @@ fn edit_tab(
             acts.push(sact(SamplingAct::StretchOpen(false)));
         }
         x += 80.0;
+        let stretch = |s: Stretch| sact(SamplingAct::SetStretch(s));
         let mut fields = vec![
-            field("TUNE", format!("{:+.2}", sx.tune), move |n| {
-                sact(SamplingAct::SetStretch(Stretch { tune: (sx.tune + n * 0.01).clamp(-24.0, 24.0), ..sx }))
-            }),
-            toggle_field("MODE BEAT", sx.beat, move || sact(SamplingAct::SetStretch(Stretch { beat: !sx.beat, ..sx }))),
+            Field {
+                enter: num(move |v| stretch(Stretch { tune: v.clamp(-24.0, 24.0), ..sx })),
+                ..field("TUNE", format!("{:+.2}", sx.tune), move |n| {
+                    stretch(Stretch { tune: (sx.tune + n * 0.01).clamp(-24.0, 24.0), ..sx })
+                })
+            },
+            toggle_field("MODE BEAT", sx.beat, move || stretch(Stretch { beat: !sx.beat, ..sx })),
         ];
         if sx.beat {
-            fields.push(field("SRC BPM", format!("{:.2}", sx.src_bpm), move |n| {
-                sact(SamplingAct::SetStretch(Stretch { src_bpm: (sx.src_bpm + n * 0.1).clamp(20.0, 400.0), ..sx }))
-            }));
-            fields.push(field("NEW BPM", format!("{:.2}", sx.new_bpm), move |n| {
-                sact(SamplingAct::SetStretch(Stretch { new_bpm: (sx.new_bpm + n * 0.1).clamp(2.0, 400.0), ..sx }))
-            }));
+            fields.push(Field {
+                enter: num(move |v| stretch(Stretch { src_bpm: v.clamp(20.0, 400.0), ..sx })),
+                ..field("SRC BPM", format!("{:.2}", sx.src_bpm), move |n| {
+                    stretch(Stretch { src_bpm: (sx.src_bpm + n * 0.1).clamp(20.0, 400.0), ..sx })
+                })
+            });
+            fields.push(Field {
+                enter: num(move |v| stretch(Stretch { new_bpm: v.clamp(2.0, 400.0), ..sx })),
+                ..field("NEW BPM", format!("{:.2}", sx.new_bpm), move |n| {
+                    stretch(Stretch { new_bpm: (sx.new_bpm + n * 0.1).clamp(2.0, 400.0), ..sx })
+                })
+            });
         } else {
-            fields.push(field("SPEED", format!("{:.0} %", sx.speed), move |n| {
-                sact(SamplingAct::SetStretch(Stretch { speed: (sx.speed + n).clamp(10.0, 1000.0), ..sx }))
-            }));
+            fields.push(Field {
+                enter: num(move |v| stretch(Stretch { speed: v.clamp(10.0, 1000.0), ..sx })),
+                ..field("SPEED", format!("{:.0} %", sx.speed), move |n| {
+                    stretch(Stretch { speed: (sx.speed + n).clamp(10.0, 1000.0), ..sx })
+                })
+            });
         }
         group_box(ui, &painter, x, y - 2.0, "STRETCH", &fields, acts);
+        return;
+    }
+    if let Some(mx) = st.munge {
+        use deckard_engine::munge::{COMB_MS, GRUNGE_MS, Munge};
+        // The munge bar: APPLY / CANCEL / HEAR, the settings, and the eighths of a bar.
+        let tempo = zone.meta.as_ref().is_some_and(|m| m.bpm.is_some());
+        let mut x = tools.left() + 12.0;
+        for (label, id, act, enabled) in [
+            ("APPLY", "munge-apply", SamplingAct::MungeApply, tempo && mx.changes()),
+            ("CANCEL", "munge-cancel", SamplingAct::MungeOpen(false), true),
+            ("HEAR", "munge-hear", SamplingAct::MungeHear, tempo),
+        ] {
+            if tool_button(ui, &painter, Rect::from_min_size(Pos2::new(x, y), Vec2::new(62.0, 40.0)), label, enabled, false, id) {
+                acts.push(sact(act));
+            }
+            x += 70.0;
+        }
+        x += 10.0;
+        let set = |m: Munge| sact(SamplingAct::SetMunge(m));
+        let mut fields = vec![
+            field("SWING", format!("{:+.0} %", mx.swing * 100.0), move |n| {
+                set(Munge { swing: ((mx.swing * 100.0 + n).round() / 100.0).clamp(-1.0, 1.0), ..mx })
+            }),
+            choice_field("ON", vec!["1/8".into(), "1/16".into()], usize::from(mx.sixteenths), move |k| {
+                set(Munge { sixteenths: k == 1, ..mx })
+            }),
+            field("GRUNGE", format!("{:.0} ms", mx.grunge_ms), move |n| {
+                set(Munge { grunge_ms: (mx.grunge_ms + n).clamp(GRUNGE_MS.0, GRUNGE_MS.1), ..mx })
+            }),
+            field("COMB", format!("{:.0} ms", mx.comb_ms), move |n| {
+                set(Munge { comb_ms: (mx.comb_ms + n).clamp(COMB_MS.0, COMB_MS.1), ..mx })
+            }),
+        ];
+        fields[0].enter = num(move |v| set(Munge { swing: (v.round() / 100.0).clamp(-1.0, 1.0), ..mx }));
+        fields[2].enter = num(move |v| set(Munge { grunge_ms: v.clamp(GRUNGE_MS.0, GRUNGE_MS.1), ..mx }));
+        fields[3].enter = num(move |v| set(Munge { comb_ms: v.clamp(COMB_MS.0, COMB_MS.1), ..mx }));
+        fields[0].tip =
+            "Each second eighth (or sixteenth, see ON) later (+) or earlier (-): 100 % is a triplet; minus takes swing out of a loop";
+        fields[1].tip = "What SWING moves: the eighths or the sixteenths";
+        fields[2].tip = "The fade where a part is cut short or joined";
+        fields[3].tip = "How much of a part's end repeats to make it longer: short buzzes, long echoes";
+        x = group_box(ui, &painter, x, y - 2.0, if tempo { "MUNGE" } else { "MUNGE (SET THE SAMPLE'S TEMPO FIRST)" }, &fields, acts);
+        // The eighths of a bar: lit plays; dark is cut out of every bar (the loop gets shorter).
+        for k in 0..8 {
+            let r = Rect::from_min_size(Pos2::new(x + 8.0 + k as f32 * 34.0, y), Vec2::new(30.0, 40.0));
+            if tool_button(ui, &painter, r, &(k + 1).to_string(), true, !mx.mutes[k], &format!("munge-{}", k + 1)) {
+                let mut mutes = mx.mutes;
+                mutes[k] = !mutes[k];
+                acts.push(set(Munge { mutes, ..mx }));
+            }
+        }
         return;
     }
     let mut x = tools.left() + 12.0;
@@ -978,6 +2069,8 @@ fn edit_tab(
             EditOp::Paste => st.clipboard.is_some(),
             EditOp::Cut | EditOp::Copy | EditOp::Duplicate | EditOp::Silence => has_sel,
             EditOp::Stems => stems.is_none_or(|(here, ..)| here),
+            // (It goes by the sample's tempo: a New Sampler zone's.)
+            EditOp::Munge => !take && zone.meta.is_some(),
             _ => true,
         };
         let text = match (op, stems) {
@@ -986,8 +2079,35 @@ fn edit_tab(
             _ => label.to_string(),
         };
         let r = Rect::from_min_size(Pos2::new(x, y), Vec2::new(58.0, 40.0));
+        // STEMS, right-clicked: where the stems go, or stems of your own.
+        if op == EditOp::Stems && stems.is_none() {
+            ui.interact(r, ui.id().with("stems-menu"), Sense::click())
+                .on_hover_text(
+                    "Separate into stems: onto the zone's lanes in a Sampler Preview in Advanced, else a new group (Shift, or right-click for more)",
+                )
+                .context_menu(|ui| {
+                    if ui.button("Separate onto the zone's lanes").clicked() {
+                        acts.push(sact(SamplingAct::Edit(EditOp::Stems)));
+                        ui.close();
+                    }
+                    if ui.button("Separate into a new group").clicked() {
+                        acts.push(sact(SamplingAct::StemsToGroup));
+                        ui.close();
+                    }
+                    if ui.button("Load stem files…").clicked() {
+                        acts.push(sact(SamplingAct::LoadStems));
+                        ui.close();
+                    }
+                });
+        }
         if tool_button(ui, &painter, r, &text, enabled, false, label) {
-            acts.push(sact(if op == EditOp::Stretch { SamplingAct::StretchOpen(true) } else { SamplingAct::Edit(op) }));
+            let to_group = op == EditOp::Stems && stems.is_none() && ui.input(|i| i.modifiers.shift);
+            acts.push(sact(match op {
+                EditOp::Stretch => SamplingAct::StretchOpen(true),
+                EditOp::Munge => SamplingAct::MungeOpen(true),
+                _ if to_group => SamplingAct::StemsToGroup,
+                _ => SamplingAct::Edit(op),
+            }));
         }
         x += 62.0;
         if matches!(op, EditOp::Silence | EditOp::Duplicate) {
@@ -1075,17 +2195,48 @@ fn slice_tab(ui: &mut Ui, app: &App, body: Rect, zi: usize, zone: Option<&deckar
     ) {
         acts.push(sact(SamplingAct::ClearSlices));
     }
+    // CUE (or Enter): a slice where the sample is playing. SHIFT: exactly there.
+    x += 74.0 + 15.0;
+    let can_cue = manual && st.playhead.is_some();
+    let enter = can_cue && ui.input(|i| i.key_pressed(egui::Key::Enter)) && ui.memory(|m| m.focused().is_none());
+    if tool_button(ui, &painter, Rect::from_min_size(Pos2::new(x, y), Vec2::new(58.0, 40.0)), "CUE", can_cue, false, "cue") || enter {
+        acts.push(sact(SamplingAct::Catch(ui.input(|i| i.modifiers.shift))));
+    }
+    if st.slice_mode == 5 {
+        x += 62.0 + 15.0;
+        if tool_button(ui, &painter, Rect::from_min_size(Pos2::new(x, y), Vec2::new(64.0, 40.0)), "RE-ROLL", true, false, "reroll") {
+            acts.push(sact(SamplingAct::Reroll));
+        }
+    }
     let apply = Rect::from_min_size(Pos2::new(tools.right() - 80.0, y), Vec2::new(68.0, 40.0));
     if tool_button(ui, &painter, apply, "APPLY", st.slices.len() > 1, false, "apply") {
         acts.push(sact(SamplingAct::ApplySlices));
     }
+    let groups = st.slices.len().div_ceil(16);
     painter.text(
         Pos2::new(apply.left() - 10.0, apply.center().y),
         Align2::RIGHT_CENTER,
-        format!("{} slices, on keys from C1", st.slices.len()),
+        if st.apply_to == 1 {
+            format!("{} slices, on the pads of {} new group{}", st.slices.len(), groups, if groups == 1 { "" } else { "s" })
+        } else {
+            format!("{} slices, on keys from C3", st.slices.len())
+        },
         font(11.0),
         white(142),
     );
+    // EXPORT: each slice as a file.
+    x += 66.0 + 15.0;
+    if tool_button(
+        ui,
+        &painter,
+        Rect::from_min_size(Pos2::new(x, y), Vec2::new(62.0, 40.0)),
+        "EXPORT",
+        st.sample.is_some(),
+        false,
+        "export",
+    ) {
+        acts.push(sact(SamplingAct::ExportSlices));
+    }
     // Footer.
     let fy = y + 48.0;
     let mode = st.slice_mode;
@@ -1101,11 +2252,26 @@ fn slice_tab(ui: &mut Ui, app: &App, body: Rect, zi: usize, zone: Option<&deckar
         }
         2 => {
             let s = st.sensitivity;
-            fields.push(field("SENSITIVITY", format!("{:.0} %", s * 100.0), move |n| {
-                sact(SamplingAct::Sensitivity((s + n * 0.01).clamp(0.0, 1.0)))
-            }));
+            fields.push(Field {
+                enter: num(|v| sact(SamplingAct::Sensitivity((v / 100.0).clamp(0.0, 1.0)))),
+                ..field("SENSITIVITY", format!("{:.0} %", s * 100.0), move |n| {
+                    sact(SamplingAct::Sensitivity((s + n * 0.01).clamp(0.0, 1.0)))
+                })
+            });
             let z = st.zero_x;
             fields.push(toggle_field("ZERO-X", z, move || sact(SamplingAct::ZeroX(!z))));
+        }
+        4 => {
+            let i = st.find;
+            let mut f = choice_field("SAMPLES", FIND_COUNTS.map(|c| c.to_string()).to_vec(), i, |k| sact(SamplingAct::FindCount(k)));
+            f.tip = "How many starts to find: where something comes in, on the sample's bars and beats when it has a tempo";
+            fields.push(f);
+        }
+        5 => {
+            let i = st.random;
+            let mut f = choice_field("SAMPLES", FIND_COUNTS.map(|c| c.to_string()).to_vec(), i, |k| sact(SamplingAct::RandomCount(k)));
+            f.tip = "How many starts to pick at random among the places Find weighs (RE-ROLL picks again; right-click a slice to keep it)";
+            fields.push(f);
         }
         _ => {}
     }
@@ -1117,7 +2283,31 @@ fn slice_tab(ui: &mut Ui, app: &App, body: Rect, zi: usize, zone: Option<&deckar
         nx,
         fy,
         "APPLY",
-        &[choice_field("PATTERN", PATTERN_MODES.map(String::from).to_vec(), pm, |k| sact(SamplingAct::PatternMode(k)))],
+        &[
+            {
+                let mut f = choice_field("TO", APPLY_TO.map(String::from).to_vec(), st.apply_to.min(1), |k| sact(SamplingAct::ApplyTo(k)));
+                f.tip = "Keys: every slice on a key of this sound. Pads: every slice a sound of its own, on the pads of new groups (16 a group)";
+                f
+            },
+            choice_field("PATTERN", PATTERN_MODES.map(String::from).to_vec(), pm, |k| sact(SamplingAct::PatternMode(k))),
+            {
+                let mut f = choice_field("ORDER", NOTE_ORDERS.map(String::from).to_vec(), usize::from(st.shuffle), |k| {
+                    sact(SamplingAct::NoteOrder(k == 1))
+                });
+                f.tip = "The pattern's notes (PATTERN) play the slices in order, or shuffled: the same times, other slices, another order each APPLY";
+                f
+            },
+            {
+                let to_end =
+                    st.slices_to_end(app.doc.as_ref().is_some_and(|d| crate::layers::own(d.borrow().project(), app.group, app.sound)));
+                let mut f = choice_field("EACH PLAYS TO", vec!["Next slice".into(), "Sample end".into()], usize::from(to_end), |k| {
+                    sact(SamplingAct::SliceToEnd(k == 1))
+                });
+                f.tip =
+                    "Next slice: each pad plays its own piece. Sample end: each pad is a start point, playing on for as long as it's held";
+                f
+            },
+        ],
         acts,
     );
 }
@@ -1213,12 +2403,26 @@ fn zone_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, zi: usize, gcol: Co
         y,
         "TUNE / MIX",
         &[
-            field("TUNE", format!("{tune:+.2}"), move |n| Act::SetParam(zt, "tune", (tune + n * 0.01).clamp(-36.0, 36.0))),
-            field("GAIN", format!("{:.1} dB", 20.0 * ((2.3948107 * gain.powi(5) + 0.767467 * gain * gain).max(1e-9)).log10()), move |n| {
-                Act::SetParam(zt, "gain", (gain + n * 0.005).clamp(0.0, 1.0))
-            }),
-            field("PAN", pan(pan_v), move |n| Act::SetParam(zt, "pan", (pan_v + n * 0.01).clamp(-1.0, 1.0))),
-            field("ROOT", note_name(root), move |n| Act::SetParam(zt, "root_key", key(root, n))),
+            Field {
+                enter: num(move |v| Act::SetParam(zt, "tune", v.clamp(-36.0, 36.0))),
+                ..field("TUNE", format!("{tune:+.2}"), move |n| Act::SetParam(zt, "tune", (tune + n * 0.01).clamp(-36.0, 36.0)))
+            },
+            Field {
+                enter: read(move |t| value_entry::level(t).map(|v| Act::SetParam(zt, "gain", v))),
+                ..field(
+                    "GAIN",
+                    format!("{:.1} dB", 20.0 * ((2.3948107 * gain.powi(5) + 0.767467 * gain * gain).max(1e-9)).log10()),
+                    move |n| Act::SetParam(zt, "gain", (gain + n * 0.005).clamp(0.0, 1.0)),
+                )
+            },
+            Field {
+                enter: read(move |t| value_entry::pan(t).map(|v| Act::SetParam(zt, "pan", v))),
+                ..field("PAN", pan(pan_v), move |n| Act::SetParam(zt, "pan", (pan_v + n * 0.01).clamp(-1.0, 1.0)))
+            },
+            Field {
+                enter: note_in(move |k| Act::SetParam(zt, "root_key", k as f64)),
+                ..field("ROOT", note_name(root), move |n| Act::SetParam(zt, "root_key", key(root, n)))
+            },
         ],
         acts,
     );
@@ -1229,10 +2433,22 @@ fn zone_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, zi: usize, gcol: Co
         y,
         "MAP",
         &[
-            field("KEY LO", note_name(kl), move |n| Act::SetParam(zt, "key_range/low", key(kl, n).min(kh as f64))),
-            field("KEY HI", note_name(kh), move |n| Act::SetParam(zt, "key_range/high", key(kh, n).max(kl as f64))),
-            field("VEL LO", vl.to_string(), move |n| Act::SetParam(zt, "velocity_range/low", key(vl, n).min(vh as f64))),
-            field("VEL HI", vh.to_string(), move |n| Act::SetParam(zt, "velocity_range/high", key(vh, n).max(vl as f64))),
+            Field {
+                enter: note_in(move |k| Act::SetParam(zt, "key_range/low", (k as f64).min(kh as f64))),
+                ..field("KEY LO", note_name(kl), move |n| Act::SetParam(zt, "key_range/low", key(kl, n).min(kh as f64)))
+            },
+            Field {
+                enter: note_in(move |k| Act::SetParam(zt, "key_range/high", (k as f64).max(kl as f64))),
+                ..field("KEY HI", note_name(kh), move |n| Act::SetParam(zt, "key_range/high", key(kh, n).max(kl as f64)))
+            },
+            Field {
+                enter: num(move |v| Act::SetParam(zt, "velocity_range/low", v.round().clamp(0.0, vh as f64))),
+                ..field("VEL LO", vl.to_string(), move |n| Act::SetParam(zt, "velocity_range/low", key(vl, n).min(vh as f64)))
+            },
+            Field {
+                enter: num(move |v| Act::SetParam(zt, "velocity_range/high", v.round().clamp(vl as f64, 127.0))),
+                ..field("VEL HI", vh.to_string(), move |n| Act::SetParam(zt, "velocity_range/high", key(vh, n).max(vl as f64)))
+            },
         ],
         acts,
     );
@@ -1500,9 +2716,12 @@ fn record_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: Color32, ac
         if rr.right() > top.right() {
             break;
         }
-        let resp = ui
-            .interact(rr, ui.id().with(("take", i)), Sense::click_and_drag())
-            .on_hover_text("Click to load it into the focused sound; drag it onto a sound");
+        let kept = !crate::layers::layers_in(p, app.group, app.sound).is_empty();
+        let resp = ui.interact(rr, ui.id().with(("take", i)), Sense::click_and_drag()).on_hover_text(if kept {
+            "Right-click to put it on a layer of the focused sound; drag it onto a sound"
+        } else {
+            "Click to load it into the focused sound; drag it onto a sound"
+        });
         if resp.drag_started() {
             resp.dnd_set_drag_payload(DraggedTake(take.clone()));
         }
@@ -1529,6 +2748,23 @@ fn record_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: Color32, ac
         let del = Rect::from_min_size(Pos2::new(rr.right() - 16.0, rr.bottom() - 16.0), Vec2::splat(14.0));
         let dr = ui.interact(del, ui.id().with(("take-del", i)), Sense::click()).on_hover_text("Delete the take (its file stays)");
         painter.text(del.center(), Align2::CENTER_CENTER, "×", font(12.0), if dr.hovered() { white(245) } else { white(110) });
+        // Right-clicked: onto a layer of the focused sound.
+        if crate::layers::can_layer(p, app.group, app.sound) {
+            let have = crate::layers::layers_in(p, app.group, app.sound).len();
+            resp.context_menu(|ui| {
+                for k in 0..have {
+                    if ui.button(format!("To layer {}", k + 1)).on_hover_text("Replace this layer's sample; its settings stay").clicked() {
+                        acts.push(sact(SamplingAct::Record(RecordAct::TakeToLayer(i, k))));
+                        ui.close();
+                    }
+                }
+                if have < deckard_model::layers::MAX_LAYERS && ui.button(if have == 0 { "To layer 1" } else { "To a new layer" }).clicked()
+                {
+                    acts.push(sact(SamplingAct::Record(RecordAct::TakeToLayer(i, have))));
+                    ui.close();
+                }
+            });
+        }
         if dr.clicked() {
             acts.push(sact(SamplingAct::Record(RecordAct::DeleteTake(i))));
         } else if resp.clicked() {
@@ -1564,6 +2800,11 @@ fn record_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: Color32, ac
     let step = |param: RecParam, cur: i64, by: i64, lo: i64, hi: i64| {
         move |n: f64| sact(SamplingAct::Record(RecordAct::Set(param, (cur + n as i64 * by).clamp(lo, hi))))
     };
+    let rec_set =
+        |param: RecParam, v: f64, lo: i64, hi: i64| sact(SamplingAct::Record(RecordAct::Set(param, (v.round() as i64).clamp(lo, hi))));
+    let whole = |param: RecParam, lo: i64, hi: i64| num(move |v| rec_set(param, v, lo, hi));
+    let millis = |param: RecParam| secs(true, move |s| rec_set(param, s * 1000.0, 100, 30_000));
+    let rec_note = |param: RecParam| note_in(move |k| rec_set(param, k as f64, 0, 127));
     let toggle = |label: &'static str, param: RecParam, on: bool| {
         toggle_field(label, on, move || sact(SamplingAct::Record(RecordAct::Set(param, !on as i64))))
     };
@@ -1578,6 +2819,10 @@ fn record_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: Color32, ac
             let t = rec.threshold;
             fields.push(Field {
                 tip: "Drag up or down (Shift: fine); double-click the meter's slider for -12 dB",
+                enter: read(|t| {
+                    let db = if t.trim().eq_ignore_ascii_case("off") { -60.0 } else { value_entry::plain(t)? };
+                    Some(sact(SamplingAct::Record(RecordAct::Threshold(db.clamp(-60.0, 0.0)))))
+                }),
                 ..field("THRESHOLD", threshold_text(t), move |n| {
                     sact(SamplingAct::Record(RecordAct::Threshold((t + n * 0.5).clamp(-60.0, 0.0))))
                 })
@@ -1589,8 +2834,27 @@ fn record_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: Color32, ac
             fields.push(choice_field("TARGET", names(&r::TARGETS), rec.target, set(RecParam::Target)));
         }
         _ => {
-            fields.push(field("SAMPLE", ms_text(a.sample_ms), step(RecParam::SampleMs, a.sample_ms as i64, 100, 100, 30_000)));
-            fields.push(field("NOTE ON", ms_text(a.note_on_ms), step(RecParam::NoteOnMs, a.note_on_ms as i64, 100, 100, 30_000)));
+            fields.push(Field {
+                enter: millis(RecParam::SampleMs),
+                ..field("SAMPLE", ms_text(a.sample_ms), step(RecParam::SampleMs, a.sample_ms as i64, 100, 100, 30_000))
+            });
+            fields.push(Field {
+                enter: millis(RecParam::NoteOnMs),
+                ..field("NOTE ON", ms_text(a.note_on_ms), step(RecParam::NoteOnMs, a.note_on_ms as i64, 100, 100, 30_000))
+            });
+        }
+    }
+    // Where the take goes, on a sound that can have layers.
+    if let Some((options, at, values)) = crate::layers::take_choices(p, app.group, app.sound, rec) {
+        let mut f = choice_field("LAYER", options, at, move |k| {
+            sact(SamplingAct::Record(RecordAct::Set(RecParam::Layer, values.get(k).copied().unwrap_or(0))))
+        });
+        f.tip = "The layer this take plays on. Pick one, then APPLY: a layer's sample is replaced, its settings kept; None takes it off";
+        fields.push(f);
+        // Chosen, not yet done: APPLY puts the take there.
+        if crate::layers::layer_pending(p, app.group, app.sound, rec).is_some() {
+            let apply = || sact(SamplingAct::Record(RecordAct::ApplyLayer));
+            fields.push(Field { value: "APPLY".into(), tip: "Put the take on the layer chosen", ..toggle_field("TAKE", false, apply) });
         }
     }
     let y = footer.top() + 6.0;
@@ -1642,22 +2906,37 @@ fn record_tab(ui: &mut Ui, app: &App, p: &Project, body: Rect, gcol: Color32, ac
             choice_field("MIDI TO", opts, cur, move |k| sact(SamplingAct::Record(RecordAct::MidiTo((k > 0).then(|| ports[k].clone())))));
         f.click = Some(Box::new(|| sact(SamplingAct::Record(RecordAct::ScanMidi))));
         fields.push(f);
-        fields.push(field("CHANNEL", a.channel.to_string(), step(RecParam::Channel, a.channel as i64, 1, 1, 16)));
+        fields.push(Field {
+            enter: whole(RecParam::Channel, 1, 16),
+            ..field("CHANNEL", a.channel.to_string(), step(RecParam::Channel, a.channel as i64, 1, 1, 16))
+        });
     }
     nx = group_box(ui, &painter, nx, y, "INPUT", &fields, acts);
     if auto {
         let key = |n: u8| crate::recorder::note_name(n);
         let fields = [
-            field("STRIDE", a.key_stride.to_string(), step(RecParam::KeyStride, a.key_stride as i64, 1, 1, 127)),
-            field("KEY LO", key(a.key_lo), step(RecParam::KeyLo, a.key_lo as i64, 1, 0, 127)),
-            field("KEY HI", key(a.key_hi), step(RecParam::KeyHi, a.key_hi as i64, 1, 0, 127)),
+            Field {
+                enter: whole(RecParam::KeyStride, 1, 127),
+                ..field("STRIDE", a.key_stride.to_string(), step(RecParam::KeyStride, a.key_stride as i64, 1, 1, 127))
+            },
+            Field { enter: rec_note(RecParam::KeyLo), ..field("KEY LO", key(a.key_lo), step(RecParam::KeyLo, a.key_lo as i64, 1, 0, 127)) },
+            Field { enter: rec_note(RecParam::KeyHi), ..field("KEY HI", key(a.key_hi), step(RecParam::KeyHi, a.key_hi as i64, 1, 0, 127)) },
             toggle("EXTEND", RecParam::KeyExtend, a.key_extend),
         ];
         nx = group_box(ui, &painter, nx, y, "NOTE MAP", &fields, acts);
         let fields = [
-            field("STRIDE", a.vel_stride.to_string(), step(RecParam::VelStride, a.vel_stride as i64, 1, 1, 127)),
-            field("VEL LO", a.vel_lo.to_string(), step(RecParam::VelLo, a.vel_lo as i64, 1, 0, 127)),
-            field("VEL HI", a.vel_hi.to_string(), step(RecParam::VelHi, a.vel_hi as i64, 1, 0, 127)),
+            Field {
+                enter: whole(RecParam::VelStride, 1, 127),
+                ..field("STRIDE", a.vel_stride.to_string(), step(RecParam::VelStride, a.vel_stride as i64, 1, 1, 127))
+            },
+            Field {
+                enter: whole(RecParam::VelLo, 0, 127),
+                ..field("VEL LO", a.vel_lo.to_string(), step(RecParam::VelLo, a.vel_lo as i64, 1, 0, 127))
+            },
+            Field {
+                enter: whole(RecParam::VelHi, 0, 127),
+                ..field("VEL HI", a.vel_hi.to_string(), step(RecParam::VelHi, a.vel_hi as i64, 1, 0, 127))
+            },
             toggle("EXTEND", RecParam::VelExtend, a.vel_extend),
         ];
         nx = group_box(ui, &painter, nx, y, "VELOCITY MAP", &fields, acts);
@@ -1704,6 +2983,8 @@ pub enum RecParam {
     Mode,
     Length,
     Target,
+    /// The layer chosen for the focused take (`RecorderView::layer_choice`).
+    Layer,
     Monitor,
     Channel,
     NoteOnMs,
@@ -1820,6 +3101,11 @@ pub struct RecorderView {
     /// 1, 2, 4, 8 or 16 bars, or FREE; Loop's target: Take, Sound or Pattern.
     pub length: usize,
     pub target: usize,
+    /// The layer RECORD's LAYER was turned to for the focused take, until APPLY puts it
+    /// there: `layers::NO_LAYER`, a lane, or `MAX_LAYERS` for a new one.
+    pub layer_choice: Option<i64>,
+    /// The sound (group, sound) it was chosen on.
+    pub layer_at: (usize, usize),
     pub monitor: bool,
     pub auto: AutoParams,
     /// MIDI outputs there are (Auto ▸ MIDI To).
@@ -1838,6 +3124,18 @@ pub struct RecorderView {
 }
 
 impl RecorderView {
+    /// RECORD's LAYER turned to `v` for the focused take, on sound `at`.
+    pub fn choose_layer(&mut self, at: (usize, usize), v: i64) {
+        self.set(RecParam::Layer, v);
+        self.layer_at = at;
+    }
+
+    /// The layer chosen for the focused take on sound `at` (one chosen on another sound
+    /// isn't a choice here).
+    pub fn layer_choice_for(&self, at: (usize, usize)) -> Option<i64> {
+        self.layer_choice.filter(|_| self.layer_at == at)
+    }
+
     /// Set a parameter, keeping Maschine's rules: Note On ≤ Sample, Lo ≤ Hi (moving the
     /// other), strides within 1..=max(1, Hi − Lo).
     pub fn set(&mut self, p: RecParam, v: i64) {
@@ -1849,9 +3147,13 @@ impl RecorderView {
             RecParam::ExtMono => self.ext_mono = v.clamp(0, 31) as usize,
             RecParam::Internal => self.internal = internal_from(v),
             RecParam::AutoSound => self.auto_sound = (v >= 0).then_some((v as usize / 16, v as usize % 16)),
-            RecParam::Mode => self.mode = v.clamp(0, 3) as usize,
+            RecParam::Mode => {
+                self.mode = v.clamp(0, 3) as usize;
+                self.layer_choice = None;
+            }
             RecParam::Length => self.length = v.clamp(0, 5) as usize,
             RecParam::Target => self.target = v.clamp(0, 2) as usize,
+            RecParam::Layer => self.layer_choice = Some(v.clamp(crate::layers::NO_LAYER, deckard_model::layers::MAX_LAYERS as i64)),
             RecParam::Monitor => self.monitor = v != 0,
             RecParam::Channel => a.channel = v.clamp(1, 16) as u8,
             RecParam::NoteOnMs => {
@@ -1985,5 +3287,49 @@ mod internal_input_tests {
             assert_eq!(v.internal, s);
         }
         assert_eq!(RecorderView::default().internal, TapSource::Master, "the master by default");
+    }
+}
+
+#[cfg(test)]
+mod view_tests {
+    use super::*;
+
+    /// Zoomed in on a zone, another zone looked at and the first come back to: it shows
+    /// what it showed. A zone not yet looked at shows the same stretch of frames, as
+    /// much of it as its sample has; an edit that changes the length shows it all.
+    #[test]
+    fn the_zoom_stays_across_zones() {
+        let sample = |n: usize| Arc::new(Sample { rate: 48_000, frames: vec![[0.0; 2]; n] });
+        let key = |z: usize, f: &str| (0, 0, z, f.to_string());
+        let mut st = SamplingState::default();
+        st.set_sample(key(0, "a.wav"), sample(100_000));
+        assert_eq!(st.view, None);
+        st.view = Some((40_000.0, 50_000.0));
+        // A slice of the same file: the same place.
+        st.set_sample(key(1, "a.wav"), sample(100_000));
+        assert_eq!(st.view, Some((40_000.0, 50_000.0)));
+        // …whose own part of it is elsewhere: brought into view at the same zoom.
+        st.reveal(80_000.0, 90_000.0);
+        assert_eq!(st.view, Some((79_000.0, 89_000.0)));
+        st.reveal(85_000.0, 95_000.0);
+        assert_eq!(st.view, Some((79_000.0, 89_000.0)), "in view already");
+        // A shorter file: the same zoom, as far along as it goes; a tiny one, all of it.
+        st.set_sample(key(2, "b.wav"), sample(30_000));
+        assert_eq!(st.view, Some((20_000.0, 30_000.0)));
+        st.set_sample(key(3, "c.wav"), sample(5_000));
+        assert_eq!(st.view, None);
+        // Back to the first: what it showed. Also after no sample was shown.
+        st.set_sample(key(0, "a.wav"), sample(100_000));
+        assert_eq!(st.view, Some((40_000.0, 50_000.0)));
+        st.view = Some((10_000.0, 12_000.0));
+        st.clear_sample();
+        st.view = None;
+        st.set_sample(key(0, "a.wav"), sample(100_000));
+        assert_eq!(st.view, Some((10_000.0, 12_000.0)));
+        // An edit of it: the same length keeps the view (normalize), another shows all.
+        st.set_sample(key(0, "a - 2.wav"), sample(100_000));
+        assert_eq!(st.view, Some((10_000.0, 12_000.0)));
+        st.set_sample(key(0, "a - 3.wav"), sample(60_000));
+        assert_eq!(st.view, None);
     }
 }

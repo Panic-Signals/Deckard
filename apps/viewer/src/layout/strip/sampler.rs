@@ -397,7 +397,7 @@ fn waveform(
     }
     if let Some(f) = playhead {
         clip.vline(x_of(f as i64), lanes.y_range(), Stroke::new(1.0, crate::layout::ink()));
-        ui.ctx().request_repaint();
+        ui.ctx().request_repaint_after(crate::BACKGROUND_PACE);
     }
     // Drag the nearest marker.
     let resp = ui.interact(rect, id.with("wave"), Sense::drag()).on_hover_text("Drag the S and E markers (and the loop's, when it's on)");

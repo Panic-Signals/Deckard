@@ -22,12 +22,13 @@ mod clips;
 pub use block::SavedScreen;
 pub use clips::CLIP;
 mod chain;
-pub use chain::{Chain, NewModule};
+pub use chain::{Chain, CopiedSlot, NewModule};
 pub use files::{FileItem, Samples, sample_refs};
 mod audio;
 mod lanes;
 mod zones;
 pub use audio::TakeSpec;
+pub use new_sampler::TakeZone;
 pub use zones::{ZoneFrom, ZoneSpec};
 mod cc_routes;
 mod cv_routes;
@@ -36,6 +37,7 @@ mod extra_outs;
 mod files;
 mod lfos;
 mod mod_routes;
+mod new_sampler;
 pub mod note_tools;
 mod notes;
 mod pad_touch;
@@ -95,7 +97,7 @@ pub enum Op {
 }
 
 /// The part of the project a parameter belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Target {
     Project,
     Song,
@@ -149,10 +151,32 @@ impl Step {
         let params = vec![None; redo.len()];
         Step::new(label, undo, redo, params, Instant::now() - MERGE_WINDOW)
     }
+
+    /// One step doing owned `steps` in order (undone in reverse) without cloning their ops.
+    fn merged_owned(label: &str, mut steps: Vec<Step>) -> Step {
+        if steps.len() == 1 {
+            let mut step = steps.pop().unwrap();
+            step.label = label.to_string();
+            step.at = Instant::now() - MERGE_WINDOW;
+            step.parts.clear();
+            step.of_take = false;
+            return step;
+        }
+        let undo: Vec<Op> = steps.iter_mut().rev().flat_map(|s| std::mem::take(&mut s.undo)).collect();
+        let redo: Vec<Op> = steps.into_iter().flat_map(|s| s.redo).collect();
+        let params = vec![None; redo.len()];
+        Step::new(label, undo, redo, params, Instant::now() - MERGE_WINDOW)
+    }
 }
 
 /// Changes to the same parameters within this time make one undo step (a knob turn).
 const MERGE_WINDOW: Duration = Duration::from_millis(1500);
+
+#[derive(Clone)]
+pub(crate) struct CachedParam {
+    pub(crate) value_path: Result<Box<[u32]>, String>,
+    pub(crate) oid: Option<u64>,
+}
 
 pub struct Document {
     /// The file as read (or last saved): its container is kept when saving.
@@ -164,6 +188,9 @@ pub struct Document {
     types: mxprj::types::Types,
     undo: Vec<Step>,
     redo: Vec<Step>,
+    /// The last `transaction_joined`: how many undo steps there were after it, its
+    /// label and when.
+    joined: Option<(usize, String, Instant)>,
     /// An open take (`begin_take`): its name and where its steps start.
     take: Option<(String, usize)>,
     revision: u64,
@@ -188,7 +215,13 @@ pub struct Document {
     /// Updated with each operation, so edits that remove unreferenced event
     /// objects do not scan the whole tree looking for dangling references.
     references: Option<std::collections::HashMap<u64, usize>>,
+    /// Cached project class version/tracking table for building and file compatibility checks.
+    classes: Option<std::collections::HashMap<String, (u32, bool)>>,
     session_values: std::collections::BTreeMap<String, u64>,
+    /// Cached `Target -> owner Path` and `(Target, field) -> (value_path, oid)`.
+    /// Invalidated whenever any non-leaf-scalar tree change occurs.
+    pub(crate) owner_cache: RefCell<std::collections::HashMap<Target, Option<Box<[u32]>>>>,
+    pub(crate) param_cache: RefCell<std::collections::HashMap<Target, std::collections::HashMap<Box<str>, CachedParam>>>,
 }
 
 /// The project file as it would be saved at one moment ([`Document::snapshot`]); `Send`.
@@ -269,6 +302,7 @@ impl Document {
             addresses,
             types,
             undo: Vec::new(),
+            joined: None,
             redo: Vec::new(),
             take: None,
             revision: 0,
@@ -282,7 +316,10 @@ impl Document {
             note_event: None,
             event_sequence: None,
             references: None,
+            classes: None,
             session_values: Default::default(),
+            owner_cache: Default::default(),
+            param_cache: Default::default(),
         };
         d.next_oid = max_oid + 1;
         d.read_block();
@@ -360,7 +397,21 @@ impl Document {
 
     // ---- changing parameters ---------------------------------------------------
 
+    pub(crate) fn clear_path_caches(&self) {
+        self.owner_cache.borrow_mut().clear();
+        self.param_cache.borrow_mut().clear();
+    }
+
     fn owner(&self, t: Target) -> Option<Path> {
+        if let Some(cached) = self.owner_cache.borrow().get(&t) {
+            return cached.as_ref().map(|p| p.to_vec());
+        }
+        let computed = self.owner_uncached(t);
+        self.owner_cache.borrow_mut().insert(t, computed.as_deref().map(Box::from));
+        computed
+    }
+
+    fn owner_uncached(&self, t: Target) -> Option<Path> {
         let a = &self.addresses;
         match t {
             Target::Project => Some(Vec::new()),
@@ -443,20 +494,52 @@ impl Document {
         Some(path)
     }
 
+    pub(crate) fn resolve_param(&self, target: Target, field: &str) -> CachedParam {
+        let entry = match self.owner(target) {
+            None => CachedParam { value_path: Err(format!("no {target:?} in this project")), oid: None },
+            Some(owner) => match self.field_in(&owner, field) {
+                None => CachedParam { value_path: Err(format!("{target:?} has no {field}")), oid: None },
+                Some(fp) => match self.tree.at(&[owner.as_slice(), &fp].concat()) {
+                    Some(Value::Obj(param)) => {
+                        let oid = param.oid;
+                        let value_path = match param.find_path("value") {
+                            Some(vp) => Ok([owner.as_slice(), &fp, &vp].concat().into_boxed_slice()),
+                            None => Err(format!("{target:?}.{field} has no value")),
+                        };
+                        CachedParam { value_path, oid }
+                    }
+                    _ => CachedParam {
+                        value_path: Err(format!("{target:?}.{field} is shared with another object and can't be changed here")),
+                        oid: None,
+                    },
+                },
+            },
+        };
+        self.param_cache.borrow_mut().entry(target).or_default().insert(field.into(), entry.clone());
+        entry
+    }
+
     /// Path of `field.value` of the parameter `field` on `target`'s object.
     pub fn param_path(&self, target: Target, field: &str) -> Result<Path, String> {
-        let owner = self.owner(target).ok_or_else(|| format!("no {target:?} in this project"))?;
-        let fp = self.field_in(&owner, field).ok_or_else(|| format!("{target:?} has no {field}"))?;
-        let Some(Value::Obj(param)) = self.tree.at(&[owner.as_slice(), &fp].concat()) else {
-            return Err(format!("{target:?}.{field} is shared with another object and can't be changed here"));
-        };
-        let vp = param.find_path("value").ok_or_else(|| format!("{target:?}.{field} has no value"))?;
-        Ok([owner.as_slice(), &fp, &vp].concat())
+        {
+            let cache = self.param_cache.borrow();
+            if let Some(c) = cache.get(&target).and_then(|m| m.get(field)) {
+                return c.value_path.as_ref().map(|p| p.to_vec()).map_err(Clone::clone);
+            }
+        }
+        self.resolve_param(target, field).value_path.map(|p| p.into_vec())
     }
 
     /// The value of parameter `field` of `target`, as stored.
     pub fn value(&self, target: Target, field: &str) -> Option<&Value> {
-        self.tree.at(&self.param_path(target, field).ok()?)
+        {
+            let cache = self.param_cache.borrow();
+            if let Some(c) = cache.get(&target).and_then(|m| m.get(field)) {
+                return self.tree.at(c.value_path.as_deref().ok()?);
+            }
+        }
+        let c = self.resolve_param(target, field);
+        self.tree.at(c.value_path.as_deref().ok()?)
     }
 
     /// A number parameter (or a switch, 0/1; or a choice, its index).
@@ -712,6 +795,26 @@ impl Document {
         self.set("Cue", strip(target), "cue_enabled", Value::Int(cue as i64))
     }
 
+    /// Set several parameters as one undo step (e.g. across multiple selected sounds).
+    /// Continuous drags merge into the same step even when some targets hit a rail.
+    pub fn set_many(&mut self, label: &str, edits: &[(Target, &str, Value)]) -> Result<(), String> {
+        let mut ops = Vec::new();
+        let mut params = Vec::new();
+        for (target, field, value) in edits {
+            let t = match (*target, *field) {
+                (Target::Group(_), "level" | "pan" | "mute" | "cue_enabled") => strip(*target),
+                _ => *target,
+            };
+            let o = self.param_ops(t, field, value.clone())?;
+            params.extend(std::iter::repeat_n(Some((t, (*field).to_string())), o.len()));
+            ops.extend(o);
+        }
+        if ops.is_empty() {
+            return Ok(());
+        }
+        self.apply_step(label, ops, params, true)
+    }
+
     // ---- applying, undo, redo ------------------------------------------------------
 
     /// Apply `ops` as one undo step. Repeated changes to the same values within a
@@ -721,26 +824,62 @@ impl Document {
         self.apply_with(label, ops, params)
     }
 
-    fn apply_with(&mut self, label: &str, mut ops: Vec<Op>, mut params: Vec<Option<(Target, String)>>) -> Result<(), String> {
+    fn apply_with(&mut self, label: &str, ops: Vec<Op>, params: Vec<Option<(Target, String)>>) -> Result<(), String> {
+        self.apply_step(label, ops, params, false)
+    }
+
+    /// `apply_with`; with `batch` (an edit to several targets at once, [`Self::set_many`])
+    /// a step that changes only some of the previous step's values extends it too: a
+    /// sound at its rail drops out of a drag without splitting the drag in two. Any
+    /// other edit extends the previous step only when it changes the very same values,
+    /// so two settings turned one after the other undo in turn.
+    fn apply_step(&mut self, label: &str, mut ops: Vec<Op>, mut params: Vec<Option<(Target, String)>>, batch: bool) -> Result<(), String> {
         let mut undo = self.run(&ops)?;
         // An edit that took away an object's definition: anything still referring to
-        // it keeps it (see `rehomed`).
-        if loses_referenced_objects(&undo, &ops, self.references.as_ref().unwrap()) {
-            self.run(&undo).expect("undo of ops just applied");
-            ops = self.rehomed(label, ops)?;
-            params.resize(ops.len(), None);
-            undo = self.run(&ops)?;
+        // it keeps it (see `rehome_applied`).
+        let lost = lost_referenced_ids(&undo, &ops, self.references.as_ref().unwrap());
+        if !lost.is_empty() {
+            let (extra_ops, extra_undo) = match self.rehome_applied(label, &undo, &ops, lost) {
+                Ok(res) => res,
+                Err(e) => {
+                    self.run(&undo).expect("undo of ops just applied");
+                    return Err(e);
+                }
+            };
+            if !extra_ops.is_empty() {
+                ops.extend(extra_ops);
+                let mut combined = extra_undo;
+                combined.extend(undo);
+                undo = combined;
+                params.resize(ops.len(), None);
+            }
         }
         let now = Instant::now();
-        let same_targets = |s: &Step| {
+        let unique = |xs: &[Op]| (0..xs.len()).all(|i| xs[..i].iter().all(|a| op_target(a) != op_target(&xs[i])));
+        let same = |s: &Step| s.redo.len() == ops.len() && s.redo.iter().zip(&ops).all(|(a, b)| op_target(a) == op_target(b));
+        let some_of = |s: &Step| {
+            batch
+                && !ops.is_empty()
+                && unique(&s.redo)
+                && unique(&ops)
+                && ops.iter().all(|b| s.redo.iter().any(|a| op_target(a) == op_target(b)))
+        };
+        let can_merge = |s: &Step| {
             s.label == label
-                && s.redo.len() == ops.len()
                 && !s.redo.iter().chain(&ops).any(|op| matches!(op, Op::Append { .. } | Op::Pop { .. }))
-                && s.redo.iter().zip(&ops).all(|(a, b)| op_target(a) == op_target(b))
+                && (same(s) || some_of(s))
         };
         match self.undo.last_mut() {
-            Some(last) if same_targets(last) && now.duration_since(last.at) < MERGE_WINDOW => {
-                last.redo = ops;
+            Some(last) if can_merge(last) && now.duration_since(last.at) < MERGE_WINDOW => {
+                if last.redo.len() == ops.len() && last.redo.iter().zip(&ops).all(|(a, b)| op_target(a) == op_target(b)) {
+                    last.redo = ops;
+                } else {
+                    for b in ops {
+                        if let Some(a) = last.redo.iter_mut().find(|a| op_target(a) == op_target(&b)) {
+                            *a = b;
+                        }
+                    }
+                }
                 last.at = now;
             }
             _ => self.undo.push(Step::new(label, undo, ops, params.clone(), now)),
@@ -780,7 +919,25 @@ impl Document {
         if steps.is_empty() {
             return Ok(());
         }
-        self.undo.push(Step::merged(label, &steps));
+        self.undo.push(Step::merged_owned(label, steps));
+        Ok(())
+    }
+
+    /// [`Document::transaction`], joined to the one before when that was one of these
+    /// with the same label, a moment ago and with nothing done since: a value dragged
+    /// through many steps, each several edits, is one undo step.
+    pub fn transaction_joined(&mut self, label: &str, f: impl FnOnce(&mut Document) -> Result<(), String>) -> Result<(), String> {
+        let before = self.undo.len();
+        self.transaction(label, f)?;
+        if self.undo.len() != before + 1 {
+            return Ok(());
+        }
+        let joins = self.joined.take().is_some_and(|(len, l, at)| len == before && l == label && at.elapsed() < MERGE_WINDOW);
+        if joins && before > 0 {
+            let steps: Vec<Step> = self.undo.drain(before - 1..).collect();
+            self.undo.push(Step::merged(label, &steps));
+        }
+        self.joined = Some((self.undo.len(), label.to_string(), Instant::now()));
         Ok(())
     }
 
@@ -797,7 +954,7 @@ impl Document {
             return;
         }
         let steps: Vec<Step> = self.undo.drain(before..).collect();
-        self.undo.push(Step::merged(label, &steps));
+        self.undo.push(Step::merged_owned(label, steps));
     }
 
     /// Start a take (a recording): the edits until [`Document::end_take`] undo as one
@@ -913,12 +1070,15 @@ impl Document {
             count_refs(&self.tree, &mut refs, true);
             self.references = Some(refs);
         }
+        let is_scalar = |op: &Op| matches!(op, Op::Session { .. } | Op::Set { value: Value::Int(_) | Value::Float(_) | Value::Str(_), .. });
+        let mut structural = false;
         // In order (an op may set a value inside one an earlier op put there); if one
         // has nowhere to go, those before it are taken back.
         let mut inverse = Vec::with_capacity(ops.len());
         for op in ops {
             match run_one(&mut self.tree, &mut self.session_values, op) {
                 Some(undo) => {
+                    structural |= !is_scalar(op) || !is_scalar(&undo);
                     let refs = self.references.as_mut().unwrap();
                     if let Some(v) = op_value(&undo) {
                         count_refs(v, refs, false);
@@ -933,9 +1093,13 @@ impl Document {
                         let _ = run_one(&mut self.tree, &mut self.session_values, undo);
                     }
                     self.references = None;
+                    self.clear_path_caches();
                     return Err(format!("no value at {:?}", op_path(op)));
                 }
             }
+        }
+        if structural {
+            self.clear_path_caches();
         }
         inverse.reverse();
         Ok(inverse)
@@ -1035,6 +1199,9 @@ impl Document {
             (Target::Sound(g, s), "pan", Some(n), _) => p.groups[g].sounds[s].pan = n,
             (Target::Sound(g, s), "mute", Some(n), _) => p.groups[g].sounds[s].muted = n != 0.0,
             (Target::Sound(g, s), "midi_channel", Some(n), _) => p.groups[g].sounds[s].channel.midi_channel = n as i64,
+            (Target::Sound(g, s), "midi_thru", Some(n), _) => p.groups[g].sounds[s].channel.midi_thru = n != 0.0,
+            (Target::Sound(g, s), "audio_mute", Some(n), _) => p.groups[g].sounds[s].channel.audio_mute = n != 0.0,
+            (Target::Sound(g, s), "event_output_channel", Some(n), _) => p.groups[g].sounds[s].channel.midi_out_channel = n as i64,
             (Target::Sound(g, s), "base_key", Some(n), _) => p.groups[g].sounds[s].channel.base_key = n as i64,
             (Target::Sound(g, s), "choke_group", Some(n), _) => p.groups[g].sounds[s].channel.choke_group = n as i64,
             (Target::Sound(g, s), "choke_mode", Some(n), _) => p.groups[g].sounds[s].channel.choke_mode = n as i64,
@@ -1090,6 +1257,7 @@ impl Document {
         let (project, addresses) = Project::read(self.root());
         self.project = Project { expressions: self.expressions.clone(), ..project };
         self.addresses = addresses;
+        self.clear_path_caches();
         self.revision += 1;
     }
 
@@ -1143,24 +1311,40 @@ fn strip(t: Target) -> Target {
     }
 }
 
-/// Whether an op's value holds an object's definition (one with an id others may
-/// refer back to). Run on an edit's undo: what it replaced.
-fn loses_referenced_objects(before: &[Op], after: &[Op], refs: &std::collections::HashMap<u64, usize>) -> bool {
-    fn ids(ops: &[Op]) -> std::collections::HashSet<u64> {
-        let mut out = std::collections::HashSet::new();
-        for op in ops {
-            if let Some(value) = op_value(op) {
-                value.walk(&mut |o| {
-                    out.extend(o.oid);
-                });
+/// Candidate object ids whose definition was in `before`, is not in `after`, and
+/// that still have at least one reference according to `refs`.
+pub(crate) fn lost_referenced_ids(before: &[Op], after: &[Op], refs: &std::collections::HashMap<u64, usize>) -> Vec<u64> {
+    let mut lost = std::collections::HashSet::new();
+    for op in before {
+        if let Some(value) = op_value(op) {
+            value.walk(&mut |o| {
+                if let Some(id) = o.oid
+                    && refs.get(&id).copied().unwrap_or(0) > 0
+                {
+                    lost.insert(id);
+                }
+            });
+        }
+    }
+    if lost.is_empty() {
+        return Vec::new();
+    }
+    for op in after {
+        if let Some(value) = op_value(op) {
+            value.walk(&mut |o| {
+                if let Some(id) = o.oid {
+                    lost.remove(&id);
+                }
+            });
+            if lost.is_empty() {
+                return Vec::new();
             }
         }
-        out
     }
-    ids(before).difference(&ids(after)).any(|id| refs.get(id).copied().unwrap_or(0) > 0)
+    lost.into_iter().collect()
 }
 
-fn op_value(op: &Op) -> Option<&Value> {
+pub(crate) fn op_value(op: &Op) -> Option<&Value> {
     match op {
         Op::Set { value, .. } | Op::Append { value, .. } | Op::SetField { value: Some(value), .. } => Some(value),
         _ => None,
@@ -1669,5 +1853,68 @@ mod snapshot_tests {
         let snap = d.snapshot();
         let now = d.to_bytes().unwrap();
         assert_eq!(std::thread::spawn(move || snap.to_bytes().unwrap()).join().unwrap(), now);
+    }
+
+    #[test]
+    fn set_many_merges_continuous_drags_when_a_sound_clamps() {
+        let mut d = Document::new_project().unwrap();
+        d.set_many("Noop", &[]).unwrap();
+        d.set_many("Group Level", &[(Target::Group(0), "level", Value::Float(0.65))]).unwrap();
+        assert!((d.project().groups[0].level - 0.65).abs() < 1e-9);
+        d.set_many(
+            "Channel Switches",
+            &[
+                (Target::Sound(0, 0), "midi_thru", Value::Int(0)),
+                (Target::Sound(0, 0), "audio_mute", Value::Int(1)),
+                (Target::Sound(0, 0), "event_output_channel", Value::Int(5)),
+            ],
+        )
+        .unwrap();
+        assert!(!d.project().groups[0].sounds[0].channel.midi_thru);
+        assert!(d.project().groups[0].sounds[0].channel.audio_mute);
+        assert_eq!(d.project().groups[0].sounds[0].channel.midi_out_channel, 5);
+
+        d.set_level(Target::Sound(0, 1), 0.90).unwrap();
+        d.set_level(Target::Sound(0, 2), 0.50).unwrap();
+        if let Some(last) = d.undo.last_mut() {
+            last.at -= MERGE_WINDOW * 2;
+        }
+        let steps_before = d.undo_labels().len();
+
+        // Drag up +0.10, then +0.05 (Sound 1 clamps at 1.0 on the first frame, so the
+        // second frame only changes Sounds 0 and 2).
+        d.set_many(
+            "Level",
+            &[
+                (Target::Sound(0, 0), "level", Value::Float(0.85)),
+                (Target::Sound(0, 1), "level", Value::Float(1.00)),
+                (Target::Sound(0, 2), "level", Value::Float(0.60)),
+            ],
+        )
+        .unwrap();
+        d.set_many(
+            "Level",
+            &[
+                (Target::Sound(0, 0), "level", Value::Float(0.90)),
+                (Target::Sound(0, 1), "level", Value::Float(1.00)),
+                (Target::Sound(0, 2), "level", Value::Float(0.65)),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(d.undo_labels().len(), steps_before + 1, "clamped sound did not split the drag step");
+        assert!((d.project().groups[0].sounds[0].level - 0.90).abs() < 1e-9);
+        assert!((d.project().groups[0].sounds[1].level - 1.00).abs() < 1e-9);
+        assert!((d.project().groups[0].sounds[2].level - 0.65).abs() < 1e-9);
+
+        assert!(d.undo());
+        assert!((d.project().groups[0].sounds[0].level - 0.75).abs() < 1e-9);
+        assert!((d.project().groups[0].sounds[1].level - 0.90).abs() < 1e-9);
+        assert!((d.project().groups[0].sounds[2].level - 0.50).abs() < 1e-9);
+
+        assert!(d.redo());
+        assert!((d.project().groups[0].sounds[0].level - 0.90).abs() < 1e-9);
+        assert!((d.project().groups[0].sounds[1].level - 1.00).abs() < 1e-9);
+        assert!((d.project().groups[0].sounds[2].level - 0.65).abs() < 1e-9);
     }
 }

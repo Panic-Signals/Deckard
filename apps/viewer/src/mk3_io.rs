@@ -29,6 +29,8 @@ pub struct PadRoute {
     pub fixed: i64,
     /// The group's sounds' Pad Touch (what pressing a held pad does for each).
     pub touches: [PadTouch; 16],
+    /// The group's sounds' base keys: the note each one's pad plays in Pad mode.
+    pub base_keys: [i64; 16],
 }
 
 impl PadRoute {
@@ -155,7 +157,9 @@ impl Touching {
         let (value, live) = match h.touch.mode {
             TouchMode::Velocity => {
                 let v = ((pad_velocity(pressure, route.scaling) * 127.0).round() as i64).clamp(1, 127);
-                (v as u8, Some(Live::RepeatPressure { group: g, sound: s, pitch, velocity: v }))
+                // (Fixed Velocity: the repeats stay at the hit's, however the pad is pressed.)
+                let live = route.velocity.is_none().then_some(Live::RepeatPressure { group: g, sound: s, pitch, velocity: v });
+                (v as u8, live)
             }
             TouchMode::PolyAt => {
                 let v = touch_value(pressure, &h.touch);
@@ -216,15 +220,31 @@ impl Touching {
 
 #[derive(Clone)]
 pub enum ScreenFrame {
-    Picture(deckard_surface::Picture),
+    Picture(Arc<deckard_surface::Picture>),
     Pixels(Arc<Vec<[u8; 4]>>),
 }
 
 impl ScreenFrame {
+    #[cfg(test)]
     pub fn into_pixels(self) -> Vec<[u8; 4]> {
+        let mut out = Vec::new();
+        self.write_pixels(&mut out);
+        out
+    }
+
+    pub fn write_pixels(self, out: &mut Vec<[u8; 4]>) {
         match self {
-            ScreenFrame::Picture(p) => p.into_pixels(),
-            ScreenFrame::Pixels(px) => Arc::unwrap_or_clone(px),
+            ScreenFrame::Picture(p) => match Arc::try_unwrap(p) {
+                Ok(mut pic) => pic.rasterize_into(out),
+                Err(shared) => {
+                    let mut pic = (*shared).clone();
+                    pic.rasterize_into(out);
+                }
+            },
+            ScreenFrame::Pixels(px) => {
+                out.clear();
+                out.extend_from_slice(&px);
+            }
         }
     }
 }
@@ -264,14 +284,16 @@ struct Shared {
     /// when it changes: it's a feature report read and written back, not worth every frame.
     pad_sensitivity: Option<u8>,
     sensitivity_stamp: u64,
-    /// DECKARD is closing: dark LEDs, the goodbye picture on the displays, then stop
-    /// (`shut_down`).
+    /// DECKARD is closing: dark LEDs, a black frame on the displays, then stop
+    /// (`shut_down`). The frame is black so a still picture is not left to burn in.
     closing: bool,
     goodbye: Option<Arc<Vec<[u8; 4]>>>,
     /// Whether the controller and the displays are open, and whether each has been left
     /// dark since `closing`.
     connected: bool,
     displays_connected: bool,
+    /// The first look for the controller is over (found or not).
+    probed: bool,
     leds_closed: bool,
     displays_closed: bool,
     /// The MIDI Monitor, shown what the pads play.
@@ -283,17 +305,23 @@ pub struct Mk3Io {
     display_wake: Arc<std::sync::Condvar>,
 }
 
-/// The pitch pads play: a sound's base key (Maschine's default, C3).
+/// The pitch a pad plays where its sound's base key isn't known (Maschine's default, C3).
 const PAD_PITCH: i64 = 60;
 
-/// The notes (sound, pitch) a hit on `pad` (1–16) plays: its sound at C3, its key in
+/// Both displays side by side, every pixel black. Closing sends this so the panels
+/// are not left showing a still picture.
+fn black_displays() -> Vec<[u8; 4]> {
+    vec![[0, 0, 0, 255]; deckard_mk3::display::WIDTH * 2 * deckard_mk3::display::HEIGHT]
+}
+
+/// The notes (sound, pitch) a hit on `pad` (1–16) plays: its sound at its base key, its key in
 /// Keyboard mode, or its chord in Chords mode; none for a pad with nothing to play.
 pub fn pad_notes(route: &PadRoute, pad: usize) -> Vec<(usize, i64)> {
     let Some(i) = pad.checked_sub(1).filter(|&i| i < 16) else { return Vec::new() };
     match (route.keys, route.chords) {
         (Some((sound, _)), Some(chords)) => chords[i].iter().filter(|&&n| n < 128).map(|&n| (sound, n)).collect(),
         (Some((sound, notes)), None) => notes.get(i).filter(|&&n| n < 128).map(|&n| vec![(sound, n)]).unwrap_or_default(),
-        (None, _) => vec![(i, PAD_PITCH)],
+        (None, _) => vec![(i, route.base_keys[i])],
     }
 }
 
@@ -310,12 +338,12 @@ impl Mk3Io {
         Mk3Io { shared, display_wake }
     }
 
-    /// Leave the controller dark but for `picture` on the displays (both, 960 × 272
-    /// RGBA): LEDs off. Waits (up to a second) for both threads to do it.
-    pub fn shut_down(&self, picture: Vec<[u8; 4]>) {
+    /// Leave the controller dark: LEDs off and both displays black. Waits (up to a
+    /// second) for both threads to do it.
+    pub fn shut_down(&self) {
         {
             let mut s = self.shared.lock().unwrap();
-            s.goodbye = Some(Arc::new(picture));
+            s.goodbye = Some(Arc::new(black_displays()));
             s.closing = true;
         }
         self.display_wake.notify_all();
@@ -330,18 +358,38 @@ impl Mk3Io {
         }
     }
 
-    /// Set the displays' backlight (0..=100), now and whenever an MK3 connects.
-    pub fn set_display_brightness(&self, level: u8) {
-        let mut s = self.shared.lock().unwrap();
-        s.display_brightness = Some(level.min(100));
-        s.brightness_stamp = s.brightness_stamp.wrapping_add(1);
+    /// An MK3 handle with no USB threads, for tests that only check the close request.
+    #[cfg(test)]
+    pub(crate) fn detached() -> Mk3Io {
+        Mk3Io { shared: Arc::default(), display_wake: Arc::new(std::sync::Condvar::new()) }
     }
 
-    /// Set the LEDs' global level (0..=100 %), now and whenever an MK3 connects.
+    /// The frame `shut_down` queued, if it has.
+    #[cfg(test)]
+    pub(crate) fn queued_frame(&self) -> Option<Vec<[u8; 4]>> {
+        self.shared.lock().unwrap().goodbye.as_deref().cloned()
+    }
+
+    /// Set the displays' backlight (0..=100), now if it changed and whenever an MK3
+    /// connects or its displays reopen.
+    pub fn set_display_brightness(&self, level: u8) {
+        let mut s = self.shared.lock().unwrap();
+        let level = Some(level.min(100));
+        if s.display_brightness != level {
+            s.display_brightness = level;
+            s.brightness_stamp = s.brightness_stamp.wrapping_add(1);
+        }
+    }
+
+    /// Set the LEDs' global level (0..=100 %), now if it changed and whenever an MK3
+    /// connects.
     pub fn set_led_brightness(&self, level: u8) {
         let mut s = self.shared.lock().unwrap();
-        s.led_brightness = Some(level.min(100));
-        s.led_stamp = s.led_stamp.wrapping_add(1);
+        let level = Some(level.min(100));
+        if s.led_brightness != level {
+            s.led_brightness = level;
+            s.led_stamp = s.led_stamp.wrapping_add(1);
+        }
     }
 
     /// Set the pads' sensitivity (0..=100 %), now if it changed and whenever an MK3
@@ -411,6 +459,25 @@ impl Mk3Io {
         self.shared.lock().unwrap().agent_holding
     }
 
+    /// Whether the controller is there, once the first look for it is over: it's looked
+    /// for on a thread of its own, so asking as that starts always said no. Waits at
+    /// most `patience` for that first look.
+    pub fn found(&self, patience: Duration) -> bool {
+        let until = std::time::Instant::now() + patience;
+        loop {
+            {
+                let s = self.shared.lock().unwrap();
+                if s.probed || s.connected {
+                    return s.connected;
+                }
+            }
+            if std::time::Instant::now() >= until {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// Whether the MK3's screens are open.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn displays_connected(&self) -> bool {
@@ -441,14 +508,20 @@ fn run(shared: &Mutex<Shared>) {
         let mut dev = match deckard_mk3::Device::open() {
             Ok(d) => d,
             Err(e) => {
-                shared.lock().unwrap().status = e;
+                let mut s = shared.lock().unwrap();
+                s.status = e;
+                s.probed = true;
+                drop(s);
                 std::thread::sleep(Duration::from_secs(2));
                 continue;
             }
         };
         // Clear the preceding host/session before waiting for the first UI state.
         if let Err(e) = dev.write_leds(&deckard_mk3::leds::Leds::default()) {
-            shared.lock().unwrap().status = format!("Maschine MK3: {e}");
+            let mut s = shared.lock().unwrap();
+            s.status = format!("Maschine MK3: {e}");
+            s.probed = true;
+            drop(s);
             std::thread::sleep(Duration::from_millis(250));
             continue;
         }
@@ -457,6 +530,7 @@ fn run(shared: &Mutex<Shared>) {
             let mut s = shared.lock().unwrap();
             s.status = format!("{} connected", dev.model().name);
             s.connected = true;
+            s.probed = true;
         }
         let mut events = Vec::new();
         // Shown on the LEDs: none yet, so the first state is sent.
@@ -502,6 +576,7 @@ fn run(shared: &Mutex<Shared>) {
                     scaling: 0,
                     fixed: 100,
                     touches: [PadTouch::default(); 16],
+                    base_keys: [PAD_PITCH; 16],
                 });
                 let out = s.output.clone().filter(Sender::has_engine);
                 let monitor = s.monitor.clone().filter(crate::midi_monitor::Monitor::is_open);
@@ -551,7 +626,7 @@ fn run(shared: &Mutex<Shared>) {
                             shown_mon(pad, Some((group, sound, pitch)), crate::midi_monitor::Pad::Off);
                             send(pad, Some((group, sound, pitch)), touching.release(pad, (group, sound, pitch), &route));
                         } else if out.is_none() && route.play && route.keys.is_none() {
-                            s.pending.push((route.group, pad - 1, PAD_PITCH, 0));
+                            s.pending.push((route.group, pad - 1, route.base_keys.get(pad - 1).copied().unwrap_or(PAD_PITCH), 0));
                         }
                         continue;
                     }
@@ -677,17 +752,41 @@ fn set_agent_holding(s: &mut Shared, holding: bool) {
 /// Keep the displays showing the latest picture (the displays are their own USB
 /// interface, written apart from the buttons and LEDs).
 fn run_displays(shared: &Mutex<Shared>, wake: &std::sync::Condvar) {
-    use deckard_mk3::display::{Displays, HEIGHT, WIDTH, rgb565};
+    use deckard_mk3::display::{Displays, HEIGHT, WIDTH, rgb565_dithered, rgb565_rounded};
+    // (A picture's pixels, marked by the surface, rounded rather than dithered.)
+    let to565 = |x: usize, y: usize, [r, g, b, a]: [u8; 4]| {
+        if a == deckard_surface::PICTURE_ALPHA { rgb565_rounded(r, g, b) } else { rgb565_dithered(x, y, r, g, b) }
+    };
     let mut left = vec![0u16; WIDTH * HEIGHT];
     let mut right = vec![0u16; WIDTH * HEIGHT];
-    // Fill `out` with one 480×272 half of a 960-wide RGBA picture.
+    let mut px: Vec<[u8; 4]> = Vec::with_capacity(WIDTH * 2 * HEIGHT);
+    let mut last_px: Vec<[u8; 4]> = Vec::with_capacity(WIDTH * 2 * HEIGHT);
+    // Fill `out` with one 480×272 half of a 960-wide RGBA picture, dithered to the
+    // displays' 5-6-5 levels (the one place the picture loses its low bits).
     let fill_half = |px: &[[u8; 4]], x0: usize, out: &mut [u16]| {
-        for y in 0..HEIGHT {
-            for x in 0..WIDTH {
-                let [r, g, b, _] = px.get(y * WIDTH * 2 + x0 + x).copied().unwrap_or([0, 0, 0, 255]);
-                out[y * WIDTH + x] = rgb565(r, g, b);
+        let stride = WIDTH * 2;
+        if px.len() >= stride * HEIGHT && x0 + WIDTH <= stride {
+            for y in 0..HEIGHT {
+                let src = &px[y * stride + x0..y * stride + x0 + WIDTH];
+                let dst = &mut out[y * WIDTH..(y + 1) * WIDTH];
+                for (x, (o, &p)) in dst.iter_mut().zip(src).enumerate() {
+                    *o = to565(x, y, p);
+                }
+            }
+        } else {
+            for y in 0..HEIGHT {
+                for x in 0..WIDTH {
+                    out[y * WIDTH + x] = to565(x, y, px.get(y * stride + x0 + x).copied().unwrap_or([0, 0, 0, 255]));
+                }
             }
         }
+    };
+    let half_changed = |a: &[[u8; 4]], b: &[[u8; 4]], x0: usize| -> bool {
+        let stride = WIDTH * 2;
+        if a.len() != b.len() || a.len() < stride * HEIGHT {
+            return true;
+        }
+        (0..HEIGHT).any(|y| a[y * stride + x0..y * stride + x0 + WIDTH] != b[y * stride + x0..y * stride + x0 + WIDTH])
     };
     loop {
         {
@@ -724,7 +823,8 @@ fn run_displays(shared: &Mutex<Shared>, wake: &std::sync::Condvar) {
             set_agent_holding(&mut s, false);
         }
         let mut shown = None;
-        let mut last_px: Vec<[u8; 4]> = Vec::new();
+        last_px.clear();
+        let mut previous: Option<deckard_surface::Picture> = None;
         loop {
             let (closing, released, next_screen) = {
                 let mut s = shared.lock().unwrap();
@@ -744,9 +844,9 @@ fn run_displays(shared: &Mutex<Shared>, wake: &std::sync::Condvar) {
                 }
             };
             if let Some(goodbye) = closing {
-                let px = goodbye.map_or_else(Vec::new, |p| p.to_vec());
-                fill_half(&px, 0, &mut left);
-                fill_half(&px, WIDTH, &mut right);
+                let gpx = goodbye.as_deref().map_or(&[][..], Vec::as_slice);
+                fill_half(gpx, 0, &mut left);
+                fill_half(gpx, WIDTH, &mut right);
                 let _ = d.show(0, &left).and_then(|_| d.show(1, &right));
                 shared.lock().unwrap().displays_closed = true;
                 return;
@@ -760,17 +860,71 @@ fn run_displays(shared: &Mutex<Shared>, wake: &std::sync::Condvar) {
                 break;
             }
             if let Some((n, frame)) = next_screen {
-                let px = frame.into_pixels();
-                if px != last_px {
-                    fill_half(&px, 0, &mut left);
-                    fill_half(&px, WIDTH, &mut right);
-                    if let Err(e) = d.show(0, &left).and_then(|_| d.show(1, &right)) {
-                        let mut s = shared.lock().unwrap();
-                        s.display_status = e;
-                        s.displays_connected = false;
-                        break;
+                let region = match frame {
+                    ScreenFrame::Picture(picture) => {
+                        let mut picture = Arc::try_unwrap(picture).unwrap_or_else(|shared| (*shared).clone());
+                        let region = previous.as_ref().and_then(|old| picture.rasterize_spectrum_update(old, &mut px));
+                        if region.is_none() {
+                            picture.rasterize_into(&mut px);
+                        }
+                        previous = Some(picture);
+                        region
                     }
-                    last_px = px;
+                    ScreenFrame::Pixels(pixels) => {
+                        previous = None;
+                        px.clear();
+                        px.extend_from_slice(&pixels);
+                        None
+                    }
+                };
+                let mut res = Ok(());
+                if let Some((x0, y0, x1, y1)) = region {
+                    for (panel, rgb) in [&mut left, &mut right].into_iter().enumerate() {
+                        let start = x0.max(panel * WIDTH);
+                        let end = x1.min((panel + 1) * WIDTH);
+                        if start >= end {
+                            continue;
+                        }
+                        let mut changed = false;
+                        for y in y0..y1 {
+                            let wide_row = y * (2 * WIDTH);
+                            for x in start..end {
+                                let pixel = px[wide_row + x];
+                                if last_px[wide_row + x] != pixel {
+                                    last_px[wide_row + x] = pixel;
+                                    let x = x - panel * WIDTH;
+                                    let dst = &mut rgb[y * WIDTH + x];
+                                    let value = to565(x, y, pixel);
+                                    changed |= *dst != value;
+                                    *dst = value;
+                                }
+                            }
+                        }
+                        if changed {
+                            res = d.show(panel, rgb);
+                            if res.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    let left_dirty = half_changed(&px, &last_px, 0);
+                    let right_dirty = half_changed(&px, &last_px, WIDTH);
+                    if left_dirty {
+                        fill_half(&px, 0, &mut left);
+                        res = d.show(0, &left);
+                    }
+                    if res.is_ok() && right_dirty {
+                        fill_half(&px, WIDTH, &mut right);
+                        res = d.show(1, &right);
+                    }
+                    std::mem::swap(&mut last_px, &mut px);
+                }
+                if let Err(e) = res {
+                    let mut s = shared.lock().unwrap();
+                    s.display_status = e;
+                    s.displays_connected = false;
+                    break;
                 }
                 shown = Some(n);
             }
@@ -787,10 +941,53 @@ mod tests {
     use deckard_model::pad_touch::{PadTouch, TouchMode};
     use deckard_model::{Dim, ExprKind, MidiKind};
 
+    /// The splash asks whether the MK3 is there as the look for it starts: the answer
+    /// waits for that first look, rather than saying no at once.
+    #[test]
+    fn found_waits_for_the_first_look() {
+        let io = Mk3Io { shared: Arc::default(), display_wake: Arc::new(std::sync::Condvar::new()) };
+        assert!(!io.found(Duration::from_millis(20)), "never looked: no, after the wait");
+        let s = io.shared.clone();
+        let looking = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            let mut s = s.lock().unwrap();
+            s.connected = true;
+            s.probed = true;
+        });
+        assert!(io.found(Duration::from_secs(5)), "found once the look is over");
+        looking.join().unwrap();
+        let io = Mk3Io { shared: Arc::default(), display_wake: Arc::new(std::sync::Condvar::new()) };
+        io.shared.lock().unwrap().probed = true;
+        let t = std::time::Instant::now();
+        assert!(!io.found(Duration::from_secs(5)) && t.elapsed() < Duration::from_secs(1), "looked, not there: no at once");
+    }
+
+    /// Closing queues a black frame for both displays. No controller is opened.
+    #[test]
+    fn closing_queues_a_black_frame() {
+        let io = Mk3Io { shared: Arc::default(), display_wake: Arc::new(std::sync::Condvar::new()) };
+        io.shut_down();
+        let s = io.shared.lock().unwrap();
+        assert!(s.closing);
+        let px = s.goodbye.as_deref().expect("a frame is queued");
+        assert_eq!(px.len(), black_displays().len());
+        assert!(px.iter().all(|p| *p == [0, 0, 0, 255]), "every pixel is black");
+    }
+
     fn route(touch: PadTouch) -> PadRoute {
         let mut touches = [PadTouch::default(); 16];
         touches[0] = touch;
-        PadRoute { play: true, group: 0, keys: None, chords: None, velocity: None, scaling: 0, fixed: 90, touches }
+        PadRoute {
+            play: true,
+            group: 0,
+            keys: None,
+            chords: None,
+            velocity: None,
+            scaling: 0,
+            fixed: 90,
+            touches,
+            base_keys: [PAD_PITCH; 16],
+        }
     }
 
     fn mode(mode: TouchMode) -> PadTouch {
@@ -808,6 +1005,11 @@ mod tests {
     fn pads_play_a_sound_a_key_or_a_chord() {
         let plain = route(PadTouch::default());
         assert_eq!(pad_notes(&plain, 3), [(2, PAD_PITCH)]);
+        // (Pad mode: a sound's pad plays its base key, as PAD MODE's octave and semitone set it.)
+        let mut moved = plain;
+        moved.base_keys[2] = 48;
+        assert_eq!(pad_notes(&moved, 3), [(2, 48)]);
+        assert_eq!(pad_notes(&moved, 4), [(3, PAD_PITCH)]);
         let k = keys(PadTouch::default());
         assert_eq!(pad_notes(&k, 2), [(0, 64)]);
         assert!(pad_notes(&k, 3).is_empty(), "a pad with no note plays nothing");
@@ -865,6 +1067,22 @@ mod tests {
         // The pads' own Fixed Velocity still wins in the Velocity mode.
         let fixed = PadRoute { velocity: Some(110), ..route(PadTouch::default()) };
         assert_eq!(Touching::hit_velocity(&fixed, 0, 0, 30), 110);
+    }
+
+    /// Fixed Velocity: a held pad's pressure doesn't change what Note Repeat plays at
+    /// (it dropped as the pad was let go); without it, pressure sets the repeats'.
+    #[test]
+    fn fixed_velocity_holds_note_repeat_against_pad_pressure() {
+        let slot = (0, 0, 60);
+        let fixed = PadRoute { velocity: Some(100), ..route(mode(TouchMode::Velocity)) };
+        let mut t = Touching::default();
+        t.hit(1, slot, &fixed);
+        assert!(t.pressure(1, Some(slot), 0.9, &fixed).is_empty(), "pressed harder");
+        assert!(t.pressure(1, Some(slot), 0.05, &fixed).is_empty(), "being let go");
+        let free = route(mode(TouchMode::Velocity));
+        let mut t = Touching::default();
+        t.hit(1, slot, &free);
+        assert!(matches!(t.pressure(1, Some(slot), 0.05, &free).as_slice(), [Live::RepeatPressure { .. }]));
     }
 
     /// Aftertouch from two held pads of a sound: the harder one counts; letting go of
@@ -1007,5 +1225,24 @@ mod tests {
     fn pressure_on_a_silent_pad_is_dropped() {
         let r = route(mode(TouchMode::PolyAt));
         assert_eq!(Touching::default().pressure(1, None, 0.5, &r), vec![]);
+    }
+
+    #[test]
+    fn unchanged_brightness_levels_do_not_bump_feature_stamps() {
+        let io = Mk3Io { shared: Arc::new(Mutex::new(Shared::default())), display_wake: Arc::new(std::sync::Condvar::new()) };
+        io.set_display_brightness(80);
+        io.set_led_brightness(75);
+        assert_eq!(io.shared.lock().unwrap().brightness_stamp, 1);
+        assert_eq!(io.shared.lock().unwrap().led_stamp, 1);
+        io.set_display_brightness(80);
+        io.set_led_brightness(75);
+        assert_eq!(io.shared.lock().unwrap().brightness_stamp, 1);
+        assert_eq!(io.shared.lock().unwrap().led_stamp, 1);
+        io.set_display_brightness(120);
+        io.set_led_brightness(60);
+        assert_eq!(io.shared.lock().unwrap().brightness_stamp, 2);
+        assert_eq!(io.shared.lock().unwrap().led_stamp, 2);
+        io.set_display_brightness(100);
+        assert_eq!(io.shared.lock().unwrap().brightness_stamp, 2);
     }
 }

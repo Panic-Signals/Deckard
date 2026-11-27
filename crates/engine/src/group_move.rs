@@ -17,9 +17,7 @@ impl Engine {
             self.lfo_release(g, s, None);
             self.send_live(g, s, crate::ahead::Ev::Stop);
             if let Some(i) = self.instruments.get(g).and_then(|r| r.get(s)).and_then(Option::as_ref) {
-                if let Ok(mut p) = i.plugin.lock() {
-                    p.all_notes_off();
-                }
+                i.plugin.audio_all_notes_off();
             }
             if let Some(smp) = self.sounds.get_mut(g).and_then(|r| r.get_mut(s)).and_then(Option::as_mut) {
                 smp.fade_all();
@@ -71,6 +69,10 @@ impl Engine {
         for note in &mut self.held_keys {
             note.group = moved(note.group, a, b);
         }
+        // (A group's sounds keep their mod wheels where it goes.)
+        for wheel in &mut self.mod_wheels {
+            wheel.0 = moved(wheel.0, a, b);
+        }
         for (_, event) in &mut self.live {
             remap_live(event, a, b);
         }
@@ -117,7 +119,8 @@ fn live_group(e: &Live) -> Option<usize> {
         | Live::ControlIn { group, .. }
         | Live::Expression { group, .. }
         | Live::RepeatPressure { group, .. }
-        | Live::ChokeGroup { group } => Some(*group),
+        | Live::ChokeGroup { group }
+        | Live::ChokeSound { group, .. } => Some(*group),
         Live::ChokeAll => None,
     }
 }
@@ -184,7 +187,8 @@ fn remap_live(e: &mut Live, a: usize, b: usize) {
         | Live::ControlIn { group, .. }
         | Live::Expression { group, .. }
         | Live::RepeatPressure { group, .. }
-        | Live::ChokeGroup { group } => *group = moved(*group, a, b),
+        | Live::ChokeGroup { group }
+        | Live::ChokeSound { group, .. } => *group = moved(*group, a, b),
         Live::ChokeAll => {}
     }
 }

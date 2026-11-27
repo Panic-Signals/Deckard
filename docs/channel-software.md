@@ -428,6 +428,31 @@ range, count, distribution)`:
 - `recalcMaxSteps` sets Steps' maximum by Division: Grid → 3840 / snap (≥ 2), 1/4 → 4, 1/8 → 8,
   1/16 → 16, 1/8 T → 12, 1/16 T → 24, 1/4 Q → 5, 1/8 Q → 10, 1/16 Q → 20, others 32.
 
+### 5.3 DECKARD's shape: one page, three engines
+
+Maschine's Jam shows one **Variation** page whose Mode (`Humanize` | `Random`) decides what Apply
+does (`channel-manual.md` §5.3, recovered from captures). DECKARD keeps that page — and adds
+`Euclid` as a third mode — as **one selector over the engines above**, so a Jam page and an in-app
+page can never mean different things:
+
+| Mode | What Apply runs | Where its settings are read |
+|---|---|---|
+| `Humanize` | `Document::apply_variation` — the §5.1 pass: velocity into the band, the time shift, the length scale | `sequence_variation/{velocity_range/low,high, time_shift, length_scale, length_variation}` |
+| `Random` | `Document::generate`, mode 0 — the §5.2 Random generator | `sequence_generation/{probability, note_range/low,high, note_count}`, plus the page's velocity band, note length, time shift and three distributions where set |
+| `Euclid` | `Document::generate`, mode 1 — the §5.2 Euclidean generator | `sequence_generation/{steps, fills, rotate, division}` |
+
+`Document::apply_groove_page` is the single entry point (`apply_groove_page_from` for a live drag,
+which re-applies Humanize from the notes as they were). Both surfaces call it: the app's Groove
+page button and the Jam's Apply.
+
+The format's Variation module holds four floats and an enum, so it cannot hold the Random page's
+range and distribution settings; DECKARD keeps them in its own sound field (`deckard:groove`, as
+`Sound::groove` already does for anything the format has no place for), which is where the 2.x
+**global** randomiser parameters also cease to be global: they are the sound's, saved with the
+project. Unset, the generator behaves exactly as §5.2 describes. The page's contract, its rig rows
+and the one reading still marked as DECKARD's are in
+`superpowers/specs/2026-11-21-jam-overlay-design.md`, "The Variation page".
+
 ---
 
 ## 6. Macro

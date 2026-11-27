@@ -5,7 +5,7 @@
 
 use crate::{Item, Kind, Query, Results};
 use rusqlite::{Connection, params};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// A folder to index.
@@ -71,35 +71,55 @@ impl UserIndex {
     /// Bring the index up to date with `roots`: new and changed files read, files no
     /// longer there dropped. Returns how many items the roots hold.
     pub fn scan(&mut self, roots: &[Root]) -> Result<usize, String> {
+        let known = self.known_mtimes()?;
         let mut seen = HashSet::new();
-        for root in roots {
-            let mut files = Vec::new();
-            walk(&root.path, &mut files, 0, self.reader.is_some() && !root.factory);
-            for f in files {
-                let mtime = mtime(&f);
-                let known: Option<i64> = self.db.query_row("SELECT mtime FROM items WHERE path = ?1", [path_text(&f)], |r| r.get(0)).ok();
-                if known != Some(mtime) {
-                    self.add_file(&f, root)?;
-                }
-                seen.insert(path_text(&f));
-            }
-        }
-        // Drop what's gone from under the roots.
-        let mut gone = Vec::new();
-        {
-            let mut st = self.db.prepare("SELECT path FROM items").map_err(|e| e.to_string())?;
-            let paths = st.query_map([], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?;
-            for p in paths.flatten() {
-                let under = roots.iter().any(|r| Path::new(&p).starts_with(&r.path));
-                if under && !seen.contains(&p) {
-                    gone.push(p);
+        self.db.execute_batch("BEGIN").map_err(|e| e.to_string())?;
+        let result = (|| {
+            for root in roots {
+                let mut files = Vec::new();
+                walk(&root.path, &mut files, 0, self.reader.is_some() && !root.factory);
+                for f in files {
+                    let key = path_text(&f);
+                    if known.get(&key) != Some(&mtime(&f)) {
+                        self.add_file(&f, root)?;
+                    }
+                    seen.insert(key);
                 }
             }
+            // Drop what's gone from under the roots.
+            let mut gone = Vec::new();
+            {
+                let mut st = self.db.prepare("SELECT path FROM items").map_err(|e| e.to_string())?;
+                let paths = st.query_map([], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?;
+                for p in paths.flatten() {
+                    let under = roots.iter().any(|r| Path::new(&p).starts_with(&r.path));
+                    if under && !seen.contains(&p) {
+                        gone.push(p);
+                    }
+                }
+            }
+            for p in gone {
+                self.db.execute("DELETE FROM items WHERE path = ?1", [p]).map_err(|e| e.to_string())?;
+            }
+            Ok(seen.len())
+        })();
+        match result {
+            Ok(n) => {
+                self.db.execute_batch("COMMIT").map_err(|e| e.to_string())?;
+                Ok(n)
+            }
+            Err(e) => {
+                let _ = self.db.execute_batch("ROLLBACK");
+                Err(e)
+            }
         }
-        for p in gone {
-            self.db.execute("DELETE FROM items WHERE path = ?1", [p]).map_err(|e| e.to_string())?;
-        }
-        Ok(seen.len())
+    }
+
+    /// Every indexed file's modification time, read once per scan.
+    fn known_mtimes(&self) -> Result<HashMap<String, i64>, String> {
+        let mut st = self.db.prepare("SELECT path, mtime FROM items").map_err(|e| e.to_string())?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))).map_err(|e| e.to_string())?;
+        rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
     }
 
     /// Drop everything under `dir` (a library folder no longer listed).
@@ -194,6 +214,8 @@ impl UserIndex {
                     characters: split(r.get(5)?),
                     tempo: r.get(6)?,
                     author: r.get(7)?,
+                    uuid: None,
+                    preview_subpath: None,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -215,10 +237,13 @@ impl UserIndex {
     }
 
     pub fn set_favorite(&mut self, path: &Path, on: bool) -> Result<(), String> {
+        self.set_favorite_key(&path_text(path), on)
+    }
+
+    pub fn set_favorite_key(&mut self, key: &str, on: bool) -> Result<(), String> {
         let (add, remove) = if on { ("favorites", "not_favorites") } else { ("not_favorites", "favorites") };
-        let path = path_text(path);
-        self.db.execute(&format!("INSERT OR IGNORE INTO {add} VALUES (?1)"), [&path]).map_err(|e| e.to_string())?;
-        self.db.execute(&format!("DELETE FROM {remove} WHERE path = ?1"), [&path]).map(|_| ()).map_err(|e| e.to_string())
+        self.db.execute(&format!("INSERT OR IGNORE INTO {add} VALUES (?1)"), [key]).map_err(|e| e.to_string())?;
+        self.db.execute(&format!("DELETE FROM {remove} WHERE path = ?1"), [key]).map(|_| ()).map_err(|e| e.to_string())
     }
 
     pub fn favorites(&self) -> HashSet<PathBuf> {
@@ -230,9 +255,23 @@ impl UserIndex {
         self.paths_in("not_favorites")
     }
 
+    pub fn favorite_keys(&self) -> HashSet<String> {
+        self.keys_in("favorites")
+    }
+
+    /// Keys (`<path>`, or `<path>#<uuid>` for ensemble snapshots) taken off the
+    /// favourites here, which Maschine's may still list.
+    pub fn not_favorite_keys(&self) -> HashSet<String> {
+        self.keys_in("not_favorites")
+    }
+
     fn paths_in(&self, table: &str) -> HashSet<PathBuf> {
+        self.keys_in(table).into_iter().map(PathBuf::from).collect()
+    }
+
+    fn keys_in(&self, table: &str) -> HashSet<String> {
         let Ok(mut st) = self.db.prepare(&format!("SELECT path FROM {table}")) else { return HashSet::new() };
-        st.query_map([], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().map(PathBuf::from).collect()).unwrap_or_default()
+        st.query_map([], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().collect()).unwrap_or_default()
     }
 }
 

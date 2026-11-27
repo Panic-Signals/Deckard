@@ -1,0 +1,2 @@
+# Files that must not contain a #[test]: their tests live in their own files
+# (scripts/check-file-sizes.sh; DEVELOPMENT.md, "Where code goes"). One path per line.

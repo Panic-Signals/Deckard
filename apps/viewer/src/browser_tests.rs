@@ -225,6 +225,53 @@ fn double_click_loads_a_one_shot_into_the_focused_sound() {
     assert!(zones[0].sample.path.ends_with("Hit.wav"));
 }
 
+/// The MK3's magnifier is Quick Browse: the search that loaded the sound's sample comes
+/// back, on the Control page, until another sound is focused.
+#[test]
+fn quick_browse_recalls_the_search_that_loaded_the_sample() {
+    use deckard_surface::{Action, Browse};
+    let (_tmp, dir) = temp();
+    let Some(mut h) = open_browser(&dir) else { return };
+    let hit = dir.join("Maschine 3/Samples/Hit.wav");
+    std::fs::create_dir_all(hit.parent().unwrap()).unwrap();
+    wav(&hit, 4410);
+    h.state_mut().browser.add_saved(&hit);
+    act(&mut h, BrowseAct::User(true));
+    act(&mut h, BrowseAct::Kind(Kind::OneShot));
+    let found = h.state().browser.query.clone();
+    let i = names(&h).iter().position(|n| n == "Hit").expect("the saved one-shot is listed");
+    let (g, s) = empty_sound(&h);
+    h.state_mut().group = g;
+    h.state_mut().sound = s;
+    act(&mut h, BrowseAct::Load(i, None));
+    // Elsewhere since.
+    act(&mut h, BrowseAct::User(false));
+    act(&mut h, BrowseAct::Kind(Kind::Loop));
+    assert_eq!(h.state().surface.page(), "control");
+    h.state_mut().surface_act(Action::Browse(Browse::Quick(true)));
+    h.state_mut().browser.wait();
+    assert_eq!(h.state().browser.query, found, "the search that found it");
+    assert_eq!(h.state().browser.selected_item().map(|i| i.name.as_str()), Some("Hit"));
+    let view = h.state().surface_view();
+    assert!(view.control.quick_browse);
+    assert!(view.browser.results.iter().any(|r| r.0 == "Hit"), "the controller has the list");
+    // The magnifier again closes it; so does another sound focused.
+    h.state_mut().surface_act(Action::Browse(Browse::Quick(false)));
+    assert!(!h.state().surface_view().control.quick_browse);
+    h.state_mut().surface_act(Action::Browse(Browse::Quick(true)));
+    h.state_mut().browser.wait();
+    h.state_mut().stop_prehear_after_browse();
+    assert!(h.state().surface_view().control.quick_browse, "still the same sound");
+    h.state_mut().sound = (s + 1) % 16;
+    h.state_mut().stop_prehear_after_browse();
+    assert!(!h.state().surface_view().control.quick_browse);
+    // A sound with nothing to look for: no list.
+    let (g2, s2) = empty_sound(&h);
+    (h.state_mut().group, h.state_mut().sound) = (g2, s2);
+    h.state_mut().surface_act(Action::Browse(Browse::Quick(true)));
+    assert!(!h.state().surface_view().control.quick_browse);
+}
+
 #[test]
 fn dragging_a_loop_onto_an_empty_sound_makes_an_audio_plugin() {
     let (_tmp, dir) = temp();
@@ -424,6 +471,53 @@ fn save_sound_writes_mxsnd_with_tags_and_lists_it_under_user() {
     act(&mut h, BrowseAct::User(true));
     act(&mut h, BrowseAct::Kind(Kind::Sound));
     assert_eq!(names(&h), ["My Kick"]);
+}
+
+#[test]
+fn preview_goes_where_the_browser_prehears_it() {
+    let file = PathBuf::from("Maschine 3/Sounds/My Kick.mxsnd");
+    let preview = crate::browser::preview_path(&file);
+    assert_eq!(preview, PathBuf::from("Maschine 3/Sounds/.previews/My Kick.mxsnd.wav"));
+    let (_tmp, dir) = temp();
+    let file = dir.join("Kick.mxsnd");
+    std::fs::write(&file, b"x").unwrap();
+    crate::browser::write_preview(&crate::browser::preview_path(&file), &[0.5, -0.5], 44_100).unwrap();
+    let item = deckard_library::Item { path: file, kind: Kind::Sound, ..Default::default() };
+    assert_eq!(crate::browser::prehear_file(&item), Some(crate::browser::preview_path(&item.path)));
+}
+
+#[test]
+fn save_sound_with_preview_ticked_writes_the_preview() {
+    let Some((_tmp, mut h, dir)) = saving() else { return };
+    let (g, s) = sound_with_sampler(&h);
+    let what = deckard_doc::FileItem::Sound(g, s);
+    let file = dir.join("Maschine 3/Sounds/Heard.mxsnd");
+    let preview = crate::browser::preview_path(&file);
+    // Unticked: no preview, and the choice is remembered.
+    layout::apply_acts(h.state_mut(), vec![Act::SaveItem(what, crate::SaveMode::SaveAs)]);
+    assert!(h.state().save_dialog.as_ref().unwrap().preview, "on to begin with");
+    h.state_mut().save_dialog.as_mut().unwrap().preview = false;
+    h.state_mut().save_dialog.as_mut().unwrap().name = "Heard".into();
+    h.state_mut().confirm_save();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(!preview.exists());
+    layout::apply_acts(h.state_mut(), vec![Act::SaveItem(what, crate::SaveMode::SaveAs)]);
+    assert!(!h.state().save_dialog.as_ref().unwrap().preview, "remembered");
+    // Ticked: the preview appears, and the browser finds it.
+    let d = h.state_mut().save_dialog.as_mut().unwrap();
+    d.preview = true;
+    d.name = "Heard".into();
+    d.confirm_overwrite = true;
+    h.state_mut().confirm_save();
+    for _ in 0..200 {
+        if preview.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(preview.is_file(), "the preview is written beside the sound");
+    let item = deckard_library::Item { path: file, kind: Kind::Sound, ..Default::default() };
+    assert_eq!(crate::browser::prehear_file(&item), Some(preview));
 }
 
 #[test]

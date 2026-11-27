@@ -40,8 +40,13 @@ Status: **working** for Maschine's own effects, October 2026 (plan:
     indicator.
   - **SHIFT + pad 10** (Clear Auto) removes the focused sound's modulation in the
     focused pattern.
+- **The mod wheel as a source.** Mod Wheel is a route source after Pressure, Slide and
+  Pitch: MIDI CC 1 as it last came in to the sound (a keyboard's wheel, the MK3's touch
+  strip in MOD, or CC 1 played from a pattern), 0 at the bottom to 1 at the top. It stays
+  where it was left, and rests at Low until it first moves. Like the others it drives
+  the whole sound; any destination takes it (a Sampler Preview's Morph, say).
 - **LFOs as a source.** Up to 16 LFOs, one a pad (LFO 1 … LFO 16), each a route
-  source after Pressure, Slide and Pitch: Shape (Sine, Square, Triangle, Saw, Random,
+  source after Pressure, Slide, Pitch and Mod Wheel: Shape (Sine, Square, Triangle, Saw, Random,
   Wander),
   Sync and Rate, Phase, Level, Quantize, Trigger (a sound whose notes restart it) and
   Fade in. A route maps the LFO's 0..1 onto its low..high as it does Pressure. Spec:

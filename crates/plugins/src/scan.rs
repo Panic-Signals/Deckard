@@ -103,6 +103,42 @@ fn text(b: &[c_char]) -> String {
     unsafe { CStr::from_ptr(b.as_ptr()) }.to_string_lossy().into_owned()
 }
 
+/// A stamp of the files an update replaces: the plug-in's binary and its
+/// `moduleinfo.json`. Each part is `mtime-length`, or `0-0` when that file isn't
+/// there.
+///
+/// The bundle folder's own time is not part of it. Replacing the binary inside
+/// `Contents` often leaves the folder alone, and other programs touch the folder
+/// without changing the plug-in, so a folder time either misses an update or
+/// loads every plug-in again.
+pub fn bundle_stamp(bundle: &Path) -> String {
+    let binary = module::plugin_file(bundle).map(|p| file_stamp(&p)).unwrap_or_else(|| "0-0".into());
+    let info = file_stamp(&bundle.join("Contents/Resources/moduleinfo.json"));
+    format!("{binary}+{info}")
+}
+
+fn file_stamp(p: &Path) -> String {
+    let Ok(m) = std::fs::metadata(p) else { return "0-0".into() };
+    let t = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+    format!("{t}-{}", m.len())
+}
+
+fn folder_mtime(bundle: &Path) -> u64 {
+    std::fs::metadata(bundle)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Whether `saved` still describes `bundle`. An exact stamp, or a cache from
+/// before stamps named the binary: it stored the folder's mtime, and that mtime
+/// is unchanged. The caller then stores [`bundle_stamp`], so the next scan
+/// compares the binary.
+pub fn stamp_matches(saved: &str, bundle: &Path, stamp: &str) -> bool {
+    saved == stamp || (!saved.contains('-') && saved.parse::<u64>().ok() == Some(folder_mtime(bundle)))
+}
+
 /// VST3 bundles in `dirs` and their subfolders (vendors nest them:
 /// `VST3/MeldaProduction/EQ/MEqualizer.vst3`), but not inside a bundle.
 pub fn vst3_bundles(dirs: &[PathBuf]) -> Vec<PathBuf> {
@@ -340,6 +376,78 @@ pub fn audio_units() -> Vec<Entry> {
 #[cfg(not(target_os = "macos"))]
 pub fn audio_units() -> Vec<Entry> {
     Vec::new()
+}
+
+#[cfg(test)]
+mod stamp_tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn scratch() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("deckard-stamp-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Where this machine looks for the binary inside a bundle.
+    fn binary(bundle: &Path) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let arch = match std::env::consts::ARCH {
+                "x86_64" => "x86_64-win",
+                "x86" => "x86-win",
+                "aarch64" => "arm64-win",
+                other => other,
+            };
+            bundle.join("Contents").join(arch).join(bundle.file_name().unwrap())
+        }
+        #[cfg(target_os = "macos")]
+        {
+            bundle.join("Contents/MacOS").join(bundle.file_stem().unwrap())
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let machine = std::process::Command::new("uname").arg("-m").output().ok().and_then(|o| String::from_utf8(o.stdout).ok());
+            let machine = machine.unwrap_or_else(|| std::env::consts::ARCH.into()).trim().to_string();
+            bundle.join("Contents").join(format!("{machine}-linux")).join(bundle.file_stem().unwrap()).with_extension("so")
+        }
+        #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+        {
+            bundle.join("binary")
+        }
+    }
+
+    #[test]
+    fn a_stamp_follows_the_binary_and_not_the_folder() {
+        let root = scratch();
+        let bundle = root.join("Plug.vst3");
+        let bin = binary(&bundle);
+        fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        fs::write(&bin, b"v1").unwrap();
+        let info = bundle.join("Contents/Resources/moduleinfo.json");
+        fs::create_dir_all(info.parent().unwrap()).unwrap();
+        fs::write(&info, b"{}").unwrap();
+
+        let first = bundle_stamp(&bundle);
+        fs::write(bundle.join("unrelated.txt"), b"touched").unwrap();
+        assert_eq!(bundle_stamp(&bundle), first, "a file beside the binary is not the plug-in");
+
+        fs::write(&bin, b"v1-updated").unwrap();
+        let second = bundle_stamp(&bundle);
+        assert_ne!(first, second, "a new binary is a new stamp");
+        assert!(!stamp_matches(&first, &bundle, &second));
+        assert!(stamp_matches(&second, &bundle, &second));
+
+        // A cache that stored only the folder's mtime still applies while that
+        // mtime is the folder's now, and not once the folder itself changes.
+        let folder = folder_mtime(&bundle);
+        assert!(stamp_matches(&folder.to_string(), &bundle, &second));
+        assert!(!stamp_matches(&(folder.wrapping_add(9)).to_string(), &bundle, &second));
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }
 
 #[cfg(test)]

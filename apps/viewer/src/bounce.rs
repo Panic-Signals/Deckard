@@ -75,7 +75,7 @@ fn render_takes(
 
 impl App {
     /// The rate offline renders for the project use: the audio output's, else 44.1 kHz.
-    fn render_rate(&self) -> u32 {
+    pub fn render_rate(&self) -> u32 {
         match &self.output {
             Some(Ok(o)) => o.rate,
             _ => RATE,
@@ -203,9 +203,14 @@ impl App {
     pub fn bounce_windows(&mut self, ctx: &egui::Context) {
         if self.bounce.confirm.is_some() {
             let mut answer = None;
-            egui::Window::new("Bounce").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(
-                ctx,
-                |ui| {
+            egui::Window::new("Bounce")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .max_height(crate::layout::dialog_max_height(ctx))
+                .max_width(crate::layout::dialog_max_width(ctx))
+                .vscroll(true)
+                .show(ctx, |ui| {
                     crate::layout::dialog_style(ui);
                     ui.label(
                         "Bouncing renders the sound's patterns to audio and replaces its plug-ins with an Audio plug-in playing them.",
@@ -218,8 +223,7 @@ impl App {
                             }
                         }
                     });
-                },
-            );
+                });
             if let Some(a) = answer {
                 self.answer_bounce(a);
             }
@@ -232,16 +236,20 @@ impl App {
             .or_else(|| self.bounce.pattern.as_ref().map(|(_, j)| (j.what.clone(), j.progress())));
         if let Some((what, f)) = progress {
             let mut cancel = false;
-            egui::Window::new(format!("{what}…")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(
-                ctx,
-                |ui| {
+            egui::Window::new(format!("{what}…"))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .max_height(crate::layout::dialog_max_height(ctx))
+                .max_width(crate::layout::dialog_max_width(ctx))
+                .vscroll(true)
+                .show(ctx, |ui| {
                     crate::layout::dialog_style(ui);
                     ui.horizontal(|ui| {
                         ui.add(egui::ProgressBar::new(f).desired_width(220.0).show_percentage());
                         cancel = ui.button("Cancel").clicked();
                     });
-                },
-            );
+                });
             if cancel {
                 if let Some((_, j)) = &self.bounce.running {
                     j.cancel();

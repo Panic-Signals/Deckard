@@ -125,6 +125,23 @@ pub struct Settings {
     pub display_brightness: u8,
     /// DECKARD drives a Maschine JAM plugged in (Preferences > MIDI).
     pub jam_enabled: bool,
+    /// The Jam's pad layout, as the manual's PAD LAYOUT table lists it (Keyboard mode
+    /// p. 98): `jam_keyboard_layout` 0 Standard / 1 Isomorph, `jam_iso_layout` 0 3rds /
+    /// 1 4ths / 2 Sequential, `jam_iso_type` 0 In Key / 1 Chromatic, `jam_iso_dir`
+    /// 0 Vertical / 1 Horizontal. Defaults are the hardware capture
+    /// (`Isomorph / Sequential / In Key / Vertical`); never NI's plist (read-only).
+    pub jam_keyboard_layout: i64,
+    pub jam_iso_layout: i64,
+    pub jam_iso_type: i64,
+    pub jam_iso_dir: i64,
+    /// Where the Jam strip's own window sits: its offset in points from the main window's
+    /// top-left, so the strip comes back beside the app on whatever display it opens on.
+    pub jam_strip_pos: Option<(f32, f32)>,
+    /// The Jam's on-screen overlay (the OSO), in its own window (Preferences > Hardware). Off,
+    /// the pages still publish — the encoders, lights and every page behave as ever — and
+    /// nothing draws. Switching it clears the window's saved place, so it comes back beside the
+    /// app. (Not to be confused with the Jam's touchstrips, which are the strip itself.)
+    pub show_overlay: bool,
     /// MIDI recorded into another group makes it the focused group (Preferences > MIDI).
     pub focus_follows: bool,
     /// A JAM touchstrip moves a value by the distance the finger travels instead of setting it
@@ -153,6 +170,10 @@ pub struct Settings {
     /// The project File ▸ New starts from (a template: its groups, sounds, plug-ins,
     /// tempo and routing); `None`, or gone: an empty project.
     pub default_project: Option<PathBuf>,
+    /// Folder the last session recording went to; `None`: the default location.
+    pub session_dir: Option<PathBuf>,
+    /// Free disk space (MB) a session recording leaves untouched.
+    pub session_reserve_mb: u32,
     /// Scene / Section: duplicating a scene copies its patterns too (Maschine's "Scn &
     /// Ptn"), and a duplicated section plays the same scene (LINK WHEN DUPL).
     pub duplicate_patterns: bool,
@@ -179,6 +200,9 @@ pub struct Settings {
     pub controller_theme: String,
     /// The software window's theme (Preferences > Hardware). Independent of the controller.
     pub desktop_theme: String,
+    /// Colours chosen in the theme editor's Desktop tab. Absent: the desktop theme's own.
+    pub desktop_background: Option<[u8; 3]>,
+    pub desktop_text: Option<[u8; 3]>,
     /// LCD colour while that theme is on: `yellow`, `red` or `blue`.
     pub lcd_mode: String,
     /// Ableton Link (the header's LINK): joined, and starting and stopping with the
@@ -249,6 +273,14 @@ pub fn default_routing() -> Vec<Option<usize>> {
 /// A mono channel's own name: "In 1 L", "Out 16 R".
 pub fn channel_name(kind: &str, i: usize) -> String {
     format!("{kind} {} {}", i / 2 + 1, if i % 2 == 0 { "L" } else { "R" })
+}
+
+fn parse_rgb(text: &str) -> Option<[u8; 3]> {
+    let mut n = text.split(',').map(|p| p.trim().parse::<u16>().ok());
+    let r = n.next()??;
+    let g = n.next()??;
+    let b = n.next()??;
+    (r <= 255 && g <= 255 && b <= 255).then_some([r as u8, g as u8, b as u8])
 }
 
 impl Settings {
@@ -402,6 +434,12 @@ impl Default for Settings {
             render_ahead_ms: 0,
             display_brightness: 100,
             jam_enabled: true,
+            jam_keyboard_layout: 1,
+            jam_iso_layout: 2,
+            jam_iso_type: 0,
+            jam_iso_dir: 0,
+            jam_strip_pos: None,
+            show_overlay: true,
             pad_sensitivity: 50,
             metronome_volume: 100,
             focus_follows: true,
@@ -412,6 +450,8 @@ impl Default for Settings {
             metronome_ticks: 4,
             reload_last: true,
             default_project: None,
+            session_dir: None,
+            session_reserve_mb: 1024,
             auto_backup: true,
             duplicate_patterns: false,
             link_duplicates: false,
@@ -425,6 +465,8 @@ impl Default for Settings {
             controller: ControllerChoice::default(),
             controller_theme: CONTROLLER_THEME.to_string(),
             desktop_theme: "maschine".to_string(),
+            desktop_background: None,
+            desktop_text: None,
             lcd_mode: "yellow".to_string(),
             link: false,
             link_start_stop: false,
@@ -586,6 +628,8 @@ impl Settings {
                 "exact_timing" => s.exact_timing = v != "false",
                 "controller_theme" if !v.is_empty() => s.controller_theme = v.to_string(),
                 "desktop_theme" if !v.is_empty() => s.desktop_theme = v.to_string(),
+                "desktop_background" => s.desktop_background = parse_rgb(v),
+                "desktop_text" => s.desktop_text = parse_rgb(v),
                 "lcd_mode" => s.lcd_mode = deckard_surface::lcd::mode(v).to_string(),
                 "controller" => {
                     s.controller = match v {
@@ -601,6 +645,7 @@ impl Settings {
                 }
                 "focus_follows" => s.focus_follows = v != "false",
                 "relative_strips" => s.relative_strips = v == "true",
+                "show_overlay" => s.show_overlay = v == "true",
                 "pinned_page" if !v.is_empty() => {
                     s.pinned_pages.insert(v.to_string());
                 }
@@ -616,6 +661,8 @@ impl Settings {
                 "reload_last" => s.reload_last = v == "true",
                 "stems_offered" => s.stems_offered = v == "true",
                 "default_project" if !v.is_empty() => s.default_project = Some(PathBuf::from(v)),
+                "session_reserve_mb" => s.session_reserve_mb = v.parse().unwrap_or(1024),
+                "session_dir" if !v.is_empty() => s.session_dir = Some(PathBuf::from(v)),
                 "auto_backup" => s.auto_backup = v == "true",
                 "duplicate_patterns" => s.duplicate_patterns = v == "true",
                 "link_duplicates" => s.link_duplicates = v == "true",
@@ -655,6 +702,33 @@ impl Settings {
                     }
                 }
                 "jam_enabled" => s.jam_enabled = v != "false",
+                "jam_keyboard_layout" => {
+                    if let Ok(n) = v.parse::<i64>() {
+                        s.jam_keyboard_layout = n.clamp(0, 1);
+                    }
+                }
+                "jam_iso_layout" => {
+                    if let Ok(n) = v.parse::<i64>() {
+                        s.jam_iso_layout = n.clamp(0, 2);
+                    }
+                }
+                "jam_iso_type" => {
+                    if let Ok(n) = v.parse::<i64>() {
+                        s.jam_iso_type = n.clamp(0, 1);
+                    }
+                }
+                "jam_iso_dir" => {
+                    if let Ok(n) = v.parse::<i64>() {
+                        s.jam_iso_dir = n.clamp(0, 1);
+                    }
+                }
+                "jam_strip_pos" => {
+                    if let Some((x, y)) = v.split_once(',')
+                        && let (Ok(x), Ok(y)) = (x.trim().parse::<f32>(), y.trim().parse::<f32>())
+                    {
+                        s.jam_strip_pos = Some((x, y));
+                    }
+                }
                 "render_ahead_ms" => {
                     if let Ok(n) = v.parse::<u32>() {
                         s.render_ahead_ms = n.min(200);
@@ -848,8 +922,16 @@ impl Settings {
             self.buffer_frames, self.multicore, self.exact_timing, self.render_ahead_ms, self.display_brightness, self.pad_sensitivity
         );
         out += &format!("jam_enabled = {}\n", self.jam_enabled);
+        out += &format!(
+            "jam_keyboard_layout = {}\njam_iso_layout = {}\njam_iso_type = {}\njam_iso_dir = {}\n",
+            self.jam_keyboard_layout, self.jam_iso_layout, self.jam_iso_type, self.jam_iso_dir
+        );
+        if let Some((x, y)) = self.jam_strip_pos {
+            out += &format!("jam_strip_pos = {x},{y}\n");
+        }
         out += &format!("focus_follows = {}\n", self.focus_follows);
         out += &format!("relative_strips = {}\n", self.relative_strips);
+        out += &format!("show_overlay = {}\n", self.show_overlay);
         for p in &self.pinned_pages {
             out += &format!("pinned_page = {p}\n");
         }
@@ -869,6 +951,10 @@ impl Settings {
         );
         if let Some(p) = &self.default_project {
             out += &format!("default_project = {}\n", p.display());
+        }
+        out += &format!("session_reserve_mb = {}\n", self.session_reserve_mb);
+        if let Some(p) = &self.session_dir {
+            out += &format!("session_dir = {}\n", p.display());
         }
         if self.stems_offered {
             out += "stems_offered = true\n";
@@ -891,6 +977,12 @@ impl Settings {
         }
         if self.desktop_theme != "maschine" {
             out += &format!("desktop_theme = {}\n", self.desktop_theme);
+        }
+        if let Some(c) = self.desktop_background {
+            out += &format!("desktop_background = {},{},{}\n", c[0], c[1], c[2]);
+        }
+        if let Some(c) = self.desktop_text {
+            out += &format!("desktop_text = {},{},{}\n", c[0], c[1], c[2]);
         }
         if self.lcd_mode != "yellow" {
             out += &format!("lcd_mode = {}\n", self.lcd_mode);
@@ -957,15 +1049,9 @@ pub struct Catalog {
 
 enum ScanMsg {
     Progress(String),
-    Done(Vec<Entry>, Vec<(String, u64)>),
-}
-
-fn mtime(p: &Path) -> u64 {
-    std::fs::metadata(p)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_secs())
+    /// The entries, each VST3 bundle with the stamp of its binary, and how many
+    /// bundles were actually read (the rest came from the last scan).
+    Done(Vec<Entry>, Vec<(String, String)>, usize),
 }
 
 impl Catalog {
@@ -985,10 +1071,11 @@ impl Catalog {
         self.scanning.is_some()
     }
 
-    /// Scan again, in the background. VST3 bundles without a `moduleinfo.json` are
-    /// loaded by a helper process (this program with `--scan-vst3 <bundle>`), so a
-    /// plug-in that crashes can't take the app down; bundles that didn't change since
-    /// the last scan are taken from it.
+    /// Scan again, in the background. A VST3 already scanned is kept when its binary
+    /// and `moduleinfo.json` are unchanged, so a new plug-in is picked up and an
+    /// updated one is read again, without loading the rest. Bundles without a
+    /// `moduleinfo.json` are loaded by a helper process (this program with
+    /// `--scan-vst3 <bundle>`), so a plug-in that crashes can't take the app down.
     pub fn rescan(&mut self, settings: &Settings) {
         if self.scanning.is_some() {
             return;
@@ -1003,43 +1090,33 @@ impl Catalog {
                 let _ = tx.send(ScanMsg::Progress("Syncing Windows plug-ins (yabridge)…".into()));
                 let _ = crate::wine::sync();
             }
-            // Bundles scanned before, with their mtime, and their entries.
-            let mut known: Vec<(String, u64, Vec<Entry>)> = Vec::new();
+            // Bundles scanned before, with the stamp of their binary, and their entries.
+            let mut known: Vec<(String, String, Vec<Entry>)> = Vec::new();
             for line in old.lines() {
                 if let Some(rest) = line.strip_prefix("#bundle\t") {
                     let (p, t) = rest.rsplit_once('\t').unwrap_or((rest, "0"));
-                    known.push((p.to_string(), t.parse().unwrap_or(0), Vec::new()));
+                    known.push((p.to_string(), t.to_string(), Vec::new()));
                 } else if let (Some(e), Some(last)) = (Entry::from_line(line), known.last_mut()) {
                     last.2.push(e);
                 }
             }
-            let mut entries = Vec::new();
-            let mut bundles = Vec::new();
+            let _ = tx.send(ScanMsg::Progress("Checking plug-ins…".into()));
             let dirs = s.scan_dirs();
-            for b in scan::vst3_bundles(&dirs) {
-                let key = b.display().to_string();
-                let t = mtime(&b);
+            let (entries, bundles, scanned) = collect_vst3(&dirs, &known, |b| {
                 let _ = tx.send(ScanMsg::Progress(format!(
                     "Scanning {}",
-                    b.file_name().map_or(key.clone(), |n| n.to_string_lossy().into_owned())
+                    b.file_name().map_or_else(|| b.display().to_string(), |n| n.to_string_lossy().into_owned())
                 )));
-                let found = if let Some(e) = unchanged_scan(&known, &key, t) {
-                    e.clone()
-                } else if let Some(e) = scan::vst3_from_moduleinfo(&b) {
-                    e
-                } else {
-                    scan_in_helper(&b)
-                };
-                bundles.push((key, t));
-                entries.push(found);
-            }
+            });
             let mut all: Vec<Entry> = entries.concat();
+            // VST2 is named from its file, and Audio Units come from the system registry.
+            // Neither loads the plug-in; listing them is how a new one is found.
             all.extend(scan::vst2_entries(&dirs));
             all.extend(scan::audio_units());
-            let _ = tx.send(ScanMsg::Done(all, bundles));
+            let _ = tx.send(ScanMsg::Done(all, bundles, scanned));
         });
         self.scanning = Some(rx);
-        self.status = "Scanning plug-ins…".into();
+        self.status = "Checking plug-ins…".into();
     }
 
     /// Take up scan progress (call every frame).
@@ -1049,8 +1126,8 @@ impl Catalog {
         while let Ok(m) = rx.try_recv() {
             match m {
                 ScanMsg::Progress(p) => self.status = p,
-                ScanMsg::Done(entries, bundles) => {
-                    // The cache: per VST3 bundle, its mtime and entries; then the rest.
+                ScanMsg::Done(entries, bundles, scanned) => {
+                    // The cache: per VST3 bundle, the stamp of its binary and its entries.
                     let mut out = String::new();
                     for (b, t) in &bundles {
                         out += &format!("#bundle\t{b}\t{t}\n");
@@ -1068,7 +1145,11 @@ impl Catalog {
                         }
                         let _ = std::fs::write(f, out);
                     }
-                    self.status = format!("{} plug-ins found", entries.len());
+                    self.status = if scanned == 0 {
+                        format!("{} plug-ins, nothing new", entries.len())
+                    } else {
+                        format!("{} plug-ins, {scanned} scanned", entries.len())
+                    };
                     self.entries = entries;
                     self.scanning = None;
                     changed = true;
@@ -1080,11 +1161,38 @@ impl Catalog {
     }
 }
 
-/// What the last scan found in bundle `key`, if it hasn't changed since. A scan that found
-/// nothing doesn't count: the helper was killed or crashed (a plug-in slow to start, say),
-/// and the bundle is scanned again rather than left out for good.
-fn unchanged_scan<'a>(known: &'a [(String, u64, Vec<Entry>)], key: &str, mtime: u64) -> Option<&'a Vec<Entry>> {
-    known.iter().find(|(p, t, e)| p == key && *t == mtime && !e.is_empty()).map(|(_, _, e)| e)
+/// VST3 bundles in `dirs`: entries kept from `known` when the binary is unchanged,
+/// and read otherwise. `on_scan` is told about each bundle that is read. Returns the
+/// entries per bundle, each bundle's stamp, and how many were read.
+fn collect_vst3(
+    dirs: &[PathBuf],
+    known: &[(String, String, Vec<Entry>)],
+    mut on_scan: impl FnMut(&Path),
+) -> (Vec<Vec<Entry>>, Vec<(String, String)>, usize) {
+    let mut entries = Vec::new();
+    let mut bundles = Vec::new();
+    let mut scanned = 0;
+    for b in scan::vst3_bundles(dirs) {
+        let key = b.display().to_string();
+        let stamp = scan::bundle_stamp(&b);
+        let found = if let Some(e) = unchanged_scan(known, &key, &b, &stamp) {
+            e.clone()
+        } else {
+            scanned += 1;
+            on_scan(&b);
+            if let Some(e) = scan::vst3_from_moduleinfo(&b) { e } else { scan_in_helper(&b) }
+        };
+        bundles.push((key, stamp));
+        entries.push(found);
+    }
+    (entries, bundles, scanned)
+}
+
+/// What the last scan found in bundle `key`, if its binary is unchanged. A scan that
+/// found nothing doesn't count: the helper was killed or crashed (a plug-in slow to
+/// start, say), and the bundle is scanned again rather than left out for good.
+fn unchanged_scan<'a>(known: &'a [(String, String, Vec<Entry>)], key: &str, bundle: &Path, stamp: &str) -> Option<&'a Vec<Entry>> {
+    known.iter().find(|(p, saved, e)| p == key && !e.is_empty() && scan::stamp_matches(saved, bundle, stamp)).map(|(_, _, e)| e)
 }
 
 /// Run `--scan-vst3 <bundle>` in a helper process (20 s at most; 90 s for a yabridge
@@ -1313,6 +1421,9 @@ mod routing_tests {
         assert_eq!(Settings::parse(&lcd.to_text()).lcd_mode, "blue");
         assert_eq!(Settings::parse(&lcd.to_text()).desktop_theme, "lcd");
         assert_eq!(Settings::parse(&lcd.to_text()).controller_theme, "palenight", "the window's theme does not change the controller");
+        let painted = Settings { desktop_background: Some([12, 16, 24]), desktop_text: Some([220, 224, 230]), ..Settings::default() };
+        let back = Settings::parse(&painted.to_text());
+        assert_eq!((back.desktop_background, back.desktop_text), (Some([12, 16, 24]), Some([220, 224, 230])));
         assert_eq!(Settings::parse("lcd_mode = white").lcd_mode, "yellow");
         assert_eq!(Settings::parse("lcd_mode = purple").lcd_mode, "yellow");
     }
@@ -1344,17 +1455,67 @@ mod routing_tests {
 
 #[cfg(test)]
 mod catalog_tests {
-    use super::{Entry, Kind, unchanged_scan};
+    use super::{Entry, Kind, collect_vst3, unchanged_scan};
+    use std::fs;
+    use std::path::Path;
+
+    fn entry() -> Entry {
+        Entry { kind: Kind::Vst3, vendor: "V".into(), name: "P".into(), instrument: true, location: "a.vst3".into(), cid: "00".into() }
+    }
 
     #[test]
     fn a_scan_that_found_nothing_is_tried_again() {
-        let entry =
-            Entry { kind: Kind::Vst3, vendor: "V".into(), name: "P".into(), instrument: true, location: "a.vst3".into(), cid: "00".into() };
-        let known = vec![("a.vst3".to_string(), 5, vec![entry.clone()]), ("failed.vst3".to_string(), 5, Vec::new())];
-        assert_eq!(unchanged_scan(&known, "a.vst3", 5), Some(&vec![entry]));
-        assert_eq!(unchanged_scan(&known, "a.vst3", 6), None, "the bundle changed");
-        assert_eq!(unchanged_scan(&known, "failed.vst3", 5), None);
-        assert_eq!(unchanged_scan(&known, "new.vst3", 5), None);
+        let entry = entry();
+        let known =
+            vec![("a.vst3".to_string(), "5-1+0-0".into(), vec![entry.clone()]), ("failed.vst3".to_string(), "5-1+0-0".into(), Vec::new())];
+        let same = Path::new("a.vst3");
+        assert_eq!(unchanged_scan(&known, "a.vst3", same, "5-1+0-0"), Some(&vec![entry]));
+        assert_eq!(unchanged_scan(&known, "a.vst3", same, "9-2+0-0"), None, "the bundle changed");
+        assert_eq!(unchanged_scan(&known, "failed.vst3", Path::new("failed.vst3"), "5-1+0-0"), None);
+        assert_eq!(unchanged_scan(&known, "new.vst3", Path::new("new.vst3"), "5-1+0-0"), None);
+    }
+
+    /// A folder of bundles: an unchanged one is kept, a new one and a changed one are
+    /// read, and a scan that found nothing is read again.
+    #[test]
+    fn only_new_or_changed_bundles_are_read() {
+        let root = std::env::temp_dir().join(format!("deckard-scan-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let info = |name: &str, plug: &str| {
+            let bundle = root.join(name);
+            let file = bundle.join("Contents/Resources/moduleinfo.json");
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(
+                &file,
+                format!(
+                    r#"{{"Factory Info":{{"Vendor":"V"}},"Classes":[{{"Category":"Audio Module Class","Name":"{plug}","CID":"AA","Sub Categories":["Instrument"]}}]}}"#
+                ),
+            )
+            .unwrap();
+            bundle
+        };
+        let kept = info("Kept.vst3", "Kept");
+        let changed = info("Changed.vst3", "Changed");
+        info("New.vst3", "New");
+        let stamp = |b: &Path| deckard_plugins::scan::bundle_stamp(b);
+        let known = vec![
+            (kept.display().to_string(), stamp(&kept), vec![entry()]),
+            (changed.display().to_string(), "not-the-stamp".into(), vec![entry()]),
+            (root.join("Empty.vst3").display().to_string(), stamp(&changed), Vec::new()),
+        ];
+        // Empty.vst3 is not on disk; its failed scan is not in this folder. The changed
+        // bundle is on disk with a stamp that doesn't match.
+        let mut read = Vec::new();
+        let (entries, _, scanned) =
+            collect_vst3(&[root.clone()], &known, |b| read.push(b.file_name().unwrap().to_string_lossy().into_owned()));
+        let names: Vec<_> = entries.iter().flatten().map(|e| e.name.clone()).collect();
+        assert_eq!(scanned, 2, "the kept bundle is not read");
+        assert!(!names.iter().any(|n| n == "Kept"));
+        assert!(names.iter().any(|n| n == "P"), "the kept bundle's cached entry");
+        assert!(names.iter().any(|n| n == "Changed"));
+        assert!(names.iter().any(|n| n == "New"));
+        assert_eq!(read, vec!["Changed.vst3".to_string(), "New.vst3".to_string()]);
+        let _ = fs::remove_dir_all(&root);
     }
 }
 
@@ -1393,7 +1554,7 @@ mod sync_tests {
         assert_eq!(scanned.last(), Some(&foreign));
         let saved = s.to_text();
         assert!(saved.contains("dir = /Library/Audio/Plug-Ins/VST3 from a Mac\n"));
-        assert_eq!(saved.matches("dir = ").count(), 1, "only the addition is saved:\n{saved}");
+        assert_eq!(saved.matches("\ndir = ").count(), 1, "only the addition is saved:\n{saved}");
         assert!(!saved.contains("dirs = none"));
         assert_eq!(Settings::parse(&saved).dirs, s.dirs);
         // An old file saying there are no folders at all: the standard ones still.
@@ -1415,6 +1576,18 @@ mod sync_tests {
         assert_eq!(Settings::parse("").last_version, "");
         let s = Settings { last_version: "0.2.0".into(), ..Settings::default() };
         assert_eq!(Settings::parse(&s.to_text()).last_version, "0.2.0");
+    }
+
+    #[test]
+    fn session_settings_round_trip() {
+        let mut s = Settings::default();
+        assert_eq!(s.session_reserve_mb, 1024);
+        assert_eq!(s.session_dir, None);
+        s.session_reserve_mb = 2048;
+        s.session_dir = Some(std::path::PathBuf::from("/tmp/sets"));
+        let back = Settings::parse(&s.to_text());
+        assert_eq!(back.session_reserve_mb, 2048);
+        assert_eq!(back.session_dir, Some(std::path::PathBuf::from("/tmp/sets")));
     }
 
     #[test]
@@ -1541,5 +1714,23 @@ mod wine_tests {
         assert!(s.to_text().contains("bridge_windows = false\n"));
         assert!(!Settings::parse(&s.to_text()).bridge_windows);
         assert!(Settings::parse("").bridge_windows);
+    }
+}
+
+/// The Jam's on-screen overlay, as a preference.
+#[cfg(test)]
+mod overlay_tests {
+    use super::Settings;
+
+    /// The overlay can be switched off, and stays off across a save. (Off does not stop the
+    /// pages: it is the overlay that goes, not the controller.)
+    #[test]
+    fn the_overlay_can_be_switched_off() {
+        let mut s = Settings::default();
+        assert!(s.show_overlay, "on by default: the overlay is a Jam's only display");
+        s.show_overlay = false;
+        assert!(s.to_text().contains("show_overlay = false\n"));
+        assert!(!Settings::parse(&s.to_text()).show_overlay);
+        assert!(Settings::parse("").show_overlay, "and on for anyone who never set it");
     }
 }

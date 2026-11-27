@@ -16,8 +16,8 @@ pub(crate) const FRAME: u32 = u32::from_be_bytes(*b"DKRD");
 /// routes), 3 (before PROB LOCK), 4 (before the screen), 5 (before LFOs), 6 (before
 /// CC routes), 7 (before scene settings), 8 (before extra outputs), 9 (before the
 /// app's view), 10 (before CV routes), 11 (before audio offsets), 12 (before ratchets)
-/// and 13 (before sounds' Groove settings) still read.
-const VERSION: u32 = 14;
+/// 13 (before sounds' Groove settings) and 14 (before the New Sampler) still read.
+const VERSION: u32 = 15;
 
 /// Where the project was left when saved: the focus, and the controller's page and pad
 /// mode, so it reopens there (BUGS #6). Not part of the song: setting it is no edit.
@@ -104,6 +104,10 @@ pub(crate) struct Block {
     /// Sounds' Groove settings and page DECKARD keeps (group, sound, as
     /// [`deckard_model::groove_to_text`]), those with any (version 14).
     pub grooves: Vec<(usize, usize, String)>,
+    /// New Sampler sounds (group, sound, settings as text) (version 15).
+    pub new_samplers: Vec<(usize, usize, String)>,
+    /// Zones' analysis (group, sound, zone, meta as text) (version 15).
+    pub zone_metas: Vec<(usize, usize, usize, String)>,
 }
 
 /// Every pattern of the project with its index (clips as `CLIP + k`).
@@ -335,6 +339,25 @@ pub(crate) fn encode(b: &Block) -> Vec<u8> {
             w.u8(c);
         }
     }
+    let text = |w: &mut W, t: &str| {
+        w.u32(t.len());
+        for &c in t.as_bytes() {
+            w.u8(c);
+        }
+    };
+    w.u32(b.new_samplers.len());
+    for (g, s, t) in &b.new_samplers {
+        w.u32(*g);
+        w.u32(*s);
+        text(&mut w, t);
+    }
+    w.u32(b.zone_metas.len());
+    for (g, s, z, t) in &b.zone_metas {
+        w.u32(*g);
+        w.u32(*s);
+        w.u32(*z);
+        text(&mut w, t);
+    }
     w.0
 }
 
@@ -463,30 +486,78 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Block, String> {
             b.audio_offsets.push((r.u32()?, r.u32()?, r.u32()?, r.i64()?));
         }
     }
-    if version >= 13 {
-        for _ in 0..r.count(32)? {
-            b.ratchets.push(RatchetEntry {
-                group: r.u32()?,
-                pattern: r.u32()?,
-                sound: r.u32()?,
-                position: r.i64()?,
-                pitch: r.i32()?,
-                ordinal: r.u32()?,
-                ratchet: Ratchet::from_int(r.u32()? as i64),
-            });
+    if version == 13 {
+        // 13 is the ratchets'. (On the way to the New Sampler it was, for a while, the
+        // New Sampler's: such a block doesn't end where its ratchets would, and is read
+        // as that.)
+        let at = r.0;
+        if ratchets(&mut r, &mut b).is_err() || !r.0.is_empty() {
+            r.0 = at;
+            b.ratchets.clear();
+            new_samplers(&mut r, &mut b)?;
         }
-    }
-    if version >= 14 {
-        for _ in 0..r.count(12)? {
-            let (g, s) = (r.u32()?, r.u32()?);
-            let mut text = Vec::new();
-            for _ in 0..r.count(1)? {
-                text.push(r.u8()?);
-            }
-            b.grooves.push((g, s, String::from_utf8_lossy(&text).into_owned()));
+    } else if version == 14 {
+        // 14 is the Groove settings'. (It too was the New Sampler's for a while: such a
+        // block goes on past where its grooves would end, and is read as that.)
+        ratchets(&mut r, &mut b)?;
+        let at = r.0;
+        if grooves(&mut r, &mut b).is_err() || !r.0.is_empty() {
+            r.0 = at;
+            b.grooves.clear();
+            new_samplers(&mut r, &mut b)?;
         }
+    } else if version >= 15 {
+        ratchets(&mut r, &mut b)?;
+        grooves(&mut r, &mut b)?;
+        new_samplers(&mut r, &mut b)?;
     }
     Ok(b)
+}
+
+fn ratchets(r: &mut R, b: &mut Block) -> Result<(), String> {
+    for _ in 0..r.count(32)? {
+        b.ratchets.push(RatchetEntry {
+            group: r.u32()?,
+            pattern: r.u32()?,
+            sound: r.u32()?,
+            position: r.i64()?,
+            pitch: r.i32()?,
+            ordinal: r.u32()?,
+            ratchet: Ratchet::from_int(r.u32()? as i64),
+        });
+    }
+    Ok(())
+}
+
+fn grooves(r: &mut R, b: &mut Block) -> Result<(), String> {
+    for _ in 0..r.count(12)? {
+        let (g, s) = (r.u32()?, r.u32()?);
+        let mut text = Vec::new();
+        for _ in 0..r.count(1)? {
+            text.push(r.u8()?);
+        }
+        b.grooves.push((g, s, String::from_utf8_lossy(&text).into_owned()));
+    }
+    Ok(())
+}
+
+fn new_samplers(r: &mut R, b: &mut Block) -> Result<(), String> {
+    let text = |r: &mut R| -> Result<String, String> {
+        let mut t = Vec::new();
+        for _ in 0..r.count(1)? {
+            t.push(r.u8()?);
+        }
+        Ok(String::from_utf8_lossy(&t).into_owned())
+    };
+    for _ in 0..r.count(12)? {
+        let (g, s) = (r.u32()?, r.u32()?);
+        b.new_samplers.push((g, s, text(r)?));
+    }
+    for _ in 0..r.count(16)? {
+        let (g, s, z) = (r.u32()?, r.u32()?, r.u32()?);
+        b.zone_metas.push((g, s, z, text(r)?));
+    }
+    Ok(())
 }
 
 /// Marks the `TimedEvent` of channel pressure DECKARD made; Maschine's own (read from
@@ -648,6 +719,18 @@ impl Document {
         b.audio_offsets = patterns(&self.project)
             .flat_map(|(g, p, pt)| pt.audio.iter().filter(|c| c.offset != 0).map(move |c| (g, p, c.sound, c.offset)))
             .collect();
+        for (g, grp) in self.project.groups.iter().enumerate() {
+            for (s, snd) in grp.sounds.iter().enumerate() {
+                if let Some(n) = &snd.new_sampler {
+                    b.new_samplers.push((g, s, n.to_text()));
+                }
+                for (z, zone) in snd.sampler.iter().flat_map(|x| x.zones.iter()).enumerate() {
+                    if let Some(m) = &zone.meta {
+                        b.zone_metas.push((g, s, z, m.to_text()));
+                    }
+                }
+            }
+        }
         let payload = (!b.patterns.is_empty()
             || !b.pressure.is_empty()
             || !b.touch.is_empty()
@@ -661,7 +744,9 @@ impl Document {
             || !b.cv_routes.is_empty()
             || !b.audio_offsets.is_empty()
             || !b.ratchets.is_empty()
-            || !b.grooves.is_empty())
+            || !b.grooves.is_empty()
+            || !b.new_samplers.is_empty()
+            || !b.zone_metas.is_empty())
         .then(|| encode(&b));
         payload
     }
@@ -765,6 +850,20 @@ impl Document {
                 let _ = self.run(&ops);
             }
         }
+        for (g, s, t) in b.new_samplers {
+            let n = deckard_model::new_sampler::NewSampler::from_text(&t);
+            if let Ok(ops) = self.new_sampler_ops(g, s, Some(&n)) {
+                let _ = self.run(&ops);
+            }
+        }
+        for (g, s, z, t) in b.zone_metas {
+            // A zone that isn't there: dropped.
+            if let Some(m) = deckard_model::new_sampler::ZoneMeta::from_text(&t)
+                && let Ok(ops) = self.zone_meta_ops(g, s, z, Some(&m))
+            {
+                let _ = self.run(&ops);
+            }
+        }
         self.screen = b.screen;
         self.refresh();
         // Strips whose slot holds another plug-in, or none (the file changed elsewhere).
@@ -813,6 +912,7 @@ impl Document {
         set(te);
         let events = super::notes::events_with(&events, &items);
         *self.tree.at_mut(&events_path).ok_or("events")? = Value::Obj(events);
+        self.clear_path_caches();
         Ok(())
     }
 }
@@ -874,6 +974,96 @@ mod tests {
         d.set_screen(Some(screen.clone()));
         assert_eq!(reopen(&d).screen(), Some(&screen));
         assert_eq!(reopen(&doc_with(&[])).screen(), None);
+    }
+
+    #[test]
+    fn version_13_blocks_still_read() {
+        let ratchet = RatchetEntry {
+            group: 0,
+            pattern: 1,
+            sound: 2,
+            position: 480,
+            pitch: 60,
+            ordinal: 0,
+            ratchet: Ratchet { repeats: 4, ..Ratchet::default() },
+        };
+        let b = Block { audio_offsets: vec![(0, 1, 3, -960)], ratchets: vec![ratchet], ..Block::default() };
+        let full = Block { new_samplers: vec![(0, 2, "v 1".into())], zone_metas: vec![(0, 2, 1, "file a".into())], ..b.clone() };
+        assert_eq!(decode(&encode(&full)).unwrap(), full);
+        let mut bytes = encode(&b);
+        // Version 13: no Groove or New Sampler counts (three u32 zeros) at the end.
+        bytes[..4].copy_from_slice(&13u32.to_le_bytes());
+        bytes.truncate(bytes.len() - 12);
+        assert_eq!(decode(&bytes).unwrap(), b);
+    }
+
+    /// Version 14 ended with the Groove settings. (On the way to the New Sampler it was
+    /// its sounds and zones there instead: projects saved then still open.)
+    #[test]
+    fn version_14_blocks_still_read() {
+        let ratchet = RatchetEntry {
+            group: 0,
+            pattern: 1,
+            sound: 2,
+            position: 480,
+            pitch: 60,
+            ordinal: 0,
+            ratchet: Ratchet { repeats: 4, ..Ratchet::default() },
+        };
+        let base = Block { audio_offsets: vec![(0, 1, 3, -960)], ratchets: vec![ratchet], ..Block::default() };
+        for b in [base.clone(), Block { grooves: vec![(0, 1, "page 1".into()), (2, 3, "page 2\nx 0.5".into())], ..base.clone() }] {
+            let mut bytes = encode(&b);
+            bytes[..4].copy_from_slice(&14u32.to_le_bytes());
+            bytes.truncate(bytes.len() - 8);
+            assert_eq!(decode(&bytes).unwrap(), b);
+        }
+        for b in [
+            base.clone(),
+            Block { new_samplers: vec![(0, 2, "v 1".into())], ..base.clone() },
+            Block {
+                new_samplers: vec![(0, 2, "v 1".into()), (1, 0, "v 1\nengine live".into())],
+                zone_metas: vec![(0, 2, 1, "file a.wav\nbpm 120".into())],
+                ..base.clone()
+            },
+            Block { zone_metas: vec![(3, 2, 1, "file a".into()); 5], ..base.clone() },
+        ] {
+            // As written then: no Groove count before the New Sampler's.
+            let mut bytes = encode(&base);
+            bytes[..4].copy_from_slice(&14u32.to_le_bytes());
+            bytes.truncate(bytes.len() - 12);
+            let whole = encode(&b);
+            bytes.extend_from_slice(&whole[encode(&base).len() - 8..]);
+            assert_eq!(decode(&bytes).unwrap(), b);
+        }
+    }
+
+    /// On the way to the New Sampler, version 13 was its sounds and zones (no ratchets):
+    /// projects saved then still open, with or without any.
+    #[test]
+    fn a_version_13_block_of_the_new_samplers_reads() {
+        let old = |b: &Block| {
+            let mut w = encode(&Block { new_samplers: Vec::new(), zone_metas: Vec::new(), ..b.clone() });
+            // As written then: the ratchets' count and the Groove settings' weren't there.
+            w.truncate(w.len() - 16);
+            w[..4].copy_from_slice(&13u32.to_le_bytes());
+            let whole = encode(b);
+            let tail = encode(&Block { new_samplers: Vec::new(), zone_metas: Vec::new(), ..b.clone() }).len() - 8;
+            w.extend_from_slice(&whole[tail..]);
+            w
+        };
+        let base = Block { audio_offsets: vec![(0, 1, 3, -960)], ..Block::default() };
+        for b in [
+            base.clone(),
+            Block { new_samplers: vec![(0, 2, "v 1".into())], ..base.clone() },
+            Block {
+                new_samplers: vec![(0, 2, "v 1".into()), (1, 0, "v 1\nengine live".into())],
+                zone_metas: vec![(0, 2, 1, "file a.wav\nbpm 120".into())],
+                ..base.clone()
+            },
+            Block { zone_metas: vec![(3, 2, 1, "file a".into()); 5], ..base.clone() },
+        ] {
+            assert_eq!(decode(&old(&b)).unwrap(), b);
+        }
     }
 
     #[test]
@@ -1062,8 +1252,8 @@ mod tests {
         // A project carrying that version 11 block saves it as the version written now.
         let mut v11 = encode(&Block { prob_locked: vec![(0, 1)], ..Block::default() });
         v11[..4].copy_from_slice(&11u32.to_le_bytes());
-        // (Without the Audio offsets' count and the ratchets'.)
-        v11.truncate(v11.len() - 8);
+        // (Without the Audio offsets' count, the ratchets' and the New Sampler's two.)
+        v11.truncate(v11.len() - 16);
         let file = set_root_child(&doc_with(&[]).to_bytes().unwrap(), DOMAIN, ITEM, FRAME, Some(&v11)).unwrap();
         let saved = Document::from_bytes(file, None).unwrap().to_bytes().unwrap();
         assert_eq!(root_child(&saved, DOMAIN, ITEM).unwrap()[..4], VERSION.to_le_bytes());
@@ -1184,7 +1374,8 @@ mod tests {
         // Version 12: the same bytes without the ratchets' section.
         let b = Block { lfos: "x".into(), ..Block::default() };
         let mut old = encode(&b);
-        old.truncate(old.len() - 4);
+        // (And without the New Sampler's two counts, which came after.)
+        old.truncate(old.len() - 12);
         old[..4].copy_from_slice(&12u32.to_le_bytes());
         assert_eq!(decode(&old).unwrap(), b);
     }

@@ -218,6 +218,8 @@ fn desktop_look(theme: &str, mode: &str) -> Option<([u8; 3], [u8; 3])> {
         // Solarized's field and text. Palenight's writing on black.
         "solarized_dark" => Some(([0x00, 0x12, 0x17], [0x93, 0xa1, 0xa1])),
         "palenight" => Some(([0x00, 0x00, 0x00], [0xee, 0xff, 0xff])),
+        // Deep's cool white on black.
+        "deep" => Some(([0x00, 0x00, 0x00], [0xee, 0xf2, 0xf6])),
         // Palenight on its blue-grey field.
         "palenight_blue_green" => Some(([0x0f, 0x11, 0x1a], [0xee, 0xff, 0xff])),
         _ => None,
@@ -253,8 +255,21 @@ fn sound_base(app: &App, sound: usize) -> Color32 {
 
 /// The software window follows the desktop theme. The controller keeps its own.
 /// Maschine restores the ordinary dark window.
+/// The window's field and writing for a theme that has none of its own: the ordinary dark window.
+pub(crate) fn window_colours(theme: &str, mode: &str) -> ([u8; 3], [u8; 3]) {
+    desktop_look(theme, mode).unwrap_or(([0x18, 0x18, 0x18], [0xff, 0xff, 0xff]))
+}
+
+pub(crate) fn sync_desktop(ctx: &egui::Context, app: &App) {
+    sync_lcd(ctx, app);
+}
+
 fn sync_lcd(ctx: &egui::Context, app: &App) {
-    let Some((paper, ink)) = desktop_look(&app.settings.desktop_theme, &app.settings.lcd_mode) else {
+    let chosen = match (app.settings.desktop_background, app.settings.desktop_text) {
+        (Some(paper), Some(ink)) => Some((paper, ink)),
+        _ => desktop_look(&app.settings.desktop_theme, &app.settings.lcd_mode),
+    };
+    let Some((paper, ink)) = chosen else {
         LCD_PAPER.with(|c| c.set(None));
         LCD_INK.with(|c| c.set(None));
         DESK.with(|d| d.set(PLAIN));
@@ -273,7 +288,6 @@ fn sync_lcd(ctx: &egui::Context, app: &App) {
 }
 
 fn apply_lcd(ctx: &egui::Context, paper: Color32, ink: Color32) {
-    let y_of = |c: Color32| 0.2126 * f32::from(c.r()) + 0.7152 * f32::from(c.g()) + 0.0722 * f32::from(c.b());
     ctx.set_theme(egui::Theme::Dark);
     let mut v = egui::Visuals::dark();
     v.panel_fill = paper;
@@ -293,10 +307,14 @@ fn apply_lcd(ctx: &egui::Context, paper: Color32, ink: Color32) {
         w.bg_stroke = edge;
         w.fg_stroke = Stroke::new(1.0, ink);
     }
-    v.widgets.active.bg_fill = ink;
-    // Brown field-colour on a bright segment does not read. Black does.
-    let on_fill = if y_of(ink) > y_of(paper) { Color32::BLACK } else { paper };
-    v.widgets.active.fg_stroke = Stroke::new(1.0, on_fill);
+    // A pressed widget: part of the way from the field to the writing, under the
+    // writing itself. Its writing is also what egui gives strong text (the titles in
+    // Preferences), so it can't be the dark colour that would read on a fill of the
+    // writing's own: those titles were black on the field.
+    let part = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * 0.4) as u8;
+    let pressed = Color32::from_rgb(part(paper.r(), ink.r()), part(paper.g(), ink.g()), part(paper.b(), ink.b()));
+    v.widgets.active.bg_fill = pressed;
+    v.widgets.active.weak_bg_fill = pressed;
     v.widgets.hovered.weak_bg_fill = dim(ink, 0.4);
     ctx.set_visuals(v);
     ctx.all_styles_mut(|s| {
@@ -746,6 +764,14 @@ pub enum Act {
     FocusGroup(usize),
     FocusPattern(usize, usize),
     FocusSound(usize),
+    ClickSound {
+        sound: usize,
+        shift: bool,
+        toggle: bool,
+    },
+    FocusSelectedSound(usize),
+    /// Apply an edit at its exact value across selected sounds (reset or typed entry).
+    Exact(Box<Act>),
     SongView(bool),
     PianoRoll(bool),
     /// The Ideas view has scrolled to the scene asked for.
@@ -765,6 +791,8 @@ pub enum Act {
     Restart,
     Stop,
     ToggleLoop,
+    /// Move or resize the Song-mode loop region.
+    SongLoop(i64, i64),
     ToggleMetronome,
     /// LINK: join or leave the Ableton Link session.
     ToggleLink,
@@ -912,6 +940,9 @@ pub enum Act {
     MoveSlotBetween(deckard_doc::Chain, usize, deckard_doc::Chain, usize),
     SlotActive(usize, bool),
     OpenSlotEditor(usize),
+    /// The focused sound's instrument made a New Sampler (a Sampler or an Audio
+    /// plug-in), or a New Sampler made a plain Sampler (false).
+    ConvertInstrument(bool),
     /// Open the window of the plug-in in slot `.1` of chain `.0`.
     OpenSlotEditorIn(deckard_doc::Chain, usize),
     /// Set parameter `id` of the plug-in in slot `.0` (normalized).
@@ -951,6 +982,8 @@ pub enum Act {
     PasteSound(usize, usize),
     ResetSound(usize, usize),
     CutGroup(usize),
+    CopyPlugin(deckard_doc::Chain, usize),
+    PastePlugin(deckard_doc::Chain, Option<usize>),
     CopyGroup(usize),
     PasteGroup(usize),
     DeleteGroup(usize),
@@ -1082,6 +1115,8 @@ pub enum ClipAct {
 #[derive(Debug, Clone)]
 pub enum AddWhat {
     Sampler,
+    /// DECKARD's sampler: a Sampler marked DECKARD's (`deckard_model::new_sampler`).
+    NewSampler,
     Audio,
     Plugin(deckard_plugins::scan::Entry),
     /// One of Maschine's effects (its class: "EQ", "BeatDelay", …).
@@ -1106,12 +1141,21 @@ pub fn apply_acts(app: &mut App, acts: Vec<Act>) {
 }
 
 fn apply(app: &mut App, acts: Vec<Act>) {
+    apply_with_mode(app, acts, false)
+}
+
+fn apply_with_mode(app: &mut App, acts: Vec<Act>, exact: bool) {
     for a in acts {
+        if let Act::Exact(inner) = a {
+            apply_with_mode(app, vec![*inner], true);
+            continue;
+        }
         app.macro_learn_saw(&a);
         match a {
+            Act::Exact(_) => unreachable!(),
             Act::LaunchScene(s) => app.launch_scene(s),
             Act::SetSceneTempo(s, bpm) => {
-                let Some(doc) = app.doc.clone() else { continue };
+                let Some(doc) = app.doc.clone() else { return };
                 if let Err(e) = doc.borrow_mut().set_scene_tempo(s, bpm) {
                     app.status = format!("can't set the scene's tempo: {e}");
                 }
@@ -1126,6 +1170,8 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                 app.pattern = p;
             }
             Act::FocusSound(s) => app.focus_sound(s),
+            Act::ClickSound { sound, shift, toggle } => app.click_sound(sound, shift, toggle),
+            Act::FocusSelectedSound(s) => app.focus_selected_sound(s),
             Act::SongView(v) => app.song_view = v,
             Act::PianoRoll(v) => app.piano_roll = v,
             Act::ScenesShown => app.show_scenes = None,
@@ -1144,6 +1190,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             Act::ClearModulation(e) => app.clear_modulation(e),
             Act::Restart => app.restart(),
             Act::ToggleLoop => app.set_looping(!app.looping),
+            Act::SongLoop(start, end) => app.set_song_loop(start, end),
             Act::ToggleMetronome => app.set_metronome(!app.metronome),
             Act::ToggleLink => app.toggle_link(),
             Act::ToggleKeys => app.toggle_keys(),
@@ -1366,7 +1413,15 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                     app.status = format!("can't rename: {e}");
                 }
             }
-            Act::Quantize(_) | Act::PatternLength(..) | Act::PatternSpan(..) | Act::TimeSignature(..) | Act::SetSwing(..) => app.arrange(a),
+            Act::Quantize(_) | Act::PatternLength(..) | Act::PatternSpan(..) | Act::TimeSignature(..) => app.arrange(a),
+            Act::SetSwing(t, sw) => {
+                if let Target::Sound(g, s) = t
+                    && app.set_multi_sound_swing(g, s, sw, exact)
+                {
+                    continue;
+                }
+                app.arrange(Act::SetSwing(t, sw));
+            }
             Act::SamplerPage(i) => app.sampler_page = i,
             Act::Nothing => {}
             Act::ChannelMode(on) => app.channel = on,
@@ -1430,6 +1485,8 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                 }
                 app.sampler_page = 0;
             }
+            Act::CopyPlugin(c, i) => app.copy_plugin(c, i),
+            Act::PastePlugin(c, over) => app.paste_plugin(c, over),
             Act::AddSlot(what) => app.add_slot(what),
             Act::MoveSlot(from, to) => app.move_slot(from, to),
             Act::MoveSlotIn(c, from, to) => app.move_slot_in(c, from, to),
@@ -1457,6 +1514,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                 }
             }
             Act::OpenSlotEditor(i) => app.open_slot_editor_in(app.chain(), i),
+            Act::ConvertInstrument(to_new) => app.convert_instrument(to_new),
             Act::OpenSlotEditorIn(c, i) => app.open_slot_editor_in(c, i),
             Act::PluginParam(i, id, v) => set_plugin_param(app, app.chain(), i, id, v),
             Act::Zhora(what) => app.zhora_press(what),
@@ -1576,17 +1634,48 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                 }
             }
             Act::Cue(t, on) => {
-                if let Some(doc) = app.doc.clone()
-                    && let Err(e) = doc.borrow_mut().set_cue(t, on)
-                {
+                let Some(doc) = app.doc.clone() else { continue };
+                let done = {
+                    let mut d = doc.borrow_mut();
+                    if let Target::Sound(g, s) = t
+                        && let Some(sounds) = d.project().groups.get(g).and_then(|gr| app.selected_sounds_for(g, s, gr.sounds.len()))
+                    {
+                        let edits: Vec<_> =
+                            sounds.into_iter().map(|si| (Target::Sound(g, si), "cue_enabled", Value::Int(on as i64))).collect();
+                        d.set_many("Cue", &edits)
+                    } else {
+                        d.set_cue(t, on)
+                    }
+                };
+                if let Err(e) = done {
                     app.status = format!("can't cue: {e}");
                 }
             }
             Act::Solo(ch) => app.solo(ch),
             Act::SetAux(t, k, v) => {
-                if let Some(doc) = app.doc.clone()
-                    && let Err(e) = doc.borrow_mut().set("Aux Send", t, if k == 0 { "aux1_level" } else { "aux2_level" }, Value::Float(v))
-                {
+                let Some(doc) = app.doc.clone() else { continue };
+                let field = if k == 0 { "aux1_level" } else { "aux2_level" };
+                let v = v.clamp(0.0, 1.0);
+                let done = {
+                    let mut d = doc.borrow_mut();
+                    if let Target::Sound(g, s) = t
+                        && let Some(sounds) = d.project().groups.get(g).and_then(|gr| app.selected_sounds_for(g, s, gr.sounds.len()))
+                    {
+                        let cur = d.project().groups[g].sounds[s].aux[k];
+                        let delta = v - cur;
+                        let edits: Vec<_> = sounds
+                            .into_iter()
+                            .map(|si| {
+                                let to = if exact { v } else { (d.project().groups[g].sounds[si].aux[k] + delta).clamp(0.0, 1.0) };
+                                (Target::Sound(g, si), field, Value::Float(to))
+                            })
+                            .collect();
+                        d.set_many("Aux Send", &edits)
+                    } else {
+                        d.set("Aux Send", t, field, Value::Float(v))
+                    }
+                };
+                if let Err(e) = done {
                     app.status = format!("can't change the send: {e}");
                 }
             }
@@ -1614,7 +1703,7 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             }
             // An Audio plug-in take's TEMPO: its length in beats over its frames.
             Act::TypeValue(what, typed, shown) => match value_entry::resolve(app, what, &typed, &shown) {
-                Some(act) => apply(app, vec![act]),
+                Some(act) => apply_with_mode(app, vec![act], true),
                 None => app.status = format!("Couldn't read \"{typed}\" as a value here"),
             },
             Act::SetParam(Target::Take(g, s, k), "tempo", bpm) => {
@@ -1652,6 +1741,9 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                         continue;
                     }
                     app.live_groove(g, s, field);
+                    continue;
+                }
+                if apply_multi_sound_param(app, &doc, label, t, field, v, exact) {
                     continue;
                 }
                 if let Err(e) = doc.borrow_mut().set(label, t, field, Value::Float(v)) {
@@ -1695,16 +1787,60 @@ fn apply(app: &mut App, acts: Vec<Act>) {
                         Some(s) => d.set_scene_tempo(s, Some(bpm)),
                         None => d.set_tempo(bpm),
                     },
-                    Act::SetLevel(t, v) => d.set_level(t, v),
-                    Act::SetPan(t, v) => d.set_pan(t, v),
+                    Act::SetLevel(t, v) => {
+                        let v = v.clamp(0.0, 1.0);
+                        if let Target::Sound(g, s) = t
+                            && let Some(sounds) = d.project().groups.get(g).and_then(|gr| app.selected_sounds_for(g, s, gr.sounds.len()))
+                        {
+                            let cur = d.project().groups[g].sounds[s].level;
+                            let delta = v - cur;
+                            let edits: Vec<_> = sounds
+                                .into_iter()
+                                .map(|si| {
+                                    let to = if exact { v } else { (d.project().groups[g].sounds[si].level + delta).clamp(0.0, 1.0) };
+                                    (Target::Sound(g, si), "level", Value::Float(to))
+                                })
+                                .collect();
+                            d.set_many("Level", &edits)
+                        } else {
+                            d.set_level(t, v)
+                        }
+                    }
+                    Act::SetPan(t, v) => {
+                        let v = v.clamp(-1.0, 1.0);
+                        if let Target::Sound(g, s) = t
+                            && let Some(sounds) = d.project().groups.get(g).and_then(|gr| app.selected_sounds_for(g, s, gr.sounds.len()))
+                        {
+                            let cur = d.project().groups[g].sounds[s].pan;
+                            let delta = v - cur;
+                            let edits: Vec<_> = sounds
+                                .into_iter()
+                                .map(|si| {
+                                    let to = if exact { v } else { (d.project().groups[g].sounds[si].pan + delta).clamp(-1.0, 1.0) };
+                                    (Target::Sound(g, si), "pan", Value::Float(to))
+                                })
+                                .collect();
+                            d.set_many("Pan", &edits)
+                        } else {
+                            d.set_pan(t, v)
+                        }
+                    }
                     Act::ToggleMute(t) => {
                         let p = d.project();
-                        let muted = match t {
-                            Target::Group(g) => p.groups[g].muted,
-                            Target::Sound(g, s) => p.groups[g].sounds[s].muted,
-                            _ => false,
-                        };
-                        d.set_mute(t, !muted)
+                        if let Target::Sound(g, s) = t
+                            && let Some(sounds) = p.groups.get(g).and_then(|gr| app.selected_sounds_for(g, s, gr.sounds.len()))
+                        {
+                            let mute = !p.groups[g].sounds[s].muted;
+                            let mutes: Vec<_> = sounds.into_iter().map(|si| (Target::Sound(g, si), mute)).collect();
+                            d.set_mutes(if mute { "Mute" } else { "Unmute" }, &mutes)
+                        } else {
+                            let muted = match t {
+                                Target::Group(g) => p.groups[g].muted,
+                                Target::Sound(g, s) => p.groups[g].sounds[s].muted,
+                                _ => false,
+                            };
+                            d.set_mute(t, !muted)
+                        }
                     }
                     _ => unreachable!(),
                 };
@@ -1714,6 +1850,136 @@ fn apply(app: &mut App, acts: Vec<Act>) {
             }
         }
     }
+}
+
+/// Apply `Act::SetParam` across all selected sounds when `t` belongs to one of them.
+fn apply_multi_sound_param(
+    app: &mut App,
+    doc: &deckard_doc::Shared,
+    label: &str,
+    t: Target,
+    field: &'static str,
+    v: f64,
+    exact: bool,
+) -> bool {
+    let (g, s) = match t {
+        Target::Sound(g, s) if !field.starts_with("sequence_") && !field.starts_with("midi_macro/") => (g, s),
+        Target::Sampler(g, s) | Target::Module(g, s, _) => (g, s),
+        _ => return false,
+    };
+    let count = doc.borrow().project().groups.get(g).map_or(0, |gr| gr.sounds.len());
+    let Some(sounds) = app.selected_sounds_for(g, s, count) else { return false };
+
+    let bounds = if exact {
+        None
+    } else {
+        let d = doc.borrow();
+        let p = d.project();
+        let page_bounds = match t {
+            Target::Sampler(_, _) | Target::Module(_, _, _) => app.slot.and_then(|slot| slot_page(app, p, slot)).and_then(|pg| {
+                pg.knobs.into_iter().flatten().find_map(|(_, _, _, edit)| match edit? {
+                    Edit::Param(et, ef, lo, hi, _) | Edit::Log(et, ef, lo, hi, _) | Edit::Int(et, ef, lo, hi, _)
+                        if et == t && ef == field =>
+                    {
+                        Some(Some((lo, hi)))
+                    }
+                    Edit::Choice(et, ef, ..) | Edit::Toggle(et, ef, _) if et == t && ef == field => Some(None),
+                    _ => None,
+                })
+            }),
+            _ => None,
+        };
+        page_bounds.unwrap_or_else(|| match t {
+            Target::Sound(..) => match field {
+                "input_gain" | "aux1_level" | "aux2_level" => Some((0.0, 1.0)),
+                "transpose" => Some((-48.0, 48.0)),
+                "base_key" => Some((0.0, 127.0)),
+                _ => None,
+            },
+            Target::Sampler(..) => match field {
+                "envelope_type" | "reverse" | "mode" | "polyphony" | "filter_type" | "drive_type" | "lfo_shape" | "lfo_retrigger"
+                | "editor_tab" => None,
+                "tune" => Some((-36.0, 36.0)),
+                f if f.contains("_mod/") => Some((-1.0, 1.0)),
+                _ => Some((0.0, 1.0)),
+            },
+            Target::Module(_, _, slot) => {
+                let is_bipolar = p
+                    .groups
+                    .get(g)
+                    .and_then(|gr| gr.sounds.get(s))
+                    .and_then(|snd| snd.slots.get(slot))
+                    .is_some_and(|sl| sl.module == "AudioModule" && field == "tune");
+                if is_bipolar { Some((-1.0, 1.0)) } else { Some((0.0, 1.0)) }
+            }
+            _ => None,
+        })
+    };
+
+    let edits: Vec<(Target, &str, Value)> = {
+        let d = doc.borrow();
+        let p = d.project();
+        let cur_s = d.num(t, field);
+        let module_kind = match t {
+            Target::Module(_, _, slot) => p
+                .groups
+                .get(g)
+                .and_then(|gr| gr.sounds.get(s))
+                .and_then(|snd| snd.slots.get(slot))
+                .filter(|sl| sl.plugin.is_none())
+                .map(|sl| sl.module.clone()),
+            _ => None,
+        };
+        let whole_int = matches!((t, field), (Target::Sound(..), "transpose" | "base_key"));
+        sounds
+            .iter()
+            .copied()
+            .filter_map(|si| {
+                let ti = match t {
+                    Target::Sound(..) => Target::Sound(g, si),
+                    Target::Sampler(..) => Target::Sampler(g, si),
+                    Target::Module(_, _, slot) => {
+                        let m = module_kind.as_deref()?;
+                        let same = p
+                            .groups
+                            .get(g)
+                            .and_then(|gr| gr.sounds.get(si))
+                            .and_then(|snd| snd.slots.get(slot))
+                            .is_some_and(|sl| sl.plugin.is_none() && sl.module == m);
+                        if !same {
+                            return None;
+                        }
+                        Target::Module(g, si, slot)
+                    }
+                    _ => return None,
+                };
+                d.param_path(ti, field).ok()?;
+                let val = match (bounds, cur_s, d.num(ti, field)) {
+                    (Some((lo, hi)), Some(cs), Some(ci)) => {
+                        let raw = (ci + (v - cs)).clamp(lo, hi);
+                        if whole_int { raw.round() } else { raw }
+                    }
+                    _ => v,
+                };
+                Some((ti, field, Value::Float(val)))
+            })
+            .collect()
+    };
+    if edits.is_empty() {
+        return false;
+    }
+    if let Err(e) = doc.borrow_mut().set_many(label, &edits) {
+        app.status = format!("can't change {field}: {e}");
+        return true;
+    }
+    if matches!(t, Target::Sound(..)) && field == "base_key" {
+        for (ti, ..) in &edits {
+            if let Target::Sound(gg, si) = *ti {
+                app.live_groove(gg, si, field);
+            }
+        }
+    }
+    true
 }
 
 /// The family name of the logo font, and its size.
@@ -1734,8 +2000,9 @@ pub fn logo_font() -> Vec<u8> {
 }
 
 /// The app's fonts: IBM Plex Sans (regular, bold) and IBM Plex Mono, egui's fallbacks,
-/// the logo's, and the emoji font for names.
-fn font_definitions() -> egui::FontDefinitions {
+/// the logo's, and the emoji font for names. Last of all egui's Hack, for the symbols no
+/// other font has (▸ in "Preferences ▸ General", ⇕).
+pub(crate) fn font_definitions() -> egui::FontDefinitions {
     let bytes = logo_font();
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(LOGO_FONT.into(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
@@ -1752,6 +2019,9 @@ fn font_definitions() -> egui::FontDefinitions {
     let mono_fallbacks = fonts.families.get(&egui::FontFamily::Monospace).cloned().unwrap_or_default();
     let mut prop = vec!["plex".into(), EMOJI_FONT.into()];
     prop.extend(prop_fallbacks);
+    if fonts.font_data.contains_key("Hack") && !prop.iter().any(|f| f == "Hack") {
+        prop.push("Hack".into());
+    }
     fonts.families.insert(egui::FontFamily::Proportional, prop.clone());
     let mut mono = vec!["plex-mono".into(), EMOJI_FONT.into()];
     mono.extend(mono_fallbacks);
@@ -1830,6 +2100,25 @@ pub fn dialog_style(ui: &mut Ui) {
     s.icon_spacing = 6.0;
 }
 
+/// The tallest a dialog can be and still fit the window, with room round it. Past it
+/// a dialog's contents scroll instead of running off the bottom of a short screen.
+pub fn dialog_max_height(ctx: &egui::Context) -> f32 {
+    (ctx.content_rect().height() - 64.0).max(160.0)
+}
+
+/// The widest a dialog can be and still fit the window (a laptop's 1366 px, a small
+/// window), with room round it.
+pub fn dialog_max_width(ctx: &egui::Context) -> f32 {
+    (ctx.content_rect().width() - 32.0).max(320.0)
+}
+
+/// A modal's contents, scrolling when they're taller than the window has room for
+/// ([`dialog_max_height`], less the modal's own frame).
+pub fn fit_dialog<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let max = dialog_max_height(ui.ctx()) - 32.0;
+    egui::ScrollArea::vertical().max_height(max).show(ui, add).inner
+}
+
 /// Draws the browser header icon (three equidistant shelf lines on the left and a magnifying glass on the right).
 fn draw_browser_icon(p: &Painter, r: Rect, c: Color32) {
     let x0 = (r.center().x - 9.0).floor() + 0.5;
@@ -1893,7 +2182,25 @@ pub fn header(app: &mut App, ui: &mut Ui) {
             let t = Vec2::new(32.0, 24.0);
             let display = if app.doc.is_some() { 2.0 * DISPLAY_GAP + DISPLAY_SIZE.x } else { DISPLAY_GAP };
             let group = t.x * 6.0 + LINK_WIDTH + METRONOME_GAP + t.x + display + t.x * 2.0 + 2.0;
-            let mid_left = full.center().x - group / 2.0;
+            // Centred, as Maschine's, but between the left group and the right one (where
+            // they ended last frame): in a narrow window (a laptop's 1280 px) the transport
+            // moves over rather than covering Save. Where it can't fit between them at all,
+            // it stays centred.
+            let (left_end, right_start) = ui.ctx().data(|d| {
+                (
+                    d.get_temp::<f32>(egui::Id::new("header-left-end")).unwrap_or(0.0),
+                    d.get_temp::<f32>(egui::Id::new("header-right-start")).unwrap_or(full.right()),
+                )
+            });
+            let centred = full.center().x - group / 2.0;
+            // (The right group's own spacing already ends it with a gap.)
+            let hi = right_start - group;
+            // A new release's button has its room kept before the transport: all of it
+            // where that fits, else its icon alone (it went unseen in a laptop's window).
+            let rooms = if app.update.available().is_some() { update_button_rooms(ui) } else { [0.0; 2] };
+            let room = rooms.into_iter().find(|r| left_end + r + 8.0 <= hi).unwrap_or(0.0);
+            let lo = left_end + room + 8.0;
+            let mid_left = if lo <= hi { centred.clamp(lo, hi) } else { centred };
             // Left: the menus, the browser, the Mixer, then save (undo and redo are in Edit),
             // and a new release's button.
             ui.horizontal_centered(|ui| {
@@ -1915,6 +2222,13 @@ pub fn header(app: &mut App, ui: &mut Ui) {
                     white(142),
                     Stroke::NONE,
                 ));
+                // Where the update button has no room at all (a narrow window), a green dot
+                // by the menus' arrow says there's a release: Help ▸ About has it.
+                if app.update.available().is_some() && room == 0.0 {
+                    let dot = Rect::from_center_size(Pos2::new(c.x + 9.0, r.center().y - 6.0), Vec2::splat(7.0));
+                    ui.painter().circle_filled(dot.center(), 3.5, Color32::from_rgb(0x2e, 0x9e, 0x4f));
+                    note_rect(ui, "update-dot", dot);
+                }
                 let menus = crate::menu::menus(app);
                 let mut chosen = Vec::new();
                 egui::Popup::menu(&resp).style(crate::layout::menu_style).show(|ui| {
@@ -1967,16 +2281,19 @@ pub fn header(app: &mut App, ui: &mut Ui) {
                     let dirty = d.is_dirty();
                     let save_tip =
                         if dirty { "Save (⌘S); the first save keeps the original as .mxprj.bak" } else { "No unsaved changes" };
-                    if icon_button(ui, t, dirty, PLAY_ON, save_tip, |p, r, c| {
+                    let save = icon_button(ui, t, dirty, PLAY_ON, save_tip, |p, r, c| {
                         let b = Rect::from_center_size(r.center(), Vec2::splat(12.0));
                         p.rect_stroke(b, 1.0, Stroke::new(1.5, c), StrokeKind::Inside);
                         p.rect_filled(Rect::from_min_size(b.min + Vec2::new(3.0, 0.0), Vec2::new(6.0, 4.0)), 0.0, c);
-                    })
-                    .clicked()
-                    {
+                    });
+                    note_rect(ui, "save", save.rect);
+                    if save.clicked() {
                         acts.push(Act::Save);
                     }
                 }
+                // (Before the update button, which only shows where there's room for it.)
+                let end = ui.cursor().left();
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("header-left-end"), end));
                 if let Some(rel) = app.update.available()
                     && update_button(ui, mid_left, rel.version_text()).is_some_and(|r| r.clicked())
                 {
@@ -2160,6 +2477,9 @@ pub fn header(app: &mut App, ui: &mut Ui) {
                 ui.spacing_mut().item_spacing = Vec2::new(0.0, 0.0);
                 let cpu = cpu_meter(ui, app.output.as_ref().is_some_and(|o| o.is_ok()).then_some(app.cpu_load));
                 note_rect(ui, "cpu", cpu.rect);
+                if cpu.clicked() {
+                    app.audio_monitor = !app.audio_monitor;
+                }
                 ui.add_space(10.0);
                 if let Some(doc) = &app.doc {
                     let level = doc.borrow().project().master_level;
@@ -2187,6 +2507,9 @@ pub fn header(app: &mut App, ui: &mut Ui) {
                     }
                     ui.add_space(8.0);
                 }
+                // (Before an error's text, which takes whatever room is left.)
+                let start = ui.cursor().max.x;
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("header-right-start"), start));
                 if let Some(e) = &app.error {
                     let path = app.path.as_deref().map(|p| p.display().to_string()).unwrap_or_default();
                     ui.colored_label(REC_ON, format!("{path}: {e}"));
@@ -2258,12 +2581,13 @@ pub(crate) fn cpu_load(prev: (u64, u64), now: (u64, u64)) -> Option<f32> {
 
 /// The CPU meter: the audio thread's load as a bar over "CPU" (`None`: no audio out).
 fn cpu_meter(ui: &mut Ui, load: Option<f32>) -> Response {
-    let (r, resp) = ui.allocate_exact_size(Vec2::new(30.0, HEADER), Sense::hover());
+    let (r, _) = ui.allocate_exact_size(Vec2::new(42.0, HEADER), Sense::hover());
+    let resp = ui.interact(r, egui::Id::new("header-cpu-meter"), Sense::click());
     let tip = match load {
         Some(l) => format!("CPU: the audio is {:.0} % of the time it has to play in", l * 100.0),
         None => "CPU: no audio output".to_string(),
     };
-    let resp = resp.on_hover_text(tip);
+    let resp = resp.on_hover_text(format!("{tip}\nClick for Audio & CPU Monitor"));
     let p = ui.painter();
     let bar = Rect::from_center_size(r.center() - Vec2::new(0.0, 2.5), Vec2::new(r.width() - 4.0, 5.0));
     p.rect_filled(bar, 1.0, white(28));
@@ -2314,17 +2638,33 @@ fn link_button(ui: &mut Ui, view: Option<(u64, f64)>) -> Response {
     })
 }
 
+/// The gap either side of the header's update button.
+const UPDATE_GAP: f32 = 10.0;
+/// The update button's width with its icon alone.
+const UPDATE_ICON_ONLY: f32 = 10.0 + 14.0 + 10.0;
+
+/// The room the header's update button takes with its gaps: in full, and with its icon
+/// alone.
+fn update_button_rooms(ui: &Ui) -> [f32; 2] {
+    let text = ui.painter().layout_no_wrap("Update available".into(), font(12.0), ink());
+    [UPDATE_ICON_ONLY + 6.0 + text.size().x, UPDATE_ICON_ONLY].map(|w| UPDATE_GAP + w + UPDATE_GAP)
+}
+
 /// A new release's button in the header: green, with an update icon and "Update
-/// available"; `None` (not drawn) when it doesn't fit before `before` (the transport).
+/// available", or the icon alone where only that fits before `before` (the transport);
+/// `None` (not drawn) when neither does.
 fn update_button(ui: &mut Ui, before: f32, version: String) -> Option<Response> {
     const GREEN: Color32 = Color32::from_rgb(0x2e, 0x9e, 0x4f);
     const GREEN_HOVER: Color32 = Color32::from_rgb(0x38, 0xb4, 0x5c);
     let text = ui.painter().layout_no_wrap("Update available".into(), font(12.0), ink());
-    let size = Vec2::new(10.0 + 14.0 + 6.0 + text.size().x + 10.0, 22.0);
-    let gap = 10.0;
-    if ui.cursor().left() + gap + size.x + gap > before {
+    let gap = UPDATE_GAP;
+    let fits = |w: f32| ui.cursor().left() + gap + w + gap <= before + 0.5;
+    let full = UPDATE_ICON_ONLY + 6.0 + text.size().x;
+    let words = fits(full);
+    if !words && !fits(UPDATE_ICON_ONLY) {
         return None;
     }
+    let size = Vec2::new(if words { full } else { UPDATE_ICON_ONLY }, 22.0);
     ui.add_space(gap);
     let (r, resp) = ui.allocate_exact_size(size, Sense::click());
     let p = ui.painter();
@@ -2341,7 +2681,9 @@ fn update_button(ui: &mut Ui, before: f32, version: String) -> Option<Response> 
         ink(),
         Stroke::NONE,
     ));
-    p.galley(Pos2::new(r.left() + 10.0 + 14.0 + 6.0, r.center().y - text.size().y / 2.0), text, ink());
+    if words {
+        p.galley(Pos2::new(r.left() + 10.0 + 14.0 + 6.0, r.center().y - text.size().y / 2.0), text, ink());
+    }
     note_rect(ui, "update", r);
     Some(resp.on_hover_text(format!("DECKARD {version} is out: click to see it and update (Help ▸ About)")))
 }
@@ -2967,7 +3309,7 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
         painter.rect_filled(inner, 2.0, fill);
         if queued_scene == Some(s) {
             painter.rect_stroke(inner, 2.0, Stroke::new(1.0, col), StrokeKind::Inside);
-            ui.ctx().request_repaint();
+            ui.ctx().request_repaint_after(crate::BACKGROUND_PACE);
         }
         let text = if focused && !blink { black(245) } else { col };
         let mut text_rect = inner;
@@ -2996,7 +3338,7 @@ fn ideas_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Play
                 let strip = Rect::from_min_size(Pos2::new(inner.left() + 8.0, inner.bottom() - 6.0), Vec2::new(inner.width() - 16.0, 3.0));
                 let (filled, unfilled) = if focused && !blink { (black(245), black(61)) } else { (col, with_alpha(col, 64)) };
                 progress_strip(&painter, strip, bars, gap, played, filled, unfilled);
-                ui.ctx().request_repaint();
+                ui.ctx().request_repaint_after(crate::BACKGROUND_PACE);
             }
         }
         if app.renaming == Some(Target::Scene(s)) {
@@ -3510,8 +3852,19 @@ fn row_input(ui: &mut Ui, app: &App, p: &Project, row: Rect, clip: Rect, target:
     if resp.double_clicked() {
         // A group's double-click mutes or unmutes it (renaming is in its menu).
         acts.push(if matches!(target, Target::Group(_)) { Act::ToggleMute(target) } else { Act::StartRename(target) });
-    } else if resp.clicked() || resp.secondary_clicked() {
-        acts.push(focus);
+    } else if resp.clicked() {
+        match target {
+            Target::Sound(g, s) if g == app.group => {
+                let (shift, toggle) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
+                acts.push(Act::ClickSound { sound: s, shift, toggle });
+            }
+            _ => acts.push(focus),
+        }
+    } else if resp.secondary_clicked() {
+        match target {
+            Target::Sound(g, s) if g == app.group => acts.push(Act::FocusSelectedSound(s)),
+            _ => acts.push(focus),
+        }
     }
     resp.menu_on_right_click(|ui| match target {
         Target::Sound(g, s) => sound_menu(ui, app, p, g, s, acts),
@@ -3693,7 +4046,11 @@ fn sound_menu(ui: &mut Ui, app: &App, p: &Project, g: usize, s: usize, acts: &mu
     item(ui, "Export MIDI...", true, || Act::ExportMidi(g, s), acts);
     ui.separator();
     let color = p.groups.get(g).and_then(|x| x.sounds.get(s)).map_or(Color::Default, |x| x.color);
-    color_menu(ui, color, vec![Target::Sound(g, s)], acts);
+    let count = p.groups.get(g).map_or(0, |x| x.sounds.len());
+    let targets = app
+        .selected_sounds_for(g, s, count)
+        .map_or_else(|| vec![Target::Sound(g, s)], |xs| xs.into_iter().map(|i| Target::Sound(g, i)).collect());
+    color_menu(ui, color, targets, acts);
     ui.separator();
     item(ui, "Cut", true, || Act::CutSound(g, s), acts);
     item(ui, "Copy", true, || Act::CopySound(g, s), acts);
@@ -3825,13 +4182,13 @@ fn song_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Playh
     let bar = p.bar_length().max(1) as f32;
     let clips_end = p.groups.iter().flat_map(|g| &g.clips).map(|c| c.position + c.length).max().unwrap_or(0);
     let total = p.arrangement_length().max(clips_end) as f32 / bar;
+    let secs = Rect::from_min_size(ed.min, Vec2::new(ed.width(), 32.0));
+    ui.data_mut(|d| d.insert_temp(egui::Id::new("deckard-sections"), secs));
+    let timeline = Rect::from_min_size(Pos2::new(ed.left(), secs.bottom()), Vec2::new(ed.width(), 18.0));
     // Leave room for the "+" after the last section.
     let ppb = ((ed.width() - 40.0) / total.max(16.0)).max(12.0);
     let hx = hscroll(ui, "song-x", ed, total.max(16.0) * ppb);
     let x_of = |ticks: f64| ed.left() + ticks as f32 / bar * ppb - hx;
-    let secs = Rect::from_min_size(ed.min, Vec2::new(ed.width(), 32.0));
-    ui.data_mut(|d| d.insert_temp(egui::Id::new("deckard-sections"), secs));
-    let timeline = Rect::from_min_size(Pos2::new(ed.left(), secs.bottom()), Vec2::new(ed.width(), 18.0));
     let tl_resp = ui.interact(timeline, ui.id().with("song-timeline"), Sense::click());
     if app.playing.is_none()
         && tl_resp.clicked()
@@ -3844,9 +4201,100 @@ fn song_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Playh
         acts.push(Act::SeekArrangement(tick.max(0)));
     }
     let tracks = Rect::from_min_max(Pos2::new(ed.left(), rows_top), ed.max);
+    if app.looping && app.song_view {
+        let (loop_start, loop_end) = app.song_loop.unwrap_or((0, p.arrangement_length().max(0)));
+        let region = Rect::from_min_max(
+            Pos2::new(x_of(loop_start as f64).max(ed.left()), timeline.top()),
+            Pos2::new(x_of(loop_end as f64).min(ed.right()), timeline.bottom()),
+        );
+        let edge_zone = if region.width() < 48.0 { region.width() * 0.22 } else { 14.0 };
+        let region_fill = Color32::from_rgba_unmultiplied(PLAY_ON.r(), PLAY_ON.g(), PLAY_ON.b(), 38);
+        let region_outline = Color32::from_rgba_unmultiplied(PLAY_ON.r(), PLAY_ON.g(), PLAY_ON.b(), 255);
+        painter.rect_filled(region, 2.0, region_fill);
+        painter.rect_stroke(region, 2.0, Stroke::new(1.0, region_outline), egui::StrokeKind::Inside);
+        painter.hline(region.x_range(), region.top(), Stroke::new(1.0, region_outline));
+        painter.hline(region.x_range(), region.bottom() - 1.0, Stroke::new(1.0, region_outline));
+        let id = ui.id().with("song-loop-region");
+        let handle_y = 10.0;
+        let left_handle = Rect::from_min_max(
+            Pos2::new(region.left() - edge_zone, region.top() - handle_y),
+            Pos2::new(region.left() + edge_zone, region.bottom() + handle_y),
+        );
+        let right_handle = Rect::from_min_max(
+            Pos2::new(region.right() - edge_zone, region.top() - handle_y),
+            Pos2::new(region.right() + edge_zone, region.bottom() + handle_y),
+        );
+        let left_resp = ui.interact(left_handle, id.with("left"), Sense::click_and_drag());
+        let right_resp = ui.interact(right_handle, id.with("right"), Sense::click_and_drag());
+        let body_region =
+            Rect::from_min_max(Pos2::new(region.left() + edge_zone, region.top()), Pos2::new(region.right() - edge_zone, region.bottom()));
+        let body_resp = if body_region.width() > 0.0 {
+            ui.interact(body_region, id.with("body"), Sense::click_and_drag())
+        } else {
+            ui.interact(Rect::NOTHING, id.with("body"), Sense::click_and_drag())
+        };
+        if left_resp.hovered() || left_resp.dragged() || right_resp.hovered() || right_resp.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+        let resp = if left_resp.dragged() || left_resp.drag_stopped() {
+            left_resp.clone()
+        } else if right_resp.dragged() || right_resp.drag_stopped() {
+            right_resp.clone()
+        } else {
+            body_resp.clone()
+        };
+        if (resp.dragged() || resp.drag_stopped())
+            && let Some(pos) = ui.ctx().pointer_latest_pos()
+        {
+            let raw = ((pos.x + hx - ed.left()) / ppb * bar).round() as i64;
+            let snap = p.bar_length().max(1);
+            let tick = (raw as f64 / snap as f64).round() as i64 * snap;
+            let length = loop_end - loop_start;
+            if resp.drag_started() {
+                let edge = if resp.id == left_resp.id {
+                    -1i8
+                } else if resp.id == right_resp.id {
+                    1
+                } else {
+                    0
+                };
+                ui.data_mut(|d| d.insert_temp(id.with("edge"), edge));
+                if edge == 0 {
+                    let grab = ((pos.x + hx - ed.left()) / ppb * bar).round() as i64;
+                    ui.data_mut(|d| d.insert_temp(id.with("grab"), grab - loop_start));
+                }
+            }
+            let edge = ui.data(|d| d.get_temp::<i8>(id.with("edge"))).unwrap_or(0);
+            let (start, end) = if edge < 0 {
+                (tick.min(loop_end - snap).max(0), loop_end)
+            } else if edge > 0 {
+                (loop_start, tick.max(loop_start + snap))
+            } else {
+                let grab = ui.data(|d| d.get_temp::<i64>(id.with("grab"))).unwrap_or(length / 2);
+                let pointer_tick = ((pos.x + hx - ed.left()) / ppb * bar).round() as i64;
+                let start = ((pointer_tick - grab) as f32 / snap as f32).round() as i64 * snap;
+                let start = start.clamp(0, p.arrangement_length() - length);
+                (start, start + length)
+            };
+            let vertical = resp.drag_delta().y.abs() > resp.drag_delta().x.abs();
+            if !vertical || edge != 0 {
+                acts.push(Act::SongLoop(start, end));
+            }
+        }
+    }
     let ep = painter.with_clip_rect(ed);
     ep.hline(timeline.x_range(), timeline.top(), Stroke::new(1.0, Color32::BLACK));
     ep.hline(timeline.x_range(), timeline.bottom(), Stroke::new(1.0, Color32::BLACK));
+    if app.looping && app.song_view {
+        let (loop_start, loop_end) = app.song_loop.unwrap_or((0, p.arrangement_length().max(0)));
+        let loop_region = Rect::from_min_max(
+            Pos2::new(x_of(loop_start as f64).max(ed.left()), timeline.top()),
+            Pos2::new(x_of(loop_end as f64).min(ed.right()), timeline.bottom()),
+        );
+        let region_outline = Color32::from_rgba_unmultiplied(PLAY_ON.r(), PLAY_ON.g(), PLAY_ON.b(), 255);
+        ep.hline(loop_region.x_range(), loop_region.top(), Stroke::new(1.0, region_outline));
+        ep.hline(loop_region.x_range(), loop_region.bottom() - 1.0, Stroke::new(1.0, region_outline));
+    }
     painter.hline(col.x_range(), rows_top - 0.5, Stroke::new(1.0, Color32::BLACK));
     let end_x = x_of(p.arrangement_length() as f64);
     ep.rect_filled(Rect::from_min_max(Pos2::new(end_x, tracks.top()), tracks.max), 0.0, s00());
@@ -3930,7 +4378,7 @@ fn song_view(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Playh
             },
         );
         if queued == Some(i) {
-            ui.ctx().request_repaint();
+            ui.ctx().request_repaint_after(crate::BACKGROUND_PACE);
         }
         if playing_section == Some(i) {
             triangle(&ep, Pos2::new(r.left() + 8.0, r.center().y), 3.5, white(245));
@@ -5806,6 +6254,7 @@ fn chain_slots(ui: &mut Ui, app: &App, painter: &Painter, area: Rect, slots: &[d
                 let movable = !slot.is_instrument();
                 let resp = if movable { resp.on_hover_text("Drag to move this effect") } else { resp };
                 resp.menu_on_right_click(|ui| {
+                    plugin_clipboard_menu(ui, app, app.chain(), i, slot.is_instrument(), acts);
                     if plugin && ui.button("Open Plug-in Window").clicked() {
                         acts.push(Act::OpenSlotEditor(i));
                         ui.close();
@@ -5823,6 +6272,28 @@ fn chain_slots(ui: &mut Ui, app: &App, painter: &Painter, area: Rect, slots: &[d
                         ui.close();
                     }
                     change_menu(ui, app, app.chain(), i, !movable, acts);
+                    // The Sampler and the Audio plug-in become a New Sampler, and back.
+                    if i == 0 && matches!(app.chain(), deckard_doc::Chain::Sound(..)) {
+                        let new_sampler = slot.name == "Sampler Preview";
+                        if new_sampler {
+                            if ui
+                                .button("Convert to Sampler")
+                                .on_hover_text("A plain Sampler, as Maschine has it: Sync, Keys and the analysis go")
+                                .clicked()
+                            {
+                                acts.push(Act::ConvertInstrument(false));
+                                ui.close();
+                            }
+                        } else if (slot.module == "Sampler" || slot.module == "AudioModule")
+                            && ui
+                                .button("Convert to Sampler Preview")
+                                .on_hover_text("Keep its samples, in DECKARD's Sampler Preview (loops in Sync)")
+                                .clicked()
+                        {
+                            acts.push(Act::ConvertInstrument(true));
+                            ui.close();
+                        }
+                    }
                     if ui.button("Remove").clicked() {
                         acts.push(Act::RemoveSlot(i));
                         ui.close();
@@ -5905,7 +6376,7 @@ fn native(instrument: bool) -> impl Iterator<Item = &'static deckard_plugins::na
 /// "+" › Internal's instruments (a sound's first slot only): the Sampler and Audio,
 /// Maschine's synths, DECKARD's own.
 fn internal_instruments(ui: &mut Ui, instruments: bool, pick: &dyn Fn(AddWhat) -> Act, acts: &mut Vec<Act>) {
-    for (name, what) in [("Sampler", AddWhat::Sampler), ("Audio", AddWhat::Audio)] {
+    for (name, what) in [("Sampler", AddWhat::Sampler), ("Sampler Preview", AddWhat::NewSampler), ("Audio", AddWhat::Audio)] {
         if ui.add_enabled(instruments, egui::Button::new(name)).on_disabled_hover_text(AFTER_FX).clicked() {
             acts.push(pick(what));
             ui.close();
@@ -5931,16 +6402,39 @@ fn internal_instruments(ui: &mut Ui, instruments: bool, pick: &dyn Fn(AddWhat) -
 
 /// The "+" menu: Maschine's internal modules, then plug-ins by role and vendor.
 fn add_menu(ui: &mut Ui, app: &App, instruments: bool, acts: &mut Vec<Act>) {
-    module_menu(ui, app, app.chain(), instruments, true, &Act::AddSlot, acts);
+    add_menu_in(ui, app, app.chain(), instruments, acts);
+}
+
+fn add_menu_in(ui: &mut Ui, app: &App, chain: deckard_doc::Chain, instruments: bool, acts: &mut Vec<Act>) {
+    let can_paste = app
+        .plugin_clipboard
+        .as_ref()
+        .zip(app.doc.as_ref())
+        .is_some_and(|(copy, doc)| doc.borrow().slot_paste_position(chain, copy).is_ok());
+    item(ui, "Paste", can_paste, || Act::PastePlugin(chain, None), acts);
+    module_menu(ui, app, chain, instruments, true, &Act::AddSlot, acts);
 }
 
 /// A plug-in row's right-click menu in the Mixer: put another module in its place, or
 /// remove it. For chain `c`, which needn't be the focused one.
 fn slot_menu(ui: &mut Ui, app: &App, c: deckard_doc::Chain, i: usize, is_instrument: bool, acts: &mut Vec<Act>) {
+    plugin_clipboard_menu(ui, app, c, i, is_instrument, acts);
     change_menu(ui, app, c, i, is_instrument, acts);
     if ui.button("Remove").clicked() {
         acts.push(Act::RemoveSlotIn(c, i));
         ui.close();
+    }
+}
+
+fn plugin_clipboard_menu(ui: &mut Ui, app: &App, chain: deckard_doc::Chain, at: usize, instrument: bool, acts: &mut Vec<Act>) {
+    item(ui, "Copy", true, || Act::CopyPlugin(chain, at), acts);
+    if instrument {
+        let can_paste = app
+            .plugin_clipboard
+            .as_ref()
+            .zip(app.doc.as_ref())
+            .is_some_and(|(copy, doc)| doc.borrow().can_paste_over_instrument(chain, at, copy));
+        item(ui, "Paste", can_paste, || Act::PastePlugin(chain, Some(at)), acts);
     }
 }
 
@@ -6418,8 +6912,8 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
         let row_h = grid.height() / count;
         (row_h, first * row_h)
     } else {
-        // The sound slots: a plain scroll bar.
-        let y0 = scroll(ui, "pattern-rows", grid, rows as f32 * ROW);
+        // The sound names and drum lanes share one offset and accept wheel input over either.
+        let y0 = scroll(ui, "pattern-rows", list.union(grid), rows as f32 * ROW);
         let total = rows as f32 * ROW;
         let y0 = match zoom_bar(
             ui,
@@ -6703,12 +7197,32 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     // Selected notes (and previews) are lit and framed: a white wash, a dark inner
     // line and a white outer one, as Maschine marks a selection.
     let marks = std::cell::RefCell::new(Vec::new());
+    let colour = |n: &Note| if deckard_doc::note_tools::muted(n) { grey(128) } else { sound_color(p, app.group, n.sound) };
+    let draw_tail = |n: &Note| {
+        let length = n.ratchet.loop_tail(n.position, n.length, start..end);
+        if length > 0
+            && let Some(mut r) = note_rect(&Note { position: start, length, ..*n })
+        {
+            r.max.x = r.max.x.min(x_of(end as f64));
+            gp.rect_filled(r, 1.0, with_alpha(colour(n), 68));
+        }
+    };
+    // The carried gate has no attack or hit target here. Draw it below real notes.
+    for n in &notes {
+        if !moving.iter().any(|(o, _)| o == *n) {
+            draw_tail(n);
+        }
+    }
+    for (_, n) in &moving {
+        draw_tail(n);
+    }
+    if let Some(NoteDrag::Paint { notes: ns }) = &drag {
+        ns.iter().for_each(draw_tail);
+    }
     let draw = |n: &Note, outline: Option<Color32>| {
         if let Some(r) = note_rect(n) {
             let a = 80 + (n.velocity.clamp(0, 127) * 175 / 127) as u8;
-            // Muted notes: Maschine's grey.
-            let c = if deckard_doc::note_tools::muted(n) { grey(128) } else { sound_color(p, app.group, n.sound) };
-            gp.rect_filled(r, 1.0, with_alpha(c, a));
+            gp.rect_filled(r, 1.0, with_alpha(colour(n), a));
             // A ratcheted note: a tick where each later hit starts.
             if !n.ratchet.is_plain() {
                 let hits = n.ratchet.hits(n.length, n.velocity);
@@ -7454,9 +7968,15 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
     if app.lanes_dialog {
         let mut open = true;
         let sound = p.groups[app.group].sounds.get(app.sound).map_or(String::new(), |s| s.name.clone());
-        egui::Window::new("MIDI Lanes").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).open(&mut open).show(
-            ui.ctx(),
-            |ui| {
+        egui::Window::new("MIDI Lanes")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .open(&mut open)
+            .max_height(dialog_max_height(ui.ctx()))
+            .max_width(dialog_max_width(ui.ctx()))
+            .vscroll(true)
+            .show(ui.ctx(), |ui| {
                 dialog_style(ui);
                 ui.label(egui::RichText::new(format!("Lanes for {sound}")).weak());
                 ui.add_space(4.0);
@@ -7520,8 +8040,7 @@ fn group_panel(ui: &mut Ui, app: &App, p: &Project, rect: Rect, head: Option<Pla
                         }
                     }
                 });
-            },
-        );
+            });
         if !open {
             acts.push(Act::LanesDialog(false));
         }
@@ -8071,12 +8590,17 @@ mod header_icon_tests {
 
 #[cfg(test)]
 mod desktop_theme_tests {
-    /// Every controller theme DECKARD ships is offered as the desktop theme, so each
-    /// one but Maschine (the ordinary dark window) restyles the window.
+    /// The hand-written themes restyle the window, except Maschine, which is the
+    /// ordinary dark window. The stock palettes are controller themes; the desktop
+    /// combo does not offer them.
     #[test]
     fn every_shipped_theme_but_maschine_restyles_the_window() {
-        for t in deckard_surface::Surface::new().themes() {
-            assert_eq!(super::desktop_look(&t, "yellow").is_some(), t != "maschine", "{t}");
+        for t in ["lcd", "palenight", "palenight_blue_green", "solarized_dark"] {
+            assert!(super::desktop_look(t, "yellow").is_some(), "{t}");
+        }
+        assert!(super::desktop_look("maschine", "yellow").is_none());
+        for theme in deckard_surface::theme_file::stock() {
+            assert!(super::desktop_look(theme.id, "yellow").is_none(), "{}", theme.id);
         }
     }
 
@@ -8097,6 +8621,30 @@ mod desktop_theme_tests {
                 sync_lcd(&ctx, &app);
                 assert_eq!(colours(), plain, "{theme} {mode}");
             }
+        }
+        app.settings.desktop_theme = "maschine".into();
+        sync_lcd(&ctx, &app);
+        DESK.with(|d| d.set(PLAIN));
+    }
+
+    /// Strong text (Preferences' titles: "Input level", "Routing", "Ports") is the
+    /// theme's writing, as the rest of the text is: it was black on the dark field.
+    #[test]
+    fn a_themes_titles_are_its_writing() {
+        use super::{App, Color32, DESK, PLAIN, sync_lcd};
+        let ctx = super::egui::Context::default();
+        let mut app = App::default();
+        for (theme, ink) in
+            [("palenight_blue_green", [0xee, 0xff, 0xff]), ("palenight", [0xee, 0xff, 0xff]), ("solarized_dark", [0x93, 0xa1, 0xa1])]
+        {
+            app.settings.desktop_theme = theme.into();
+            sync_lcd(&ctx, &app);
+            let v = ctx.style_of(super::egui::Theme::Dark).visuals.clone();
+            let ink = Color32::from_rgb(ink[0], ink[1], ink[2]);
+            assert_eq!(v.strong_text_color(), ink, "{theme}");
+            let y = |c: Color32| u32::from(c.r()) + u32::from(c.g()) + u32::from(c.b());
+            assert!(y(ink) > y(v.widgets.active.bg_fill) + 150, "{theme}: the writing reads on a pressed widget");
+            assert!(y(v.widgets.active.bg_fill) > y(v.panel_fill), "{theme}: a pressed widget stands off the field");
         }
         app.settings.desktop_theme = "maschine".into();
         sync_lcd(&ctx, &app);
@@ -8145,5 +8693,185 @@ mod ratchet_tests {
         let down = Note { ratchet: Ratchet { repeats: 2, shape: Shape::Down, floor: 30, ceiling: 127 }, ..n };
         assert_eq!(k.with(down, 8).ratchet, Ratchet { repeats: 8, ..down.ratchet }, "only the repeats change");
         assert_eq!(Lane::Ratchet.name(), "Ratchet");
+    }
+}
+
+#[cfg(test)]
+mod multi_sound_tests {
+    use super::*;
+    use deckard_doc::{NewModule, SoundRoute, Target};
+    use deckard_model::{AudioDest, Color, Swing};
+
+    #[test]
+    fn shift_and_toggle_sound_selection_and_batch_parameter_edits() {
+        let mut app = App::default();
+        app.new_project();
+        let doc = app.doc.clone().unwrap();
+        {
+            let mut d = doc.borrow_mut();
+            for (s, (lvl, pan)) in [(0.80, -0.20), (0.60, 0.00), (0.50, 0.20), (0.40, 0.40)].into_iter().enumerate() {
+                d.set_level(Target::Sound(0, s), lvl).unwrap();
+                d.set_pan(Target::Sound(0, s), pan).unwrap();
+            }
+            d.sampler_only(0, 0).unwrap();
+            d.sampler_only(0, 1).unwrap();
+            d.add_slot(0, 0, 1, &NewModule::Effect("Filter")).unwrap();
+            d.add_slot(0, 1, 1, &NewModule::Effect("Filter")).unwrap();
+            d.add_slot(0, 2, 0, &NewModule::Effect("Compressor")).unwrap();
+            d.set("Cutoff", Target::Module(0, 0, 1), "cutoff", Value::Float(0.30)).unwrap();
+            d.set("Cutoff", Target::Module(0, 1, 1), "cutoff", Value::Float(0.50)).unwrap();
+        }
+
+        // Shift range forward (0..=2) and backward, plus Cmd/Ctrl toggle on/off.
+        apply_acts(&mut app, vec![Act::ClickSound { sound: 0, shift: false, toggle: false }]);
+        apply_acts(&mut app, vec![Act::ClickSound { sound: 2, shift: true, toggle: false }]);
+        assert_eq!(app.sound, 2);
+        assert_eq!(app.selected_sounds_for(0, 2, 16), Some(vec![0, 1, 2]));
+        assert!(app.is_sound_selected(0, 1));
+
+        apply_acts(&mut app, vec![Act::ClickSound { sound: 3, shift: false, toggle: true }]);
+        assert_eq!(app.selected_sounds_for(0, 3, 16), Some(vec![0, 1, 2, 3]));
+        // Toggle the focused sound (3) off: focus moves to a remaining selected sound.
+        apply_acts(&mut app, vec![Act::ClickSound { sound: 3, shift: false, toggle: true }]);
+        assert_eq!(app.selected_sounds_for(0, 0, 16), Some(vec![0, 1, 2]));
+
+        // Right-clicking an already-selected sound focuses it without dropping the selection;
+        // right-clicking an unselected sound moves selection to that sound alone.
+        apply_acts(&mut app, vec![Act::FocusSelectedSound(1)]);
+        assert_eq!(app.sound, 1);
+        assert_eq!(app.selected_sounds_for(0, 1, 16), Some(vec![0, 1, 2]));
+        apply_acts(&mut app, vec![Act::FocusSelectedSound(5)]);
+        assert_eq!(app.sound, 5);
+        assert_eq!(app.selected_sounds_for(0, 5, 16), None);
+
+        // Re-select 0..=2 with a backward Shift-click from anchor 2 to 0.
+        apply_acts(&mut app, vec![Act::ClickSound { sound: 2, shift: false, toggle: false }]);
+        apply_acts(&mut app, vec![Act::ClickSound { sound: 0, shift: true, toggle: false }]);
+        assert_eq!(app.selected_sounds_for(0, 0, 16), Some(vec![0, 1, 2]));
+
+        // Continuous relative level drag merges into a single undo step even when Sound 0 clamps.
+        let steps_before = doc.borrow().undo_labels().len();
+        apply_acts(&mut app, vec![Act::SetLevel(Target::Sound(0, 2), 0.70)]);
+        apply_acts(&mut app, vec![Act::SetLevel(Target::Sound(0, 2), 0.75)]);
+        assert_eq!(doc.borrow().undo_labels().len(), steps_before + 1);
+        {
+            let d = doc.borrow();
+            let ss = &d.project().groups[0].sounds;
+            assert!((ss[0].level - 1.00).abs() < 1e-6);
+            assert!((ss[1].level - 0.85).abs() < 1e-6);
+            assert!((ss[2].level - 0.75).abs() < 1e-6);
+            assert!((ss[3].level - 0.40).abs() < 1e-6);
+        }
+        assert!(doc.borrow_mut().undo());
+        assert!((doc.borrow().project().groups[0].sounds[0].level - 0.80).abs() < 1e-6);
+        assert!(doc.borrow_mut().redo());
+
+        // Exact reset sets every selected sound to 0.75 (0 dB).
+        apply_acts(&mut app, vec![Act::Exact(Box::new(Edit::Level(Target::Sound(0, 1)).reset()))]);
+        for s in 0..3 {
+            assert!((doc.borrow().project().groups[0].sounds[s].level - 0.75).abs() < 1e-6);
+        }
+
+        // Pan, Aux, Cue, Mute, Swing (relative and exact), and Route (skipping self-route).
+        apply_acts(&mut app, vec![Act::SetPan(Target::Sound(0, 0), -0.10)]);
+        apply_acts(&mut app, vec![Act::Exact(Box::new(Edit::Pan(Target::Sound(0, 1)).reset()))]);
+        apply_acts(&mut app, vec![Act::SetAux(Target::Sound(0, 0), 0, 0.50)]);
+        apply_acts(&mut app, vec![Act::Exact(Box::new(Act::SetAux(Target::Sound(0, 0), 0, 0.75)))]);
+        apply_acts(&mut app, vec![Act::Cue(Target::Sound(0, 1), true)]);
+        apply_acts(&mut app, vec![Act::ToggleMute(Target::Sound(0, 2))]);
+        apply_acts(&mut app, vec![Act::SetSwing(Target::Sound(0, 0), Swing { amount: 0.25, cycle: 2, invert: true })]);
+        apply_acts(
+            &mut app,
+            vec![Act::Exact(Box::new(Act::SetSwing(Target::Sound(0, 0), Swing { amount: 0.0, cycle: 0, invert: false })))],
+        );
+        apply_acts(&mut app, vec![Act::SetRoute(RouteSet::Sound(0, 0, SoundRoute::Output(AudioDest::Sound(0, 1))))]);
+        {
+            let d = doc.borrow();
+            let ss = &d.project().groups[0].sounds;
+            for s in 0..3 {
+                assert!(ss[s].pan.abs() < 1e-6);
+                assert!((ss[s].aux[0] - 0.75).abs() < 1e-6);
+                assert!(ss[s].cue);
+                assert!(ss[s].muted);
+                assert!(ss[s].swing.amount.abs() < 1e-6);
+            }
+            assert_eq!(ss[0].channel.dest, AudioDest::Sound(0, 1));
+            assert_eq!(ss[1].channel.dest, AudioDest::Parent, "Sound 1 skips routing to itself");
+            assert_eq!(ss[2].channel.dest, AudioDest::Sound(0, 1));
+        }
+
+        // Sampler, matching Module (Sounds 0 & 1 have Filter in slot 1; Sound 2 does not), and Sound params.
+        app.slot = Some(1);
+        apply_acts(&mut app, vec![Act::SetParam(Target::Module(0, 0, 1), "cutoff", 0.45)]);
+        app.slot = Some(0);
+        apply_acts(&mut app, vec![Act::SetParam(Target::Sampler(0, 0), "tune", 5.0)]);
+        apply_acts(&mut app, vec![Act::SetParam(Target::Sound(0, 0), "transpose", 3.0)]);
+        apply_acts(&mut app, vec![Act::SetParam(Target::Sound(0, 0), "base_key", 64.0)]);
+        {
+            let d = doc.borrow();
+            assert!((d.num(Target::Module(0, 0, 1), "cutoff").unwrap() - 0.45).abs() < 1e-6);
+            assert!((d.num(Target::Module(0, 1, 1), "cutoff").unwrap() - 0.65).abs() < 1e-6);
+            assert!((d.num(Target::Sampler(0, 1), "tune").unwrap() - 5.0).abs() < 1e-6);
+            for s in 0..3 {
+                assert_eq!(d.project().groups[0].sounds[s].channel.transpose, 3);
+                assert_eq!(d.project().groups[0].sounds[s].channel.base_key, 64);
+            }
+        }
+
+        // Surface SoundSetting + Color, and ResetSound across all selected sounds.
+        app.surface_act(deckard_surface::Action::SoundSetting("choke_group", 4));
+        app.surface_act(deckard_surface::Action::Color { of: deckard_surface::ColorOf::Sound, color: Some(3) });
+        {
+            let d = doc.borrow();
+            for s in 0..3 {
+                let snd = &d.project().groups[0].sounds[s];
+                assert_eq!(snd.channel.choke_group, 4);
+                assert_eq!(snd.color, Color::Palette(3));
+            }
+        }
+        apply_acts(&mut app, vec![Act::ResetSound(0, 1)]);
+        for s in 0..3 {
+            assert!(doc.borrow().project().groups[0].sounds[s].slots.is_empty(), "Sound {s} reset");
+        }
+    }
+
+    #[test]
+    fn sound_list_and_mixer_render_multi_selection_and_shortcuts() {
+        let mut app = App::default();
+        app.new_project();
+        app.key_focus = KeyFocus::Sounds;
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1500.0, 930.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+        h.run_steps(2);
+
+        // Cmd+A selects all 16 sounds; Escape clears secondary selection; Shift+Down extends.
+        let cmd = egui::Modifiers { command: true, ..Default::default() };
+        h.event(egui::Event::Key { key: egui::Key::A, physical_key: None, pressed: true, repeat: false, modifiers: cmd });
+        h.step();
+        h.event(egui::Event::Key { key: egui::Key::A, physical_key: None, pressed: false, repeat: false, modifiers: cmd });
+        h.step();
+        assert_eq!(h.state().selected_sounds_for(0, 0, 16).as_ref().map(Vec::len), Some(16));
+
+        // Render Mixer with multi-selection active so selected SoundStrip headers paint.
+        (h.state_mut().mixer, h.state_mut().mixer_sounds) = (true, true);
+        h.run_steps(2);
+        h.state_mut().mixer = false;
+
+        h.event(egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        });
+        h.step();
+        assert_eq!(h.state().selected_sounds_for(0, 0, 16), None);
+
+        let shift = egui::Modifiers { shift: true, ..Default::default() };
+        h.event(egui::Event::Key { key: egui::Key::ArrowDown, physical_key: None, pressed: true, repeat: false, modifiers: shift });
+        h.step();
+        assert_eq!(h.state().selected_sounds_for(0, 1, 16), Some(vec![0, 1]));
     }
 }

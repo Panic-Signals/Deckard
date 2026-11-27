@@ -140,6 +140,12 @@ fn project_label(start: &crate::Start) -> String {
     }
 }
 
+/// How long the splash waits for the first look for the MK3 (a moment, when it's there).
+const FIRST_LOOK: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// The Launchpad Pro [MK3]'s device folder.
+const LAUNCHPAD: &str = "launchpad_pro_mk3";
+
 fn found(yes: bool) -> Outcome {
     Outcome::Text(if yes { "FOUND" } else { "NOT CONNECTED" }.into())
 }
@@ -277,16 +283,19 @@ impl App {
             Step::Mk3 => {
                 let mk3 = mk3_io::Mk3Io::start();
                 mk3.set_display_brightness(self.settings.display_brightness);
-                let outcome = found(mk3.displays_connected());
+                // (It's looked for on its own thread: wait for that first look.)
+                let outcome = found(mk3.found(FIRST_LOOK));
                 self.mk3 = Some(mk3);
                 outcome
             }
             Step::Launchpad => {
-                let jam = jam_io::JamIo::start();
-                let outcome = found(jam.connected());
-                self.jam = Some(jam);
+                self.jam = Some(jam_io::JamIo::start());
                 self.midi_port_watch = Some(crate::midi_ports::Watcher::start());
-                outcome
+                // The Launchpad is there if its MIDI ports are (it opens once the window
+                // is up). This line used to ask the JAM, which isn't looked for yet.
+                let known = self.midi_devices.manifests().iter().any(|m| m.id == LAUNCHPAD);
+                let (ins, outs) = if known { crate::midi_ports::probe() } else { Default::default() };
+                found(self.midi_devices.present(LAUNCHPAD, &ins, &outs))
             }
             Step::Surface => {
                 self.surface = self.new_surface();
@@ -389,6 +398,7 @@ impl App {
                 result.map_or_else(Outcome::Err, |()| Outcome::Ok)
             }
             Step::Done => {
+                self.ensure_idle_engine();
                 boot.ready_at = Some(Instant::now());
                 Outcome::Ok
             }

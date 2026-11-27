@@ -27,12 +27,14 @@ root                 frames 118 > 106 > 1
 - A block DECKARD can't read (bad bytes, or a version it doesn't know) is left out with
   a message, and the project opens without it.
 
-## Payload, version 14
+## Payload, version 15
 
-Version 14 is version 13 with the sounds' Groove settings at the end; version 13 is version 12 with the notes' ratchets at the end; version 12 is version 11 with the patterns' Audio offsets at the end; version 11 is version 10 with the CV routes at the end; version 10 is version 9 with the app's view at the end; version 9 is version 8 with the extra-output strips at the end; version 8 is version 7 with the scene settings at the end; version 7 is version 6 with the CC routes at the end; version 6 is version 5 with the LFOs at the end; version 5 is version 4 with the screen at the end; version 4 is version 3 with a PROB
+Version 15 is version 14 with the New Sampler's sounds and zones at the end; version 14 is version 13 with the sounds' Groove settings at the end; version 13 is version 12 with the notes' ratchets at the end; version 12 is version 11 with the patterns' Audio offsets at the end; version 11 is version 10 with the CV routes at the end; version 10 is version 9 with the app's view at the end; version 9 is version 8 with the extra-output strips at the end; version 8 is version 7 with the scene settings at the end; version 7 is version 6 with the CC routes at the end; version 6 is version 5 with the LFOs at the end; version 5 is version 4 with the screen at the end; version 4 is version 3 with a PROB
 LOCK section at the end; version 3 is version 2 with a modulation routes section at the
-end; version 2 is version 1 with a Pad Touch section at the end. DECKARD writes version 14
-and reads all fourteen.
+end; version 2 is version 1 with a Pad Touch section at the end. DECKARD writes version 15
+and reads all fifteen. (A version 13 or 14 block that doesn't end where its ratchets or
+Groove settings would is one written on the way to the New Sampler, when that version was
+its sounds and zones: it's read as that.)
 
 All values are little-endian. `u32` and `i32` are 4 bytes, `i64` is 8, `f32` is an
 IEEE single.
@@ -124,12 +126,27 @@ groove × groove_count:
                               shown (`page`, 0 Swing, 1 Variation, 2 Generate), and the
                               Variation and Generate settings (`sequence_variation/…`,
                               `sequence_generation/…`) when the sound's format has none
+u32 new_sampler_count           version 15: the New Sampler's sounds
+new_sampler × new_sampler_count:
+  u32 group, u32 sound
+  u32 len, u8 × len           its settings as UTF-8 text (`NewSampler::to_text`)
+u32 zone_meta_count             version 15: zones' analysis, those with any
+zone_meta × zone_meta_count:
+  u32 group, u32 sound, u32 zone
+  u32 len, u8 × len           as UTF-8 text (`ZoneMeta::to_text`)
 ```
 
 **A ratchet** plays its note as `repeats` hits, the note's length split evenly between
 them. Flat plays each at the note's velocity; Down runs from it toward `floor`, which the
 note's end would reach; Up runs from it to `ceiling`, which the last hit plays
 (`deckard_model::ratchet`).
+
+
+**The New Sampler** (docs/superpowers/plans/2026-11-12-new-sampler-metadata.md) is
+Maschine's Sampler with a `deckard:new_sampler` text field on the sound; each zone's
+analysis is a `deckard:zone` text field on the zone's object, naming the file it
+describes (one naming another file is ignored). Without the block, Maschine (or DECKARD)
+opens the sound as a plain Sampler.
 
 **Scene settings** are for projects too old to hold them in Maschine's own data: a scene's
 own tempo (`tempo <scene> <bpm>`) and Edit ▸ MIDI Change's blocks (`scene_recall <trigger>

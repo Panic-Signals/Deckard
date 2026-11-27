@@ -41,6 +41,30 @@ mod controller;
 #[cfg(test)]
 mod controller_quality_tests;
 mod controller_timing;
+/// A zone's meta after an edit took its sample from `old_len` frames to `new_len`:
+/// its warp markers go; stretched (`stretched`), its tempo follows; cut, its length in
+/// beats does, and its grid moves by the `shift` frames taken from the front.
+fn resized(meta: &mut deckard_model::new_sampler::ZoneMeta, old_len: usize, new_len: usize, rate: u32, (shift, stretched): (usize, bool)) {
+    if new_len == old_len || old_len == 0 {
+        return;
+    }
+    let ratio = new_len as f64 / old_len as f64;
+    meta.warps.clear();
+    if stretched {
+        meta.bpm = meta.bpm.map(|b| b / ratio);
+        meta.grid_offset = (meta.grid_offset as f64 * ratio) as u64;
+    } else {
+        meta.beats = meta.beats.map(|b| b * ratio);
+        if let Some(per) = meta.bpm.map(|b| f64::from(rate) * 60.0 / b).filter(|p| *p >= 1.0) {
+            meta.grid_offset = (meta.grid_offset as f64 - shift as f64).rem_euclid(per) as u64;
+        }
+    }
+}
+
+/// The stem lane the bass is on ([`deckard_model::new_sampler::LANE_NAMES`]).
+const BASS_LANE: usize = 2;
+
+mod drag_out;
 mod drop_pos;
 mod drum_ui;
 mod export;
@@ -49,6 +73,7 @@ mod github;
 mod goodbye;
 mod group_move;
 mod icon;
+mod theme_editor;
 
 /// The version shown: the release's (`DECKARD_VERSION`, set by the build scripts), else
 /// the crate's.
@@ -58,8 +83,29 @@ pub const VERSION: &str = match option_env!("DECKARD_VERSION") {
 };
 /// Built by the release scripts (with a version minted on GitHub), not from source.
 pub const RELEASE_BUILD: bool = option_env!("DECKARD_VERSION").is_some();
+pub(crate) type SurfaceViewStamp = (
+    Option<(usize, u64)>,
+    usize,
+    usize,
+    usize,
+    Option<usize>,
+    bool,
+    Option<usize>,
+    Option<deckard_doc::Chain>,
+    Option<((deckard_doc::Chain, usize), usize, std::time::Instant)>,
+    bool,
+);
+mod analysis;
 #[cfg(test)]
 mod auto_length_tests;
+mod beat;
+mod chop;
+mod chop_app;
+mod chop_group;
+#[cfg(test)]
+mod chop_group_tests;
+#[cfg(test)]
+mod chop_tests;
 #[cfg(test)]
 mod expr_lane_tests;
 #[cfg(test)]
@@ -70,10 +116,15 @@ mod group_edit_tests;
 mod header_tests;
 mod input_levels;
 mod jam_io;
+mod jam_strip;
 #[cfg(test)]
 mod jam_tests;
+mod jam_window;
 mod keep_running;
 mod keys;
+mod layers;
+#[cfg(test)]
+mod layers_tests;
 mod layout;
 mod lock;
 #[cfg(test)]
@@ -102,15 +153,19 @@ mod module_ui;
 mod ni_agent;
 mod ni_services;
 #[cfg(test)]
+mod pad_base_key_tests;
+#[cfg(test)]
 mod pad_blink_tests;
 #[cfg(test)]
 mod pad_light_tests;
+mod panic_log;
 #[cfg(test)]
 mod parity_tests;
 mod plugin_macros;
 #[cfg(test)]
 mod plugin_panel_tests;
 mod plugin_pictures;
+mod plugin_spectrum;
 #[cfg(test)]
 mod preferences_tests;
 mod preset_load;
@@ -122,12 +177,17 @@ mod record;
 mod record_knobs;
 mod recorder;
 mod remote;
+mod render_jobs;
 mod sampler_ui;
 mod sampling_hw;
 #[cfg(test)]
 mod scene_tempo_tests;
 mod scrolling_sampler;
 mod session_backup;
+mod session_record;
+#[cfg(test)]
+mod session_tests;
+mod session_window;
 mod settings;
 mod splash;
 mod splice;
@@ -181,10 +241,12 @@ fn play_in_scene(d: &mut deckard_doc::Document, scene: usize, g: usize, pi: usiz
 
 fn main() {
     deckard_plugins::mark_main_thread();
+    deckard_plugins::set_fault_logger(panic_log::record_plugin_fault);
     // A panic would leave through the loaded plug-ins' exit-time destructors (which
     // crash in Massive, Guitar Rig, Kontakt); report it and end the process instead.
     let report = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        panic_log::record(info);
         report(info);
         deckard_plugins::exit(101)
     }));
@@ -216,7 +278,7 @@ fn main() {
         }
         return;
     }
-    // --goodbye OUT.png: draw what the MK3's displays show after closing, and stop.
+    // --goodbye OUT.png: draw the standby picture, and stop. Closing leaves the displays black.
     if let Some(out) = flag("--goodbye") {
         let px: Vec<u8> = goodbye::picture().into_iter().flatten().collect();
         let image = egui::ColorImage::from_rgba_unmultiplied([goodbye::WIDTH, goodbye::HEIGHT], &px);
@@ -249,18 +311,38 @@ fn main() {
     });
     let model = flag("--controller").unwrap_or_else(|| "M3".into());
     let splash = boot::splash_wanted(&args);
+    // `--jam KEY` (repeatable): press a Jam control through the script, so the strip and its
+    // window can be looked at with no Jam on the wire. An unknown name is named back.
+    let jam_shot = args.iter().any(|a| a == "--jam-shot");
+    let jam_hil_presses: Vec<&'static str> = args
+        .windows(2)
+        .filter(|w| w[0] == "--jam")
+        .filter_map(|w| {
+            let name = w[1].as_str();
+            let known = deckard_jam::map::BUTTON_LEDS.iter().copied().chain(["ENCODER_TOUCH", "ENCODER"]).find(|n| *n == name);
+            if known.is_none() {
+                eprintln!("--jam: no Jam control called {name}");
+            }
+            known
+        })
+        .collect();
     // (flag, value) pairs for --press/--pad, in order.
     let actions: Vec<(String, String)> =
         args.windows(2).filter(|w| ["--press", "--pad", "--hold"].contains(&w[0].as_str())).map(|w| (w[0].clone(), w[1].clone())).collect();
     let width = if scripts.is_some() { 1500.0 + layout::CONTROLLER_WIDTH } else { 1500.0 };
     let app_icon = settings::Settings::load().app_icon;
     let root_size = if splash && splash::wayland() { splash::size() } else { egui::vec2(width, 930.0) };
+    let vsync = std::env::var_os("DECKARD_VSYNC").is_some();
+    let mut wgpu_options = eframe::egui_wgpu::WgpuConfiguration::default();
+    wgpu_options.surface.present_mode = if vsync { eframe::wgpu::PresentMode::AutoVsync } else { eframe::wgpu::PresentMode::AutoNoVsync };
+    wgpu_options.surface.desired_maximum_frame_latency = Some(1);
     let options = eframe::NativeOptions {
         // The icon picked in Preferences ▸ General, from the start.
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(root_size)
             .with_drag_and_drop(true)
             .with_icon(std::sync::Arc::new(app_icon.icon_data())),
+        wgpu_options,
         ..Default::default()
     };
     let result = eframe::run_native(
@@ -273,6 +355,9 @@ fn main() {
                 screenshot,
                 scripts,
                 model,
+                jam_hil: !jam_hil_presses.is_empty(),
+                jam_hil_presses,
+                jam_shot,
                 show_controller: false,
                 meter_inputs: true,
                 follow: true,
@@ -406,7 +491,7 @@ pub struct PluginView {
     /// The slot's plug-in (its id in the project) when made: another there drops it.
     plugin_id: String,
     /// The instance it reads (another in the slot rebuilds the view).
-    instance: std::sync::Weak<std::sync::Mutex<deckard_plugins::Plugin>>,
+    instance: std::sync::Weak<deckard_plugins::SharedPlugin>,
     pub error: Option<String>,
     /// Values DECKARD sent (parameter, value, when) the plug-in may not report yet.
     pub sent: Vec<(u32, f64, std::time::Instant)>,
@@ -490,9 +575,14 @@ fn saved_page_name(pg: &deckard_model::PluginPage) -> String {
 }
 
 /// The plug-in's own pages (DECKARD's: they follow the plug-in, even once saved for a
-/// macro), the pages saved with it, or Maschine's automatic ones: its first 128
+/// macro), the pages saved with it, or else its mapping's pages (`mapped`, from the
+/// controller scripts' `mappings/`) followed by Maschine's automatic ones: its first 128
 /// automatable parameters, eight per page.
-fn view_pages(p: &deckard_plugins::Plugin, saved: &[deckard_model::PluginPage]) -> Vec<ViewPage> {
+fn view_pages(
+    p: &deckard_plugins::Plugin,
+    saved: &[deckard_model::PluginPage],
+    mapped: Option<&[deckard_surface::widget::mapping::PageParams]>,
+) -> Vec<ViewPage> {
     let own = p.pages();
     if !own.is_empty() {
         let all = p.parameter_list(false);
@@ -533,13 +623,38 @@ fn view_pages(p: &deckard_plugins::Plugin, saved: &[deckard_model::PluginPage]) 
             .filter(|pg| !pg.knobs.is_empty())
             .collect()
     } else {
-        p.parameters()
-            .into_iter()
-            .take(128)
-            .collect::<Vec<_>>()
-            .chunks(8)
-            .map(|c| ViewPage::new(p, String::new(), c.iter().map(|i| (i.clone(), i.title.clone(), String::new())).collect()))
-            .collect()
+        let mut params = p.parameters();
+        // The mapping's pages first, in its order (each knob found by id, title or name);
+        // the parameters they leave follow, eight a page.
+        let mut pages = Vec::new();
+        for pg in mapped.unwrap_or_default() {
+            let knobs: Vec<_> = pg
+                .knobs
+                .iter()
+                .flatten()
+                .filter_map(|r| {
+                    let found =
+                        r.id.and_then(|id| params.iter().position(|i| i.id == id))
+                            .or_else(|| r.title.as_ref().and_then(|t| params.iter().position(|i| i.title.eq_ignore_ascii_case(t))))
+                            .or_else(|| params.iter().position(|i| r.knob.iter().any(|n| n.eq_ignore_ascii_case(&i.title))))?;
+                    let info = params.remove(found);
+                    Some((info.clone(), info.title.clone(), pg.name.clone()))
+                })
+                .collect();
+            if !knobs.is_empty() {
+                pages.push(ViewPage::new(p, pg.name.clone(), knobs));
+            }
+        }
+        let rest = 128usize.saturating_sub(pages.len() * 8);
+        pages.extend(
+            params
+                .into_iter()
+                .take(rest)
+                .collect::<Vec<_>>()
+                .chunks(8)
+                .map(|c| ViewPage::new(p, String::new(), c.iter().map(|i| (i.clone(), i.title.clone(), String::new())).collect())),
+        );
+        pages
     };
     name_unnamed_pages(&mut pages);
     pages
@@ -668,8 +783,12 @@ pub struct SaveDialog {
     pub library: String,
     pub folder: PathBuf,
     pub samples: bool,
+    /// Render an audio preview beside a sound for the browser to prehear.
+    pub preview: bool,
     /// The file is there: saving again replaces it.
     pub confirm_overwrite: bool,
+    /// Why the last Save didn't write it, shown in the dialog.
+    pub error: Option<String>,
 }
 
 /// A file saved: where, its tags, and whether with its samples.
@@ -680,6 +799,7 @@ pub struct Saved {
     path: PathBuf,
     info: mxprj::sound_info::SoundInfo,
     samples: bool,
+    preview: bool,
 }
 
 /// A slot's hosted plug-in whose preset saves as NKS ([`App::nks_plugin`]).
@@ -702,7 +822,7 @@ fn parse_list(text: &str) -> Vec<String> {
 }
 
 fn is_sample_file(p: &Path) -> bool {
-    p.extension().and_then(|e| e.to_str()).is_some_and(|e| ["wav", "aif", "aiff", "aifc"].contains(&e.to_ascii_lowercase().as_str()))
+    p.extension().and_then(|e| e.to_str()).is_some_and(|e| deckard_engine::sample::EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
 }
 
 fn new_zone(file: &Path, frames: usize, from: deckard_doc::ZoneFrom) -> deckard_doc::ZoneSpec {
@@ -749,12 +869,20 @@ fn open_output(settings: &settings::Settings, fallback: &mut Option<String>) -> 
     });
     // ASIO not being in use says more than which system device stood in.
     *fallback = no_asio.or(fallback.take());
-    let out = out?;
+    Ok(set_up_output(out?, settings))
+}
+
+/// An output just opened, with the settings' routing and timing.
+fn set_up_output(out: Output, settings: &settings::Settings) -> Output {
     out.set_routing(&settings.output_routing, settings.cv_mask());
     out.set_sample_accurate(settings.exact_timing);
     out.set_render_ahead(settings.render_ahead_ms as f64 / 1000.0);
-    Ok(out)
+    out
 }
+
+/// ASIO tried again after it didn't open: this often, this many times.
+const ASIO_RETRY_GAP: std::time::Duration = std::time::Duration::from_secs(3);
+const ASIO_RETRIES: u32 = 5;
 
 /// The interface input as Maschine's 32 input channels (Preferences ▸ Audio ▸
 /// Routing), frame by frame into `live`.
@@ -798,13 +926,25 @@ type VariationBase = ((usize, usize, usize), Vec<Note>, Vec<Note>);
 type InputKey = (Option<String>, Vec<Option<usize>>);
 
 /// The Variation and Generate settings (fields of a sound).
-const GROOVE_FIELDS: [&str; 17] = [
+const GROOVE_FIELDS: [&str; 28] = [
     "sequence_variation/velocity_amount",
     "sequence_variation/time_shift",
     "sequence_variation/length_scale",
     "sequence_variation/length_variation",
     "sequence_variation/distribution",
     "sequence_variation/live",
+    // The Variation page (work-item 35).
+    "sequence_variation/mode",
+    "sequence_variation/velocity_range/low",
+    "sequence_variation/velocity_range/high",
+    "sequence_variation/probability",
+    "sequence_variation/note_range/low",
+    "sequence_variation/note_range/high",
+    "sequence_variation/note_count",
+    "sequence_variation/steps",
+    "sequence_variation/dist/note_count",
+    "sequence_variation/dist/notes",
+    "sequence_variation/dist/note_length",
     "sequence_generation/mode",
     "sequence_generation/probability",
     "sequence_generation/velocity_amount",
@@ -817,6 +957,31 @@ const GROOVE_FIELDS: [&str; 17] = [
     "sequence_generation/rotate",
     "sequence_generation/division",
 ];
+
+/// The Variation page's short names (`deckard.variation`) as the sound's fields keep
+/// them (work-item 35).
+fn variation_field(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "mode" => "sequence_variation/mode",
+        "velocity_lo" => "sequence_variation/velocity_range/low",
+        "velocity_hi" => "sequence_variation/velocity_range/high",
+        "time_shift" => "sequence_variation/time_shift",
+        "probability" => "sequence_generation/probability",
+        "note_lo" => "sequence_generation/note_range/low",
+        "note_hi" => "sequence_generation/note_range/high",
+        "note_count" => "sequence_generation/note_count",
+        "steps" => "sequence_variation/steps",
+        "dist_note_count" => "sequence_variation/dist/note_count",
+        "dist_notes" => "sequence_variation/dist/notes",
+        "dist_note_length" => "sequence_variation/dist/note_length",
+        // Euclid's own, which the generator keeps under its module.
+        "euclid_steps" => "sequence_generation/steps",
+        "fills" => "sequence_generation/fills",
+        "rotate" => "sequence_generation/rotate",
+        "division" => "sequence_generation/division",
+        _ => return None,
+    })
+}
 
 /// The stem separation model's install, offered the first time DECKARD starts without
 /// it (the .deb and .rpm can't ask; a download of [`stems::MODEL_MB`] MB).
@@ -894,6 +1059,8 @@ pub struct App {
     sound: usize,
     /// SELECT's other sounds in the focused group (the focused one is always selected).
     sound_selection: Vec<usize>,
+    /// Anchor sound in the focused group for Shift+click range selection.
+    sound_anchor: Option<usize>,
     scene: usize,
     /// The section picked in the Song view: the song plays from it, or jumps to it
     /// when the playing section ends.
@@ -901,6 +1068,8 @@ pub struct App {
     /// The song panel shows the Song view (sections) instead of the Ideas view
     /// (scenes), as Maschine's IDEAS/SONG switch; PLAY follows it.
     song_view: bool,
+    /// The Song-mode loop range in ticks; this is transport state, not project data.
+    song_loop: Option<(i64, i64)>,
     /// The pattern editor shows the focused sound as a piano roll.
     piano_roll: bool,
     /// The scale notes are written in: (root note, MIDI 60 = C3; bank; scale in it), as
@@ -923,6 +1092,13 @@ pub struct App {
     midi_change: bool,
     /// The MIDI Monitor window shows (View ▸ MIDI Monitor), and its choices.
     midi_monitor: bool,
+    /// The Audio & CPU Monitor window shows.
+    audio_monitor: bool,
+    /// Cross-platform system/process sampler used by the diagnostics window.
+    system_info: sysinfo::System,
+    /// Last sampled system diagnostics, held steady between refreshes for readability.
+    system_diagnostics: Vec<(&'static str, String)>,
+    system_diagnostics_at: Option<std::time::Instant>,
     monitor_view: midi_monitor::View,
     /// File ▸ Export Audio's panel and the export it runs.
     export: export::ExportPanel,
@@ -932,8 +1108,10 @@ pub struct App {
     clip: Option<(usize, usize)>,
     /// When the controller's Settings ▸ Audio was last told the audio interface.
     audio_view_at: Option<std::time::Instant>,
-    /// What the own layer's Settings page shows, and when it was looked up.
+    /// What the own layer's Settings page shows, the settings it was built from (so a
+    /// change anywhere rebuilds it), and when its live part was last looked up.
     surface_settings: deckard_surface::SettingsView,
+    surface_settings_from: Option<crate::settings::Settings>,
     surface_settings_at: Option<std::time::Instant>,
     /// A Lock recall morphing its way.
     lock_morph: Option<lock::LockMorph>,
@@ -977,9 +1155,17 @@ pub struct App {
     pending_launch: Option<usize>,
     /// The note sounding while the mouse button is down: (group, sound, pitch).
     held: Option<(usize, usize, i64)>,
+    /// The note the Sampling page's PLAY holds (group, sound, pitch), until its STOP.
+    audition: Option<(usize, usize, i64)>,
+    /// The slice a pad plays (the prehear, which tells no position): when it started
+    /// and its frames.
+    prehear_from: Option<(std::time::Instant, usize, usize)>,
     /// Scripted pointer input (`--input`): (seconds after start, (m/d/u = move, down,
     /// up, position)).
     input_script: Vec<(f32, (char, egui::Pos2))>,
+    /// A drag out of the window took the mouse ([`drag_out`]): the button it never
+    /// hears come up is let go for egui.
+    drag_release: bool,
     /// Load the project's plug-ins once the window has drawn (they take a moment, and
     /// a press that waits for them isn't a click any more).
     preload_plugins: bool,
@@ -1000,6 +1186,9 @@ pub struct App {
     catalog: settings::Catalog,
     /// The browser (LIBRARY / FILES), and the library it shows.
     browser: browser::Browser,
+    /// The browser preview being decoded, if any; the generation drops stale decodes.
+    prehear_task: Option<(u64, std::sync::mpsc::Receiver<Result<deckard_engine::sample::Sample, String>>)>,
+    prehear_generation: u64,
     /// REC: recording (or armed, stopped), and the take being recorded.
     recording: bool,
     take: record::Take,
@@ -1037,6 +1226,8 @@ pub struct App {
     /// Where each sound, group and preset was last saved, with its tags (Save writes
     /// there again).
     saved: std::collections::HashMap<deckard_doc::FileItem, Saved>,
+    /// "Create audio preview" was unticked in the Save dialog (for the session).
+    preview_declined: bool,
     /// Maschine's user folder, when not the usual one (tests).
     user_dir_override: Option<PathBuf>,
     prefs: Option<usize>,
@@ -1086,16 +1277,28 @@ pub struct App {
     /// it's connected.
     jam: Option<jam_io::JamIo>,
     jam_device: Option<deckard_surface::device::Device>,
-    /// The JAM's script wants the Settings page's values (its REC MODE readout).
-    jam_settings_wanted: bool,
+    /// `--jam`: run the Jam's script, and press `jam_hil_presses` on it, with no Jam plugged
+    /// in — how the on-screen overlay and its window are looked at without hardware
+    /// (`docs/superpowers/plans/2026-11-21-jam-overlay.md`, "HIL").
+    jam_hil: bool,
+    jam_hil_presses: Vec<&'static str>,
+    /// `--jam-shot`: draw the strip window's content into the app's own viewport, so
+    /// `--screenshot` captures what that window shows. A second viewport is not in the main
+    /// one's picture, and Screen Recording is not always granted (`hil/strip-window-2026-11-21.md`).
+    jam_shot: bool,
     /// The last JAM script error shown.
     jam_error: Option<String>,
+    /// Same-frame `View` built by `mk3_events` and handed off to `jam_events` when
+    /// nothing changed in between, avoiding building `surface_view()` multiple times/frame.
+    frame_surface_view: Option<(SurfaceViewStamp, deckard_surface::View)>,
     /// MIDI controllers run by scripts (the Launchpad Pro); none found in tests.
     midi_devices: midi_devices::MidiDevices,
     /// The last MIDI controller script error shown.
     midi_device_error: Option<String>,
     /// Held while the app runs: macOS doesn't slow it in the background (C46).
     _running: Option<keep_running::Activity>,
+    /// Held while the song plays or something records: the computer stays awake.
+    awake: keep_running::StayAwake,
     /// Knob travel the controller's knobs have built up toward a stepped value's next step.
     knob_acc: [f64; 8],
     /// When each of the controller's knobs was last turned (a route's whole name shows
@@ -1105,8 +1308,11 @@ pub struct App {
     surface: deckard_surface::Surface,
     /// Its last script error, as shown in the status bar.
     surface_error: Option<String>,
-    /// Whether the MK3 showed its Browse page last frame (leaving it stops prehear).
+    /// Whether the MK3 showed its Browse page (or Quick Browse's list) last frame
+    /// (leaving it stops prehear).
     surface_was_browsing: bool,
+    /// Quick Browse's list shows on the MK3's Control page, for this group and sound.
+    quick_browse: Option<(usize, usize)>,
     /// The scripts' last screens sent to the MK3 (their draw count).
     mk3_screens_sent: u64,
     /// Commands sent to the output when the last edit went (see `follow_edits`).
@@ -1141,6 +1347,10 @@ pub struct App {
     /// Each plug-in's parameters (by chain and slot, with the plug-in's id), for the
     /// macros that control them.
     plugin_params: std::cell::RefCell<std::collections::HashMap<(deckard_doc::Chain, usize), (String, Vec<deckard_plugins::ParamInfo>)>>,
+    /// A stepped plug-in parameter's names as last read (by instance, id and steps):
+    /// [`App::knob_choices`] reads them with `try_lock`, and a frame that finds the
+    /// plug-in busy shows these rather than dropping the list for a dial.
+    step_names: std::cell::RefCell<std::collections::HashMap<(usize, u32, i32), Vec<String>>>,
     /// Open the focused sound's plug-in window one second after start-up
     /// (`--plugin-window`).
     pending_editor: bool,
@@ -1154,8 +1364,17 @@ pub struct App {
     fallback_told: Option<String>,
     asio_reopen_due: bool,
     asio_reopened: Option<std::time::Instant>,
+    /// ASIO wanted but not playing (often just after the computer wakes): when it was
+    /// last tried again, and how many times since the output was opened.
+    asio_retry: Option<(std::time::Instant, u32)>,
     /// The stem separation model offered at start-up: the question, then the install.
     stems_offer: Option<StemsOffer>,
+    /// TYPE: a mode asked for the sound (group, sound) that waits for its
+    /// confirmation (the change loses the sound's changes).
+    pub(crate) sampler_ask: Option<((usize, usize), deckard_model::new_sampler::SamplerMode)>,
+    /// In Layers, a take was picked on the sound (group, sound): EDIT works on it while
+    /// it is on no layer ([`App::shown_take`]).
+    pub(crate) take_shown: Option<(usize, usize)>,
     /// Asking to quit NI's agent, which holds the MK3's screens.
     ni_agent: ni_agent::Ask,
     /// Asking to stop NI's services, which fight DECKARD over a JAM's lights.
@@ -1206,9 +1425,17 @@ pub struct App {
     blinks: blink::Blinks,
     /// The (group, sound)s playing a note now, sequenced or live: their numbers flash.
     pub lit: std::collections::HashSet<(usize, usize)>,
+    /// The notes that have just started, sequenced or played, (group, sound, pitch): the
+    /// controller's pads flash white for them.
+    pub hits: std::collections::HashSet<(usize, usize, i64)>,
+    /// The (group, sound)s actively playing a loop in the engine now.
+    pub loop_lit: std::collections::HashSet<(usize, usize)>,
+    /// Live note pitches currently held per `(group, sound)`.
+    held_pitches: std::collections::HashMap<(usize, usize), Vec<i64>>,
     /// Sounds copied or cut from the sound menu, to paste.
     sound_clipboard: Vec<deckard_doc::SoundClip>,
     /// A copied group, as its group file.
+    plugin_clipboard: Option<deckard_doc::CopiedSlot>,
     group_clipboard: Option<Vec<u8>>,
     /// Notes cut or copied in the Pattern Editor.
     note_clip: Option<clipboard::NoteClip>,
@@ -1229,6 +1456,12 @@ pub struct App {
     hw_sampling_tab: Option<usize>,
     /// The stem separation running (EDIT ▸ STEMS; one at a time).
     stems: Option<stems::Job>,
+    /// The New Sampler's zones being analysed, and the document revision they were
+    /// last looked for at.
+    analysis: analysis::Jobs,
+    analysis_revision: Option<u64>,
+    /// The New Sampler's Sync and Keys renders being made.
+    renders: render_jobs::Renders,
     /// Where audio files dragged from the desktop are over the window, and those
     /// dropped this frame (they go to the sound row there: `drop_samples`).
     file_drag: Option<egui::Pos2>,
@@ -1251,6 +1484,12 @@ pub struct App {
     rec_base: Option<usize>,
     sampling: layout::sampling::SamplingState,
     recorder: recorder::Recorder,
+    /// Records the master output to a WAV file (File ▸ Session Record).
+    session: session_record::SessionRecorder,
+    /// The live session Recorder window is shown.
+    session_window_open: bool,
+    /// Whether the Recorder window floats above other windows (on by default).
+    session_window_pin: session_window::Pin,
     /// The Mixer is shown (instead of the work views), at sound level (the focused
     /// group's sounds) or group level, with its optional sections.
     mixer: bool,
@@ -1287,6 +1526,9 @@ pub struct App {
     recent: Vec<PathBuf>,
     /// What to do once the user has said what happens to unsaved changes.
     confirm: Option<Pending>,
+    /// The question's answer from the controller (0 save, 1 don't, 2 cancel), for the
+    /// dialog to act on.
+    confirm_choice: Option<u8>,
     /// Just updated to this release: asks whether to open its release notes.
     whats_new: Option<String>,
     /// The About box is open.
@@ -1315,6 +1557,15 @@ pub struct App {
     zhora_shown: std::cell::RefCell<Option<((usize, usize, usize), deckard_surface::ZhoraView)>>,
     /// The focused Tuner effect (chain, slot) as last shown, while the audio thread has it.
     tuner_shown: std::cell::RefCell<Option<((deckard_doc::Chain, usize), deckard_surface::TunerView)>>,
+    /// The focused synth's scope (chain, slot) as last shown, while the audio thread has it.
+    scope_shown: std::cell::RefCell<Option<((deckard_doc::Chain, usize), deckard_surface::ScopeView)>>,
+    /// A hosted plug-in's live output as its scope shows it: the slot, the instance tapped
+    /// (a reload makes a new one) and the tap's reader, and the picture last made.
+    live_scope: std::cell::RefCell<Option<zhora_ui::LiveScope>>,
+    /// The preview last rendered of an internal synth, with the module and the parameters
+    /// it was rendered from: rendered again only when they change.
+    internal_scope: std::cell::RefCell<Option<(String, Vec<(String, f64)>, deckard_surface::ScopeView)>>,
+    plugin_spectrum: std::cell::RefCell<Option<plugin_spectrum::Focus>>,
     /// When the Zhoras were last looked at for a finished Tune.
     tunes_watched: Option<std::time::Instant>,
 }
@@ -1341,7 +1592,33 @@ impl Started {
     }
 }
 
-fn save_png(path: &Path, image: &egui::ColorImage) -> Result<(), String> {
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 { format!("{bytes} B") } else { format!("{value:.1} {}", UNITS[unit]) }
+}
+
+fn format_duration(duration: std::time::Duration) -> String {
+    let seconds = duration.as_secs();
+    let days = seconds / 86_400;
+    let hours = seconds / 3_600 % 24;
+    let minutes = seconds / 60 % 60;
+    let seconds = seconds % 60;
+    if days > 0 {
+        format!("{days}d {hours}h {minutes}m")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m {seconds}s")
+    } else {
+        format!("{minutes}m {seconds}s")
+    }
+}
+
+pub(crate) fn save_png(path: &Path, image: &egui::ColorImage) -> Result<(), String> {
     let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
     let mut enc = png::Encoder::new(std::io::BufWriter::new(file), image.size[0] as u32, image.size[1] as u32);
     enc.set_color(png::ColorType::Rgba);
@@ -1373,6 +1650,21 @@ fn project_of_app(app: &App) -> deckard_model::Project {
     app.doc.as_ref().unwrap().borrow().project().clone()
 }
 
+#[cfg(test)]
+mod exit_screens {
+    use super::*;
+
+    /// Quitting asks the MK3 thread for a black frame. The thread itself is not started.
+    #[test]
+    fn quitting_blanks_the_maschine_screens() {
+        let mut app = App::default();
+        app.mk3 = Some(mk3_io::Mk3Io::detached());
+        eframe::App::on_exit(&mut app);
+        let px = app.mk3.as_ref().unwrap().queued_frame().expect("a frame is queued");
+        assert!(px.iter().all(|p| *p == [0, 0, 0, 255]));
+    }
+}
+
 /// How often notes held while recording are grown in the pattern.
 const TAKE_GROW: std::time::Duration = std::time::Duration::from_millis(100);
 
@@ -1382,7 +1674,7 @@ const PEAK_HOLD: std::time::Duration = std::time::Duration::from_millis(1500);
 /// How often [`App::background`] comes back while the song plays or the meters move:
 /// nothing is drawn then to hold it to the display's rate, so an immediate repaint would
 /// spin. The MK3's pace while playing (C46).
-const BACKGROUND_PACE: std::time::Duration = std::time::Duration::from_millis(16);
+pub(crate) const BACKGROUND_PACE: std::time::Duration = std::time::Duration::from_millis(16);
 
 /// How long after an edit the session is kept ([`App::keep_session`]).
 const SESSION_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
@@ -1525,9 +1817,13 @@ impl App {
 
     /// Let go of what belongs to the open document (playback, caches, plug-in views).
     fn leave_document(&mut self) {
+        self.sound_selection.clear();
+        self.sound_anchor = None;
         self.zone_of = None;
         self.lock_morph = None;
         self.lock_active = false;
+        self.looping = false;
+        self.song_loop = None;
         self.lock_plugins = Default::default();
         modulation::register();
         self.stop();
@@ -1583,6 +1879,8 @@ impl App {
             self.doc = Some(doc);
             self.error = None;
             (self.group, self.pattern, self.sound, self.scene) = (0, 0, 0, 0);
+            self.sound_selection.clear();
+            self.sound_anchor = None;
             self.section = None;
             self.focus_scene(0);
             self.restore_screen();
@@ -1628,6 +1926,7 @@ impl App {
                     d.reset_sound(g, s)?;
                     d.relabel_last("Cut Sound");
                     drop(d);
+                    self.saved.remove(&deckard_doc::FileItem::Sound(g, s));
                     self.samples.plugins.retain(|slot| {
                         !matches!(
                             slot,
@@ -1639,7 +1938,11 @@ impl App {
                     Ok(())
                 })
             }
-            Act::PasteSound(g, s) => doc.borrow_mut().paste_sounds(g, s, &self.sound_clipboard),
+            Act::PasteSound(g, s) => doc.borrow_mut().paste_sounds(g, s, &self.sound_clipboard).map(|_| {
+                for sound in s..s + self.sound_clipboard.len() {
+                    self.saved.remove(&deckard_doc::FileItem::Sound(g, sound));
+                }
+            }),
             Act::CopyGroup(g) => self.copy_group(g),
             Act::CutGroup(g) => self.copy_group(g).and_then(|_| {
                 self.delete_group(g)?;
@@ -1649,25 +1952,53 @@ impl App {
             Act::PasteGroup(g) => match &self.group_clipboard {
                 Some(bytes) => {
                     let mut d = doc.borrow_mut();
-                    d.load_group_file(g, bytes).map(|_| d.relabel_last("Paste Group"))
+                    d.load_group_file(g, bytes).map(|_| {
+                        d.relabel_last("Paste Group");
+                        self.forget_group_presets(g);
+                    })
                 }
                 None => Ok(()),
             },
             Act::DeleteGroup(g) => self.delete_group(g),
             Act::MoveGroup(g, to) => self.move_group(g, to),
             Act::ResetSound(g, s) => {
-                let r = doc.borrow_mut().reset_sound(g, s);
-                if r.is_ok() {
-                    self.samples.plugins.retain(|slot| {
-                        !matches!(
-                            slot,
-                            deckard_plugins::Slot::Sound { group, sound }
-                                | deckard_plugins::Slot::Chain { group, sound, .. }
-                                if *group == g && *sound == s
-                        )
+                let count = doc.borrow().project().groups.get(g).map_or(0, |gr| gr.sounds.len());
+                if let Some(sounds) = self.selected_sounds_for(g, s, count) {
+                    let r = doc.borrow_mut().transaction("Reset Sounds", |d| {
+                        for &si in &sounds {
+                            d.reset_sound(g, si)?;
+                        }
+                        Ok(())
                     });
+                    if r.is_ok() {
+                        for &si in &sounds {
+                            self.saved.remove(&deckard_doc::FileItem::Sound(g, si));
+                        }
+                        self.samples.plugins.retain(|slot| {
+                            !matches!(
+                                slot,
+                                deckard_plugins::Slot::Sound { group, sound }
+                                    | deckard_plugins::Slot::Chain { group, sound, .. }
+                                    if *group == g && sounds.contains(sound)
+                            )
+                        });
+                    }
+                    r
+                } else {
+                    let r = doc.borrow_mut().reset_sound(g, s);
+                    if r.is_ok() {
+                        self.saved.remove(&deckard_doc::FileItem::Sound(g, s));
+                        self.samples.plugins.retain(|slot| {
+                            !matches!(
+                                slot,
+                                deckard_plugins::Slot::Sound { group, sound }
+                                    | deckard_plugins::Slot::Chain { group, sound, .. }
+                                    if *group == g && *sound == s
+                            )
+                        });
+                    }
+                    r
                 }
-                r
             }
             Act::ExportMidi(g, s) => self.export_midi(g, s),
             Act::ImportMidi(g, s) => self.import_midi(g, s),
@@ -2123,6 +2454,17 @@ impl App {
         true
     }
 
+    /// The question about unsaved changes that waits, as the dialog words it, and
+    /// whether it's Revert's (nothing to save).
+    fn confirm_question(&self) -> Option<(String, bool)> {
+        let then = self.confirm.as_ref()?;
+        let name = self.path.as_ref().and_then(|p| p.file_stem()).map_or("the project".into(), |n| n.to_string_lossy().into_owned());
+        Some(match then {
+            Pending::Revert => (format!("Discard all changes to \"{name}\" since it was last saved?"), true),
+            _ => (format!("Save changes to \"{name}\"?"), false),
+        })
+    }
+
     fn dirty(&self) -> bool {
         self.doc.as_ref().is_some_and(|d| d.borrow().is_dirty())
     }
@@ -2327,12 +2669,15 @@ impl App {
             C::LockPanel => self.lock_panel = !self.lock_panel,
             C::MidiChange => self.midi_change = true,
             C::MidiMonitor => self.midi_monitor = !self.midi_monitor,
+            C::AudioMonitor => self.audio_monitor = !self.audio_monitor,
             C::ExportAudio => self.export.open = true,
             C::ExportMidi => {
                 if let Err(e) = self.export_song_midi(None) {
                     self.status = format!("can't export MIDI: {e}");
                 }
             }
+            C::SessionRecord => self.toggle_session_record(),
+            C::SessionRecorderWindow => self.session_window_open = !self.session_window_open,
             C::ShowController => self.show_controller = !self.show_controller,
             C::FullScreen => {
                 let full = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
@@ -2542,7 +2887,7 @@ impl App {
                 let got = out.block_frames() as u32;
                 if got > 0 && got != size {
                     ui.label("");
-                    ui.label(egui::RichText::new(format!("The interface uses {got} samples.")).weak());
+                    ui.add(egui::Label::new(egui::RichText::new(format!("The interface uses {got} samples.")).weak()).wrap());
                     ui.end_row();
                 }
                 ui.label("Audio load");
@@ -2575,7 +2920,7 @@ impl App {
                 hint += &format!(" Now: {n} sounds ahead, {late} times not ready.");
             }
             ui.label("");
-            ui.label(egui::RichText::new(hint).weak());
+            ui.add(egui::Label::new(egui::RichText::new(hint).weak()).wrap());
             ui.end_row();
             if ahead != self.settings.render_ahead_ms {
                 self.settings.render_ahead_ms = ahead;
@@ -2596,13 +2941,11 @@ impl App {
                 restart = true;
             }
         });
-        ui.label(
-            egui::RichText::new(
+        ui.add(egui::Label::new(egui::RichText::new(
                 "Larger buffers give heavy projects and plug-ins more room (fewer clicks); smaller ones make pads and keys respond sooner. \
                  \"Late\" blocks were heard as clicks.",
             )
-            .weak(),
-        );
+            .weak()).wrap());
         if size != self.settings.buffer_frames {
             self.settings.buffer_frames = size;
             restart = true;
@@ -2641,12 +2984,10 @@ impl App {
                 ui.label(format!("{}: {} Hz, {:?}, {latency:.1} ms from a block's start to the outputs, as the driver says", out.device, out.rate, out.format));
                 ui.end_row();
                 ui.label("");
-                ui.label(
-                    egui::RichText::new(
+                ui.add(egui::Label::new(egui::RichText::new(
                         "The driver has the last word on the buffer size and the rate. If it won't take the size below, set it in its own control panel: DECKARD follows.",
                     )
-                    .weak(),
-                );
+                    .weak()).wrap());
                 ui.end_row();
             }
         });
@@ -2666,9 +3007,18 @@ impl App {
     /// Close the audio output and whatever else holds the driver: playback stops.
     fn close_output(&mut self) {
         self.stop();
+        // Tearing down the `Output` drops the session recording's master tap. A device or
+        // buffer change at the SAME sample rate fires no RateChange, so clean-stop the
+        // session here (before the old `Output` is dropped) rather than let it pad pure
+        // silence for the rest of the set. `set_tap(None)` is moot: the `Output` is going.
+        if self.session.active() {
+            self.session.abort(session_record::StopReason::DeviceChange);
+            // The window stays open so it can show the "audio device changed" reason.
+        }
         self.output = None;
         self.midi_wired = false;
         self.live_input = None;
+        self.asio_retry = None;
         if deckard_engine::devices::driver() == deckard_engine::devices::AudioDriver::Asio {
             self.recorder.release_input();
         }
@@ -2723,6 +3073,49 @@ impl App {
         self.close_output();
         devices::rescan();
         self.open_output_now();
+    }
+
+    /// ASIO wanted but the system's driver standing in (or nothing playing): the driver
+    /// often isn't ready yet when the computer wakes, so try it again a few times, a few
+    /// seconds apart, keeping what plays until it opens. Not while the song plays or
+    /// anything records, which the switch would stop. An interface that stays away is
+    /// left alone after that (loading its driver holds the screen up a moment) until the
+    /// output is opened again.
+    fn retry_asio(&mut self) {
+        use deckard_engine::devices::{self, ASIO_BUILT, AudioDriver};
+        let missing = ASIO_BUILT
+            && self.settings.audio_driver == AudioDriver::Asio
+            && self.settings.asio_device.is_some()
+            && self.output.is_some()
+            && self.output_fallback.is_some();
+        if !missing {
+            self.asio_retry = None;
+            return;
+        }
+        let now = std::time::Instant::now();
+        let (last, tries) = *self.asio_retry.get_or_insert((now, 0));
+        if tries >= ASIO_RETRIES
+            || now.duration_since(last) < ASIO_RETRY_GAP
+            || self.asio_reopen_due
+            || self.playing.is_some()
+            || self.recorder.busy()
+            || self.session.active()
+        {
+            return;
+        }
+        self.asio_retry = Some((now, tries + 1));
+        devices::set_driver(AudioDriver::Asio);
+        match Output::with_device(self.settings.asio_device.as_deref(), self.settings.buffer_frames, self.settings.multicore) {
+            Ok(out) => {
+                // close_output lets the recorder's input go too, as ASIO is the driver now.
+                self.close_output();
+                self.output = Some(Ok(set_up_output(out, &self.settings)));
+                self.output_fallback = None;
+                self.asio_retry = None;
+                self.open_output_now();
+            }
+            Err(_) => devices::set_driver(AudioDriver::System),
+        }
     }
 
     fn audio_preferences(&mut self, ui: &mut egui::Ui) {
@@ -2810,7 +3203,7 @@ impl App {
             }
         }
         if ASIO_BUILT && self.settings.audio_driver == AudioDriver::Asio && self.settings.asio_device.is_none() {
-            ui.label(egui::RichText::new("Pick the ASIO driver of your interface.").weak());
+            ui.add(egui::Label::new(egui::RichText::new("Pick the ASIO driver of your interface.").weak()).wrap());
         }
         let channels_of =
             |devices: &[(String, usize)], d: &Option<String>| devices.iter().find(|(n, _)| Some(n) == d.as_ref()).map_or(0, |(_, c)| *c);
@@ -2838,19 +3231,29 @@ impl App {
         });
         ui.separator();
         ui.horizontal(|ui| {
+            ui.strong("Session recording").on_hover_text("File ▸ Record Session to File… records the master output to a WAV.");
+            ui.label("Keep free");
+            let mut mb = self.settings.session_reserve_mb;
+            let drag = egui::DragValue::new(&mut mb).range(0..=1_000_000).speed(64).suffix(" MB");
+            if ui.add(drag).changed() {
+                self.settings.session_reserve_mb = mb;
+                self.settings.save();
+            }
+            ui.label(egui::RichText::new("the recording auto-stops before the drive drops below this (1 GB = 1024 MB)").weak());
+        });
+        ui.separator();
+        ui.horizontal(|ui| {
             ui.strong("Routing");
             ui.selectable_value(&mut self.routing_outputs, false, "Input");
             ui.selectable_value(&mut self.routing_outputs, true, "Output");
         });
         let outs = self.routing_outputs;
-        ui.label(
-            egui::RichText::new(if outs {
+        ui.add(egui::Label::new(egui::RichText::new(if outs {
                 "Which channel of the interface each of DECKARD's outputs plays on. An alias names it wherever it's offered; one not connected isn't offered."
             } else {
                 "Which channel of the interface each of DECKARD's inputs reads. An alias names it wherever it's offered; one not connected isn't offered."
             })
-            .weak(),
-        );
+            .weak()).wrap());
         let before = (self.settings.output_routing.clone(), self.settings.output_cv_only.clone());
         let project = self.doc.as_ref().map(|d| d.borrow().project().clone()).unwrap_or_default();
         let (own, port, channels) = if outs { ("Out", "Output", out_channels) } else { ("In", "Input", in_channels) };
@@ -2939,7 +3342,7 @@ impl App {
         for (title, ports, prefix) in [("Inputs", &ins, "in:"), ("Outputs", &outs, "out:")] {
             ui.label(egui::RichText::new(title).strong());
             if ports.is_empty() {
-                ui.label(egui::RichText::new("No MIDI ports found").weak());
+                ui.add(egui::Label::new(egui::RichText::new("No MIDI ports found").weak()).wrap());
             }
             for name in ports {
                 let key = format!("{prefix}{name}");
@@ -3041,7 +3444,7 @@ impl App {
                 });
             }
         }
-        ui.label(egui::RichText::new(self.midi.status()).weak());
+        ui.add(egui::Label::new(egui::RichText::new(self.midi.status()).weak()).wrap());
     }
 
     /// The controllers' drum channels for the MIDI routing: each one's notes port (the
@@ -3099,7 +3502,12 @@ impl App {
                 .on_hover_text("Asks GitHub for DECKARD's latest release once per launch. Help ▸ About shows what it found.");
             ui.end_row();
             ui.label("");
-            ui.label(egui::RichText::new("File ▸ New starts from it: its groups, sounds, plug-ins, tempo and routing, untitled.").weak());
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new("File ▸ New starts from it: its groups, sounds, plug-ins, tempo and routing, untitled.").weak(),
+                )
+                .wrap(),
+            );
             ui.end_row();
         });
     }
@@ -3136,15 +3544,18 @@ impl App {
                     }
                 }
             });
-            ui.label(
-                egui::RichText::new(if cfg!(windows) {
-                    "The window and the taskbar show it. Shortcuts keep the icon they were installed with."
-                } else if cfg!(target_os = "macos") {
-                    "The Dock shows it while DECKARD runs; Finder keeps the app's own."
-                } else {
-                    "The window and the taskbar show it."
-                })
-                .weak(),
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(if cfg!(windows) {
+                        "The window and the taskbar show it. Shortcuts keep the icon they were installed with."
+                    } else if cfg!(target_os = "macos") {
+                        "The Dock shows it while DECKARD runs; Finder keeps the app's own."
+                    } else {
+                        "The window and the taskbar show it."
+                    })
+                    .weak(),
+                )
+                .wrap(),
             );
         });
     }
@@ -3157,7 +3568,15 @@ impl App {
         let mut library_change = None;
         let mut controller_change = None;
         let mut wine_action = None;
-        egui::Window::new("Preferences").collapsible(false).resizable(true).default_size([760.0, 700.0]).open(&mut open).show(ctx, |ui| {
+        let (fit, wide) = (crate::layout::dialog_max_height(ctx), crate::layout::dialog_max_width(ctx));
+        egui::Window::new("Preferences")
+            .collapsible(false)
+            .resizable(true)
+            .default_size([760.0f32.min(wide), 700.0f32.min(fit)])
+            .max_height(fit)
+            .max_width(wide)
+            .open(&mut open)
+            .show(ctx, |ui| {
             crate::layout::dialog_style(ui);
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut tab, 7, "General");
@@ -3167,11 +3586,19 @@ impl App {
                 ui.selectable_value(&mut tab, 5, "Library");
                 ui.selectable_value(&mut tab, 6, "Recording");
                 ui.separator();
-                ui.label(egui::RichText::new("Plug-ins:").weak());
+                ui.add(egui::Label::new(egui::RichText::new("Plug-ins:").weak()).wrap());
                 ui.selectable_value(&mut tab, 0, "Manager");
                 ui.selectable_value(&mut tab, 1, "Location");
             });
             ui.separator();
+            // Past the window's height the tab scrolls (a short screen). The Plug-in Manager's
+            // list scrolls by itself in the room left under its settings, and at least
+            // `LIST_MIN` (then the tab scrolls too: on Linux the Wine settings alone can be
+            // taller than a short screen).
+            const LIST_MIN: f32 = 160.0;
+            let view_h = ui.available_height();
+            egui::ScrollArea::vertical().id_salt(("prefs-tab", tab)).auto_shrink([false, false]).show(ui, |ui| {
+            let top = ui.cursor().top();
             if tab == 2 {
                 self.audio_preferences(ui);
             } else if tab == 7 {
@@ -3197,10 +3624,8 @@ impl App {
                         });
                     ui.end_row();
                     ui.label("");
-                    ui.label(
-                        egui::RichText::new("REC from a stop counts in this long first (SHIFT + REC on the controller: at least a bar).")
-                            .weak(),
-                    );
+                    ui.add(egui::Label::new(egui::RichText::new("REC from a stop counts in this long first (SHIFT + REC on the controller: at least a bar).")
+                            .weak()).wrap());
                     ui.end_row();
                     ui.label("Input Quantize");
                     ui.checkbox(&mut self.settings.input_quantize, "Snap recorded notes to the grid");
@@ -3208,7 +3633,7 @@ impl App {
                 });
             } else if tab == 5 {
                 ui.label("Folders of sound packs to list in the browser under Factory (each folder's name is its library).");
-                ui.label(egui::RichText::new("Maschine's own library is listed when it's installed; add packs here when it isn't.").weak());
+                ui.add(egui::Label::new(egui::RichText::new("Maschine's own library is listed when it's installed; add packs here when it isn't.").weak()).wrap());
                 let mut remove = None;
                 for d in &self.settings.library_folders {
                     ui.horizontal(|ui| {
@@ -3245,10 +3670,8 @@ impl App {
                     self.settings.pad_sensitivity = n;
                     ui.end_row();
                     ui.label("");
-                    ui.label(
-                        egui::RichText::new("How hard the MK3's pads must be pressed: higher, gentle presses play louder. The MK3 applies it, as with Maschine's Hardware > Pads.")
-                            .weak(),
-                    );
+                    ui.add(egui::Label::new(egui::RichText::new("How hard the MK3's pads must be pressed: higher, gentle presses play louder. The MK3 applies it, as with Maschine's Hardware > Pads.")
+                            .weak()).wrap());
                     ui.end_row();
                     // Velocity SCALING, as the MK3's own Settings page has it (Soft 3 … Hard 3):
                     // Maschine's measured curves (`mk3_io::pad_velocity`).
@@ -3263,10 +3686,8 @@ impl App {
                     self.settings.velocity_scaling = scaling;
                     ui.end_row();
                     ui.label("");
-                    ui.label(
-                        egui::RichText::new("The curve from pad pressure to velocity: Soft plays gentle hits louder, Hard needs harder ones. Maschine's curves, as in its Hardware > Pads.")
-                            .weak(),
-                    );
+                    ui.add(egui::Label::new(egui::RichText::new("The curve from pad pressure to velocity: Soft plays gentle hits louder, Hard needs harder ones. Maschine's curves, as in its Hardware > Pads.")
+                            .weak()).wrap());
                     ui.end_row();
                     // The two brightnesses are the MK3's own (its LEDs' level report, its
                     // displays' backlight byte), so they follow the model picked here rather
@@ -3279,7 +3700,7 @@ impl App {
                         self.settings.led_brightness = leds;
                         ui.end_row();
                         ui.label("");
-                        ui.label(egui::RichText::new("Every LED on the MK3, one level for the whole panel: Maschine's Hardware > LEDs.").weak());
+                        ui.add(egui::Label::new(egui::RichText::new("Every LED on the MK3, one level for the whole panel: Maschine's Hardware > LEDs.").weak()).wrap());
                         ui.end_row();
                         ui.label("Display brightness");
                         let mut displays = self.settings.display_brightness;
@@ -3287,11 +3708,11 @@ impl App {
                         self.settings.display_brightness = displays;
                         ui.end_row();
                         ui.label("");
-                        ui.label(egui::RichText::new("The MK3's two screens: Maschine's Hardware > Display.").weak());
+                        ui.add(egui::Label::new(egui::RichText::new("The MK3's two screens: Maschine's Hardware > Display.").weak()).wrap());
                         ui.end_row();
                         if self.mk3.is_none() {
                             ui.label("");
-                            ui.label(egui::RichText::new("Applies when the MK3 connects.").weak());
+                            ui.add(egui::Label::new(egui::RichText::new("Applies when the MK3 connects.").weak()).wrap());
                             ui.end_row();
                         }
                     }
@@ -3331,7 +3752,7 @@ impl App {
                         }
                         ui.end_row();
                         ui.label("");
-                        ui.label(egui::RichText::new("Windows screen driver lets DECKARD draw the screens. Maschine screen driver clears them and gives them back to Maschine.").weak());
+                        ui.add(egui::Label::new(egui::RichText::new("Windows screen driver lets DECKARD draw the screens. Maschine screen driver clears them and gives them back to Maschine.").weak()).wrap());
                         ui.end_row();
                     }
                     ui.label("Controller");
@@ -3352,7 +3773,26 @@ impl App {
                         controller_change = Some(choice);
                     }
                     ui.end_row();
-                    ui.label("Controller theme").on_hover_text("The MK3's screens, pads and groups.");
+                    ui.label("Desktop theme").on_hover_text("The software window. It does not change the hardware.");
+                    let mut desktop = self.settings.desktop_theme.clone();
+                    egui::ComboBox::from_id_salt("desktop-theme").selected_text(theme_name(&desktop)).show_ui(ui, |ui| {
+                        for t in self.surface.themes() {
+                            // Stock palettes are hardware themes. The window only has a look
+                            // for the hand-written themes, so the rest would be a no-op here.
+                            if deckard_surface::theme_file::source(&t).is_some() && t != desktop {
+                                continue;
+                            }
+                            let name = theme_name(&t);
+                            ui.selectable_value(&mut desktop, t, name);
+                        }
+                    });
+                    if desktop != self.settings.desktop_theme {
+                        self.settings.desktop_theme = desktop;
+                        self.settings.desktop_background = None;
+                        self.settings.desktop_text = None;
+                    }
+                    ui.end_row();
+                    ui.label("Hardware theme").on_hover_text("The Maschine's screens, pads and groups.");
                     let mut theme = self.settings.controller_theme.clone();
                     crate::layout::combo("controller-theme").selected_text(theme_name(&theme)).show_ui(ui, |ui| {
                         for t in self.surface.themes() {
@@ -3364,18 +3804,6 @@ impl App {
                         self.surface.set_lcd(&self.settings.lcd_mode);
                         self.surface.set_theme(&theme);
                         self.settings.controller_theme = self.surface.theme().to_string();
-                    }
-                    ui.end_row();
-                    ui.label("Desktop theme").on_hover_text("The software window. It does not change the controller.");
-                    let mut desktop = self.settings.desktop_theme.clone();
-                    egui::ComboBox::from_id_salt("desktop-theme").selected_text(theme_name(&desktop)).show_ui(ui, |ui| {
-                        for t in self.surface.themes() {
-                            let name = theme_name(&t);
-                            ui.selectable_value(&mut desktop, t, name);
-                        }
-                    });
-                    if desktop != self.settings.desktop_theme {
-                        self.settings.desktop_theme = desktop;
                     }
                     ui.end_row();
                     if self.settings.controller_theme == "lcd" || self.settings.desktop_theme == "lcd" {
@@ -3394,19 +3822,29 @@ impl App {
                         }
                         ui.end_row();
                     }
+                    theme_editor::show(ui, self);
                     ui.label("Maschine JAM");
                     ui.checkbox(&mut self.settings.relative_strips, "Relative level touchstrips").on_hover_text(
                         "On the mixer strips (LEVEL, AUX, SWING, TUNE, MACRO), a touch no longer sets the value where the finger lands, and a double tap no longer resets it: moving the finger changes the value by the distance moved, from where it was. CONTROL mode keeps absolute-fader behaviour. Off: a touch sets the value.",
                     );
                     ui.end_row();
                     ui.label("");
+                    if ui
+                        .checkbox(&mut self.settings.show_overlay, "Show the on-screen overlay")
+                        .on_hover_text(
+                            "The Jam's on-screen overlay — the page its script publishes (the OSO) — drawn in its own small window over the app. Off: the pages still run, so the encoders, the lights and every page behave as they ever did, but nothing is drawn. Switching it puts the window back beside the app. (The Jam's touchstrips are unaffected.)",
+                        )
+                        .changed()
+                    {
+                        self.settings.jam_strip_pos = None;
+                    }
+                    ui.end_row();
+                    ui.label("");
                     let found = if self.scripts.is_some() { "found" } else { "not found" };
-                    ui.label(
-                        egui::RichText::new(format!(
+                    ui.add(egui::Label::new(egui::RichText::new(format!(
                             "What runs the MK3: Maschine's controller scripts, from your own Maschine install ({found}), or DECKARD's own layer. Automatic uses the scripts when they're found."
                         ))
-                        .weak(),
-                    );
+                        .weak()).wrap());
                     ui.end_row();
                 });
             } else if tab == 0 {
@@ -3416,12 +3854,12 @@ impl App {
                     ui.checkbox(&mut self.settings.use_au, "Use Audio Units");
                 });
                 ui.checkbox(&mut self.settings.scan_on_start, "Rescan plug-ins at start-up");
-                ui.label(egui::RichText::new("VST2 plug-ins are listed but can't be hosted yet.").weak());
+                ui.add(egui::Label::new(egui::RichText::new("VST2 plug-ins are listed but can't be hosted yet.").weak()).wrap());
                 ui.horizontal(|ui| {
                     if ui.add_enabled(!self.catalog.scanning(), egui::Button::new("Rescan")).clicked() {
                         rescan = true;
                     }
-                    ui.label(egui::RichText::new(&self.catalog.status).weak());
+                    ui.add(egui::Label::new(egui::RichText::new(&self.catalog.status).weak()).wrap());
                 });
                 if cfg!(target_os = "linux") {
                     self.wine_section(ui, &mut wine_action);
@@ -3431,7 +3869,8 @@ impl App {
                 entries.sort_by(|a, b| {
                     (a.vendor.to_lowercase(), a.name.to_lowercase()).cmp(&(b.vendor.to_lowercase(), b.name.to_lowercase()))
                 });
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                let list_h = (view_h - (ui.cursor().top() - top)).max(LIST_MIN);
+                egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
                     egui::Grid::new("plugins").striped(true).num_columns(4).show(ui, |ui| {
                         ui.strong("On");
                         ui.strong("Plug-in");
@@ -3503,6 +3942,7 @@ impl App {
                     }
                 });
             }
+            });
         });
         if self.settings != before {
             self.settings.save();
@@ -3536,6 +3976,33 @@ impl App {
         }
     }
 
+    /// TYPE's question: a mode change keeps the sample shown and loses the rest.
+    fn sampler_mode_dialog(&mut self, ctx: &egui::Context) {
+        if self.sampler_ask.is_none() {
+            return;
+        }
+        let mut answer = None;
+        egui::Modal::new(egui::Id::new("sampler-mode")).show(ctx, |ui| {
+            crate::layout::fit_dialog(ui, |ui| {
+                crate::layout::dialog_style(ui);
+                ui.set_width(380.0);
+                ui.label(egui::RichText::new("Changing the mode loses all changes to this sound.").strong());
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("OK").clicked() {
+                        answer = Some(true);
+                    }
+                    if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        answer = Some(false);
+                    }
+                });
+            })
+        });
+        if let Some(ok) = answer {
+            self.answer_sampler_mode(ok);
+        }
+    }
+
     /// The unsaved-changes question and the About box.
     /// The offer to install the stem separation model, and the install it starts.
     fn stems_offer_dialog(&mut self, ctx: &egui::Context) {
@@ -3545,26 +4012,28 @@ impl App {
         match offer {
             StemsOffer::Asking => {
                 egui::Modal::new(egui::Id::new("stems-offer")).show(ctx, |ui| {
-                    crate::layout::dialog_style(ui);
-                    ui.set_width(420.0);
-                    ui.label(egui::RichText::new("Install stem separation?").strong());
-                    ui.add_space(4.0);
-                    ui.label(format!(
-                        "Sampling ▸ EDIT ▸ STEMS splits a sample into drums, bass, vocals and the rest with Meta's Demucs model, \
+                    crate::layout::fit_dialog(ui, |ui| {
+                        crate::layout::dialog_style(ui);
+                        ui.set_width(420.0);
+                        ui.label(egui::RichText::new("Install stem separation?").strong());
+                        ui.add_space(4.0);
+                        ui.label(format!(
+                            "Sampling ▸ EDIT ▸ STEMS splits a sample into drums, bass, vocals and the rest with Meta's Demucs model, \
                          a {} MB download that isn't bundled with DECKARD. It goes into DECKARD's settings folder.",
-                        stems::MODEL_MB
-                    ));
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new("If you skip this, DECKARD downloads it the first time you use STEMS.").weak());
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Install").clicked() {
-                            start = true;
-                        }
-                        if ui.button("Not now").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                            done = true;
-                        }
-                    });
+                            stems::MODEL_MB
+                        ));
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("If you skip this, DECKARD downloads it the first time you use STEMS.").weak());
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Install").clicked() {
+                                start = true;
+                            }
+                            if ui.button("Not now").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                done = true;
+                            }
+                        });
+                    })
                 });
             }
             StemsOffer::Installing(rx) => {
@@ -3585,12 +4054,14 @@ impl App {
                 }
                 if !done {
                     egui::Modal::new(egui::Id::new("stems-offer")).show(ctx, |ui| {
-                        crate::layout::dialog_style(ui);
-                        ui.set_width(420.0);
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label(format!("Downloading the stem separation model ({} MB)…", stems::MODEL_MB));
-                        });
+                        crate::layout::fit_dialog(ui, |ui| {
+                            crate::layout::dialog_style(ui);
+                            ui.set_width(420.0);
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(format!("Downloading the stem separation model ({} MB)…", stems::MODEL_MB));
+                            });
+                        })
                     });
                     ctx.request_repaint_after(std::time::Duration::from_millis(250));
                 }
@@ -3636,20 +4107,22 @@ impl App {
         if let Some(version) = self.whats_new.clone() {
             let mut choice = None;
             egui::Modal::new(egui::Id::new("whats-new")).show(ctx, |ui| {
-                crate::layout::dialog_style(ui);
-                ui.set_width(360.0);
-                ui.label(egui::RichText::new(format!("DECKARD was updated to {version}")).strong());
-                ui.add_space(4.0);
-                ui.label("Would you like to see the release notes?");
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if ui.button("See Release Notes").clicked() {
-                        choice = Some(true);
-                    }
-                    if ui.button("Not Now").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        choice = Some(false);
-                    }
-                });
+                crate::layout::fit_dialog(ui, |ui| {
+                    crate::layout::dialog_style(ui);
+                    ui.set_width(360.0);
+                    ui.label(egui::RichText::new(format!("DECKARD was updated to {version}")).strong());
+                    ui.add_space(4.0);
+                    ui.label("Would you like to see the release notes?");
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("See Release Notes").clicked() {
+                            choice = Some(true);
+                        }
+                        if ui.button("Not Now").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            choice = Some(false);
+                        }
+                    });
+                })
             });
             if let Some(open) = choice {
                 if open {
@@ -3658,37 +4131,38 @@ impl App {
                 self.whats_new = None;
             }
         }
+        // (An answer from the controller with no question left to answer is dropped.)
+        let answered = self.confirm_choice.take();
         if let Some(then) = self.confirm.clone() {
-            let name = self.path.as_ref().and_then(|p| p.file_stem()).map_or("the project".into(), |n| n.to_string_lossy().into_owned());
-            let question = match then {
-                Pending::Revert => format!("Discard all changes to \"{name}\" since it was last saved?"),
-                _ => format!("Save changes to \"{name}\"?"),
-            };
-            let mut choice = None;
+            let question = self.confirm_question().map_or_else(String::new, |q| q.0);
+            // (Revert has no Save to press.)
+            let mut choice = answered.filter(|c| *c != 0 || !matches!(then, Pending::Revert));
             egui::Modal::new(egui::Id::new("unsaved-changes")).show(ctx, |ui| {
-                crate::layout::dialog_style(ui);
-                ui.set_width(360.0);
-                ui.label(egui::RichText::new(question).strong());
-                ui.add_space(4.0);
-                ui.label("Your changes will be lost if you don't save them.");
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if matches!(then, Pending::Revert) {
-                        if ui.button("Revert").clicked() {
-                            choice = Some(1);
+                crate::layout::fit_dialog(ui, |ui| {
+                    crate::layout::dialog_style(ui);
+                    ui.set_width(360.0);
+                    ui.label(egui::RichText::new(question).strong());
+                    ui.add_space(4.0);
+                    ui.label("Your changes will be lost if you don't save them.");
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if matches!(then, Pending::Revert) {
+                            if ui.button("Revert").clicked() {
+                                choice = Some(1);
+                            }
+                        } else {
+                            if ui.button("Save").clicked() {
+                                choice = Some(0);
+                            }
+                            if ui.button("Don't Save").clicked() {
+                                choice = Some(1);
+                            }
                         }
-                    } else {
-                        if ui.button("Save").clicked() {
-                            choice = Some(0);
+                        if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            choice = Some(2);
                         }
-                        if ui.button("Don't Save").clicked() {
-                            choice = Some(1);
-                        }
-                    }
-                    if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        choice = Some(2);
-                    }
-                });
+                    });
+                })
             });
             match choice {
                 Some(0) => {
@@ -3707,6 +4181,7 @@ impl App {
             }
         }
         self.stems_offer_dialog(ctx);
+        self.sampler_mode_dialog(ctx);
         let holding = self.mk3.as_ref().is_some_and(mk3_io::Mk3Io::agent_holding);
         if let Some(failure) = ni_agent::take_failure() {
             self.status = failure;
@@ -3733,16 +4208,168 @@ impl App {
             );
         }
         self.preferences(ctx);
+        self.audio_monitor(ctx);
         if self.about.is_some() && !about::show(self, ctx) {
             self.about = None;
         }
     }
 
+    fn audio_monitor(&mut self, ctx: &egui::Context) {
+        if !self.audio_monitor {
+            return;
+        }
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.audio_monitor = false;
+            return;
+        }
+        let mut open = true;
+        let monitor_size = ctx.input(|input| input.viewport().monitor_size).unwrap_or(egui::vec2(900.0, 700.0));
+        let window_size = egui::vec2(420.0, (monitor_size.y - 48.0).max(300.0));
+        egui::Window::new("Audio & CPU Monitor")
+            .title_bar(false)
+            .open(&mut open)
+            .resizable(true)
+            .default_size(window_size)
+            .max_size(window_size)
+            .show(ctx, |ui| {
+                crate::layout::dialog_style(ui);
+                let available_height = ui.available_height();
+                egui::ScrollArea::vertical().auto_shrink([true, false]).max_height(available_height).show(ui, |ui| {
+                    if let Some(Ok(out)) = &self.output {
+                        use std::sync::atomic::Ordering::Relaxed;
+                        let stats = &out.stats;
+                        let value = |a: &std::sync::atomic::AtomicU64| a.load(Relaxed);
+                        ui.heading("Audio device");
+                        egui::Grid::new("audio-monitor-device").num_columns(2).show(ui, |ui| {
+                            ui.label("Driver");
+                            ui.label(out.driver.name());
+                            ui.end_row();
+                            ui.label("Device");
+                            ui.label(&out.device);
+                            ui.end_row();
+                            ui.label("Sample rate");
+                            ui.label(format!("{} Hz", out.rate));
+                            ui.end_row();
+                            ui.label("Buffer");
+                            ui.label(format!(
+                                "{} samples ({:.1} ms)",
+                                out.block_frames(),
+                                out.block_frames() as f64 / out.rate as f64 * 1000.0
+                            ));
+                            ui.end_row();
+                            ui.label("Reported latency");
+                            ui.label(format!("{:.1} ms", out.latency().as_secs_f64() * 1000.0));
+                            ui.end_row();
+                        });
+                        ui.separator();
+                        ui.heading("Audio thread");
+                        egui::Grid::new("audio-monitor-stats").num_columns(2).show(ui, |ui| {
+                            ui.label("Current load");
+                            ui.label(format!("{:.1} %", self.cpu_load * 100.0));
+                            ui.end_row();
+                            ui.label("Peak load");
+                            ui.label(format!("{:.1} %", value(&stats.peak_load) as f64 / 10.0));
+                            ui.end_row();
+                            ui.label("Callbacks");
+                            ui.label(value(&stats.callbacks).to_string());
+                            ui.end_row();
+                            ui.label("Late callbacks");
+                            ui.label(value(&stats.late).to_string());
+                            ui.end_row();
+                            ui.label("Missed blocks");
+                            ui.label(value(&stats.missed).to_string());
+                            ui.end_row();
+                            ui.label("Device errors / xruns");
+                            ui.label(value(&stats.device_errors).to_string());
+                            ui.end_row();
+                            ui.label("Queue-full events");
+                            ui.label(value(&stats.queue_full).to_string());
+                            ui.end_row();
+                        });
+                        ui.separator();
+                        ui.heading("Render-ahead");
+                        let (ahead, underruns) = out.telemetry(|t| (t.sounds_ahead, t.ahead_underruns));
+                        ui.label(format!("{ahead} sounds currently ahead; {underruns} not-ready events"));
+                        if let Some((threads, helped)) = out.render_threads() {
+                            ui.label(format!("{threads} render threads; {helped} worker-rendered jobs"));
+                        } else {
+                            ui.label("Render-ahead workers: off");
+                        }
+                    } else {
+                        ui.label("Audio output is not open.");
+                        ui.label("Start playback or open a browser preview to initialize it.");
+                    }
+                    ui.separator();
+                    ui.heading("System");
+                    for (label, value) in self.system_diagnostics() {
+                        ui.horizontal(|ui| {
+                            ui.label(label);
+                            ui.label(value);
+                        });
+                    }
+                });
+            });
+        self.audio_monitor = open;
+        if self.audio_monitor {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+    }
+
+    fn system_diagnostics(&mut self) -> Vec<(&'static str, String)> {
+        const SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+        if self.system_diagnostics_at.is_some_and(|at| at.elapsed() < SAMPLE_INTERVAL) {
+            return self.system_diagnostics.clone();
+        }
+        use sysinfo::{Pid, ProcessesToUpdate, System};
+        self.system_info.refresh_cpu_usage();
+        self.system_info.refresh_memory();
+        let pid = Pid::from_u32(std::process::id());
+        self.system_info.refresh_processes(ProcessesToUpdate::Some(&[pid]), false);
+        let mut diagnostics = Vec::new();
+        diagnostics.push(("System CPU", format!("{:.1} %", self.system_info.global_cpu_usage())));
+        diagnostics.push(("Logical CPUs", self.system_info.cpus().len().to_string()));
+        diagnostics.push(("Physical cores", System::physical_core_count().map_or_else(|| "unavailable".into(), |count| count.to_string())));
+        if let Some(process) = self.system_info.process(pid) {
+            diagnostics.push(("DECKARD CPU", format!("{:.1} %", process.cpu_usage())));
+            diagnostics.push(("Process memory", format_bytes(process.memory())));
+            diagnostics.push(("Virtual address space", format_bytes(process.virtual_memory())));
+            diagnostics.push(("Process threads", process.tasks().map_or_else(|| "unavailable".into(), |tasks| tasks.len().to_string())));
+        } else {
+            diagnostics.push(("DECKARD CPU", "unavailable".into()));
+            diagnostics.push(("Process memory", "unavailable".into()));
+            diagnostics.push(("Virtual address space", "unavailable".into()));
+            diagnostics.push(("Process threads", "unavailable".into()));
+        }
+        diagnostics.push((
+            "System memory",
+            format!("{} used / {} total", format_bytes(self.system_info.used_memory()), format_bytes(self.system_info.total_memory())),
+        ));
+        diagnostics.push(("Available memory", format_bytes(self.system_info.available_memory())));
+        diagnostics.push((
+            "Swap",
+            format!("{} used / {} total", format_bytes(self.system_info.used_swap()), format_bytes(self.system_info.total_swap())),
+        ));
+        diagnostics.push(("Uptime", format_duration(std::time::Duration::from_secs(System::uptime()))));
+
+        #[cfg(target_os = "linux")]
+        {
+            let load = std::fs::read_to_string("/proc/loadavg").ok().map(|s| s.split_whitespace().take(3).collect::<Vec<_>>().join(" "));
+            diagnostics.push(("Load average", load.unwrap_or_else(|| "unavailable".into())));
+        }
+        self.system_diagnostics = diagnostics;
+        self.system_diagnostics_at = Some(std::time::Instant::now());
+        self.system_diagnostics.clone()
+    }
+
     /// Play `mode`; the arrangement from the focused section.
     fn play(&mut self, mode: Mode) {
-        let start = match (mode, self.section) {
-            (Mode::Arrangement, Some(i)) => self.doc.as_ref().map_or(0, |d| d.borrow().project().section_start(i)),
-            _ => 0,
+        let start = if mode == Mode::Arrangement && self.looping {
+            self.song_loop.map_or(0, |(start, _)| start)
+        } else {
+            match (mode, self.section) {
+                (Mode::Arrangement, Some(i)) => self.doc.as_ref().map_or(0, |d| d.borrow().project().section_start(i)),
+                _ => 0,
+            }
         };
         self.play_from(mode, start);
     }
@@ -3773,6 +4400,11 @@ impl App {
             engine.sync_start_within(late);
         }
         engine.looping = looping;
+        if mode == Mode::Arrangement
+            && let Some((start, end)) = self.song_loop
+        {
+            engine.set_loop_range(start, end);
+        }
         engine.metronome = self.metronome;
         if start > 0 {
             engine.seek(start);
@@ -3844,8 +4476,22 @@ impl App {
     /// Loop on or off, for what plays now too.
     fn set_looping(&mut self, on: bool) {
         self.looping = on;
+        if on && self.song_view {
+            if let Some(doc) = &self.doc {
+                self.song_loop = Some((0, doc.borrow().project().arrangement_length().max(0)));
+            }
+        }
+        self.store_screen();
+        if let Some(doc) = &self.doc {
+            doc.borrow_mut().mark_unsaved();
+        }
         if let (Some(mode), Some(Ok(out))) = (self.playing, &self.output) {
             out.set_looping(self.loops(mode));
+            if mode == Mode::Arrangement
+                && let Some((start, end)) = self.song_loop
+            {
+                out.set_loop_range(start, end);
+            }
         }
         if let Some(Ok(c)) = &mut self.controller {
             c.set_looping(on);
@@ -4032,6 +4678,119 @@ impl App {
     fn focus_sound(&mut self, sound: usize) {
         self.sound = sound;
         self.sound_selection.clear();
+        self.sound_anchor = Some(sound);
+    }
+
+    /// Whether `sound` in `group` is part of the active sound selection (focused or secondary).
+    pub(crate) fn is_sound_selected(&self, group: usize, sound: usize) -> bool {
+        group == self.group && (sound == self.sound || self.sound_selection.contains(&sound))
+    }
+
+    /// When two or more sounds in `group` are selected and `sound` is among them, returns
+    /// all selected sound indices in `0..count` in pad order.
+    pub(crate) fn selected_sounds_for(&self, group: usize, sound: usize, count: usize) -> Option<Vec<usize>> {
+        if group != self.group || self.sound_selection.is_empty() || !self.is_sound_selected(group, sound) {
+            return None;
+        }
+        let out: Vec<usize> = (0..count).filter(|&s| s == self.sound || self.sound_selection.contains(&s)).collect();
+        (out.len() > 1).then_some(out)
+    }
+
+    /// Click a sound in the Sound list or Mixer strip header:
+    /// Shift+click selects the inclusive range from `sound_anchor` (or `self.sound`) to `sound`;
+    /// Cmd/Ctrl+click (`toggle`) adds or removes `sound`; plain click focuses `sound`.
+    pub(crate) fn click_sound(&mut self, sound: usize, shift: bool, toggle: bool) {
+        let n = self.group_len();
+        if sound >= n {
+            return;
+        }
+        if shift {
+            let anchor = self.sound_anchor.filter(|&a| a < n).unwrap_or(self.sound);
+            let (lo, hi) = (anchor.min(sound), anchor.max(sound));
+            self.sound = sound;
+            self.sound_selection = (lo..=hi).filter(|&s| s != sound).collect();
+            self.sound_anchor = Some(anchor);
+        } else if toggle {
+            if sound == self.sound {
+                if let Some(next) = self.sound_selection.pop() {
+                    self.sound = next;
+                    self.sound_anchor = Some(next);
+                }
+            } else if self.sound_selection.contains(&sound) {
+                self.sound_selection.retain(|&s| s != sound);
+            } else {
+                if !self.sound_selection.contains(&self.sound) {
+                    self.sound_selection.push(self.sound);
+                }
+                self.sound_selection.retain(|&s| s != sound);
+                self.sound = sound;
+                self.sound_anchor = Some(sound);
+            }
+        } else {
+            self.focus_sound(sound);
+        }
+    }
+
+    /// Move focus to `sound` while keeping the current multi-selection when `sound` is
+    /// already selected (e.g. opening a context menu on a selected sound).
+    pub(crate) fn focus_selected_sound(&mut self, sound: usize) {
+        let n = self.group_len();
+        if sound >= n {
+            return;
+        }
+        if self.is_sound_selected(self.group, sound) {
+            if sound != self.sound {
+                if !self.sound_selection.contains(&self.sound) {
+                    self.sound_selection.push(self.sound);
+                }
+                self.sound_selection.retain(|&s| s != sound);
+                self.sound = sound;
+            }
+        } else {
+            self.focus_sound(sound);
+        }
+    }
+
+    /// Apply a sound swing edit across all selected sounds when `s` is part of a multi-selection.
+    pub(crate) fn set_multi_sound_swing(&mut self, g: usize, s: usize, sw: deckard_model::Swing, exact: bool) -> bool {
+        use deckard_doc::Target;
+        use mxprj::decode::Value;
+        let Some(doc) = self.doc.clone() else { return false };
+        let count = doc.borrow().project().groups.get(g).map_or(0, |gr| gr.sounds.len());
+        let Some(sounds) = self.selected_sounds_for(g, s, count) else { return false };
+        let edits: Vec<(Target, &str, Value)> = {
+            let d = doc.borrow();
+            let p = d.project();
+            let Some(old) = p.groups.get(g).and_then(|gr| gr.sounds.get(s)).map(|snd| snd.swing) else { return false };
+            let mut out = Vec::new();
+            if exact || (sw.amount - old.amount).abs() > 1e-9 {
+                let delta = sw.amount - old.amount;
+                for &si in &sounds {
+                    let cur = p.groups[g].sounds[si].swing.amount;
+                    let amount = if exact { sw.amount } else { cur + delta }.clamp(0.0, 100.0);
+                    out.push((Target::Sound(g, si), "swing_amount", Value::Float(amount)));
+                }
+            }
+            if exact || sw.cycle != old.cycle {
+                let cycle = sw.cycle.clamp(0, 7);
+                for &si in &sounds {
+                    out.push((Target::Sound(g, si), "swing_cycle", Value::Int(cycle)));
+                }
+            }
+            if exact || sw.invert != old.invert {
+                let inv = sw.invert as i64;
+                for &si in &sounds {
+                    out.push((Target::Sound(g, si), "swing_invert", Value::Int(inv)));
+                }
+            }
+            out
+        };
+        if !edits.is_empty()
+            && let Err(e) = doc.borrow_mut().set_many("Swing", &edits)
+        {
+            self.status = format!("can't set swing: {e}");
+        }
+        true
     }
 
     fn group_len(&self) -> usize {
@@ -4054,14 +4813,20 @@ impl App {
             } else {
                 self.sound_selection.push(index);
             }
+            if self.sound_anchor.is_none() {
+                self.sound_anchor = Some(self.sound);
+            }
         } else if selected {
             if index != self.sound && !self.sound_selection.contains(&self.sound) {
                 self.sound_selection.push(self.sound);
             }
+            self.sound_selection.retain(|&s| s != index);
             self.sound = index;
+            self.sound_anchor = Some(index);
         } else {
             self.sound = index;
             self.sound_selection.clear();
+            self.sound_anchor = Some(index);
         }
     }
 
@@ -4069,11 +4834,15 @@ impl App {
     fn select_all_sounds(&mut self) {
         let n = self.group_len();
         self.sound_selection = (0..n).filter(|&s| s != self.sound).collect();
+        if self.sound_anchor.is_none() {
+            self.sound_anchor = Some(self.sound);
+        }
     }
 
     /// SELECT + NONE: only the focused sound stays selected.
     fn select_no_sounds(&mut self) {
         self.sound_selection.clear();
+        self.sound_anchor = Some(self.sound);
     }
 
     /// The pattern `group` plays in the focused scene.
@@ -4097,8 +4866,8 @@ impl App {
     }
 
     /// Progress (0..1) shown on the MK3 touchstrip: the focused group's pattern (or,
-    /// while growing an empty Auto-length take, resetting every bar when nothing was
-    /// recorded during that bar), or the current bar with no pattern.
+    /// while growing an empty Auto-length take, the bars since the first recorded one), or
+    /// the current bar with no pattern.
     fn strip_progress(&self, head: Option<Playhead>) -> Option<f64> {
         let (at, length) = self.pattern_at(self.group, head).or_else(|| self.bar_at(head))?;
         if self.recording
@@ -4106,18 +4875,32 @@ impl App {
             && self.group == grow.group
             && self.scene_pattern(self.group) == Some(grow.pattern)
         {
-            let rel = head
-                .and_then(|h| {
-                    let d = self.doc.as_ref()?.borrow();
-                    Self::mode_pattern_tick(d.project(), h.mode, h.position, grow.group, grow.pattern)
-                })
-                .unwrap_or(at);
-            return Some(grow.strip_progress(rel));
+            let d = self.doc.as_ref()?.borrow();
+            let p = d.project();
+            let rel = head.and_then(|h| Self::mode_pattern_tick(p, h.mode, h.position, grow.group, grow.pattern)).unwrap_or(at);
+            let pattern = p.groups.get(grow.group).and_then(|g| g.patterns.get(grow.pattern));
+            let first_note = pattern.and_then(|pt| pt.notes.iter().map(|n| n.position - pt.start).min());
+            return Some(grow.strip_progress(rel, first_note));
         }
         Some(at as f64 / length as f64)
     }
 
-    fn scene_pattern(&self, group: usize) -> Option<usize> {
+    /// Sound `s` of group `g`'s Audio plug-in loop switched on (its focused take) or off
+    /// in the pattern the group plays (the focused one, for the focused group with none),
+    /// as Maschine's step pad and the pattern editor's double-click do. One undo step.
+    fn toggle_audio_loop(&mut self, g: usize, s: usize) -> Result<(), String> {
+        let doc = self.doc.clone().ok_or("no project")?;
+        let pi = self.scene_pattern(g).or((g == self.group).then_some(self.pattern)).ok_or("the group plays no pattern")?;
+        let mut d = doc.borrow_mut();
+        let p = d.project();
+        let snd = p.groups.get(g).and_then(|x| x.sounds.get(s)).ok_or("no such sound")?;
+        let take = snd.audio.as_ref().ok_or("the sound has no Audio plug-in")?.focused;
+        let pattern = p.groups[g].patterns.get(pi).ok_or("no such pattern")?;
+        let on = pattern.audio.iter().any(|c| c.sound == s);
+        if on { d.set_audio_in(g, s, &[pi], None, "Audio Off") } else { d.set_audio_in(g, s, &[pi], Some(take), "Audio On") }
+    }
+
+    pub(crate) fn scene_pattern(&self, group: usize) -> Option<usize> {
         let d = self.doc.as_ref()?.borrow();
         let s = d.project().scenes.get(self.scene)?;
         s.patterns.iter().find(|(g, _)| *g == group).map(|&(_, pi)| pi)
@@ -4542,6 +5325,19 @@ impl App {
         self.sync_transport();
     }
 
+    pub(crate) fn set_song_loop(&mut self, start: i64, end: i64) {
+        let Some(doc) = self.doc.clone() else { return };
+        let length = doc.borrow().project().arrangement_length().max(0);
+        let start = start.clamp(0, length);
+        let end = end.clamp(start, length);
+        self.song_loop = Some((start, end));
+        self.store_screen();
+        doc.borrow_mut().mark_unsaved();
+        if let (Some(Mode::Arrangement), Some(Ok(out))) = (self.playing, &self.output) {
+            out.set_loop_range(start, end);
+        }
+    }
+
     /// A knob moved while writing modulation (docs/superpowers/plans/
     /// 2026-10-22-phase2c-modulation.md): with the song at `head` (mode, tick), its
     /// deviation from the knob's own value goes into the playing pattern of its
@@ -4709,6 +5505,78 @@ impl App {
             return Some((self.knob_travel(doc.project(), chain, &target)? + dev).clamp(0.0, 1.0));
         }
         self.mod_amount(edit).map(f64::from)
+    }
+
+    /// What knob `k` of the page shows with its parameter at `at` (0..1): the plug-in's
+    /// own text for a hosted one, the module's for a built-in one. `None` where it can't say.
+    /// The values a knob's parameter picks among, if it's a choice of a few (at most
+    /// six): DECKARD's choices and switches by name, a plug-in's stepped parameter by its
+    /// text at each step. Empty otherwise (the MK3 draws a dial, or nothing, over it).
+    fn knob_choices(&self, edit: layout::Edit) -> Vec<String> {
+        use layout::Edit;
+        const MAX: usize = 6;
+        let stepped = |chain: deckard_doc::Chain, slot: usize, id: u32| -> Option<Vec<String>> {
+            let v = self.plugin_views.get(&(chain, slot))?;
+            let page = v.pages.get(v.page)?;
+            let i = page.knobs.iter().position(|(info, ..)| info.id == id)?;
+            if let Some(names) = page.choices.get(i).filter(|c| !c.is_empty()) {
+                return Some(names.clone());
+            }
+            let steps = page.knobs[i].0.steps;
+            if !(1..MAX as i32).contains(&steps) {
+                return None;
+            }
+            let inst = self.samples.plugins.existing(self.plugin_slot_key(chain, slot))?;
+            let key = (std::sync::Arc::as_ptr(&inst) as *const () as usize, id, steps);
+            let Ok(p) = inst.try_lock() else { return self.step_names.borrow().get(&key).cloned() };
+            let names: Vec<String> = (0..=steps).map(|s| p.param_text(id, f64::from(s) / f64::from(steps)).trim().to_string()).collect();
+            self.step_names.borrow_mut().insert(key, names.clone());
+            Some(names)
+        };
+        let names = match edit {
+            Edit::Choice(_, _, names, ..) => Some(names.iter().map(|s| s.to_string()).collect()),
+            Edit::Toggle(..) => Some(vec!["Off".to_string(), "On".to_string()]),
+            Edit::PluginChoice(slot, id, ..) | Edit::Plugin(slot, id, _) => stepped(self.chain(), slot, id),
+            Edit::PluginIn(c, i, id, _) => stepped(c, i, id),
+            _ => None,
+        };
+        names.filter(|n: &Vec<String>| (2..=MAX).contains(&n.len())).unwrap_or_default()
+    }
+
+    fn mod_text(&self, edit: layout::Edit, k: usize, at: f64) -> Option<String> {
+        use layout::Edit;
+        let (chain, target) = modulation::mod_target(edit)?;
+        let slot_i = target.slot?;
+        if let Edit::PluginIn(c, i, id, _) = edit {
+            let inst = self.samples.plugins.existing(self.plugin_slot_key(c, i))?;
+            let text = inst.try_lock().ok()?.param_text(id, at);
+            let units = self
+                .plugin_views
+                .get(&(c, i))
+                .and_then(|v| v.pages.get(v.page)?.knobs.iter().find(|(info, ..)| info.id == id))
+                .map(|(info, ..)| info.units.clone())
+                .unwrap_or_default();
+            return Some(if units.is_empty() || text.ends_with(&units) { text } else { format!("{text} {units}") });
+        }
+        let layout::Act::SetParam(t, field, value) = edit.to_act(at as f32) else { return None };
+        let doc = self.doc.as_ref()?.borrow();
+        let p = doc.project();
+        let slots = match chain {
+            deckard_doc::Chain::Sound(g, s) => &p.groups.get(g)?.sounds.get(s)?.slots,
+            deckard_doc::Chain::Group(g) => &p.groups.get(g)?.slots,
+            deckard_doc::Chain::Master => return None,
+        };
+        let pg = if let deckard_doc::Target::Sampler(g, s) = t {
+            let mut smp = p.groups.get(g)?.sounds.get(s)?.sampler.clone()?;
+            smp.set(field, value);
+            sampler_ui::page(&smp, g, s, self.sampler_page.min(sampler_ui::PAGES.len() - 1))
+        } else {
+            let mut slot = slots.get(slot_i)?.clone();
+            slot.params.iter_mut().find(|(f, _)| f == field)?.1 = value;
+            let names = crate::module_ui::pages(&slot.module)?;
+            module_ui::page_for(&slot, t, self.plugin_page.min(names.len().saturating_sub(1)))
+        };
+        pg.slots.into_iter().nth(k).flatten().map(|knob| knob.1)
     }
 
     /// Auto-write: the MK3's AUTO and the header's are one switch. The knob being
@@ -5052,7 +5920,6 @@ impl App {
         let mut grow = record::Grow::new(g, pi, bar);
         grow.before = len;
         if let Some(rel) = rel {
-            grow.advance_bar(rel);
             let _ = grow.reach(rel);
         }
         if doc.borrow_mut().set_pattern_length(g, pi, grow.length()).is_ok() {
@@ -5253,13 +6120,10 @@ impl App {
             }
             Self::mode_pattern_tick(p, mode, tick, g, pi)
         };
-        if let Some(rel) = rel {
-            grow.advance_bar(rel);
-            if let Some(len) = grow.reach(rel)
-                && let Err(e) = doc.borrow_mut().set_pattern_length(g, pi, len)
-            {
-                self.status = format!("can't grow the pattern: {e}");
-            }
+        if let Some(len) = rel.and_then(|rel| grow.reach(rel))
+            && let Err(e) = doc.borrow_mut().set_pattern_length(g, pi, len)
+        {
+            self.status = format!("can't grow the pattern: {e}");
         }
     }
 
@@ -5338,6 +6202,9 @@ impl App {
             return None;
         }
         let pace = controller::tick_every(self.playing.is_some() || self.recorder.busy() || self.recorder.is_metering());
+        if self.plugin_spectrum.borrow().as_ref().is_some_and(plugin_spectrum::Focus::is_live) {
+            return Some(pace.min(plugin_spectrum::FRAME_INTERVAL));
+        }
         Some(if self.surface.holding() || self.surface.animates() || self.filter_modulates() || self.picture_moves() {
             pace.min(std::time::Duration::from_millis(30))
         } else {
@@ -5401,6 +6268,7 @@ impl App {
             side_live: shot.side_live,
             dim: shot.dim,
             preview: shot.preview,
+            ..Default::default()
         })
     }
 
@@ -5437,6 +6305,21 @@ impl App {
         }
     }
 
+    pub(crate) fn surface_view_stamp(&self) -> SurfaceViewStamp {
+        (
+            self.doc.as_ref().map(|d| (std::rc::Rc::as_ptr(d) as usize, d.borrow().revision())),
+            self.group,
+            self.sound,
+            self.scene,
+            self.section,
+            self.song_view,
+            self.slot,
+            self.slot_of,
+            self.plugin_focus.and_then(|k| self.plugin_views.get(&k)).map(|v| (v.key, v.shown, v.refreshed)),
+            !self.surface_settings.values.is_empty(),
+        )
+    }
+
     /// Maschine's scripts are showing their Mixer page, when that page id exists.
     fn hardware_shows_mixer(host: &deckard_lua_host::Host) -> Option<bool> {
         let page = host.constant("NI.HW.PAGE_MIXER").ok()?;
@@ -5456,12 +6339,26 @@ impl App {
         // The group's sounds' Pad Touch, for what their held pads' pressure sends.
         let touches = |app: &App, group: usize| {
             let mut t = [deckard_model::pad_touch::PadTouch::default(); 16];
-            if let Some(g) = app.doc.as_ref().and_then(|d| d.borrow().project().groups.get(group).cloned()) {
+            if let Some(d) = &app.doc
+                && let Some(g) = d.borrow().project().groups.get(group)
+            {
                 for (t, s) in t.iter_mut().zip(&g.sounds) {
                     *t = s.pad_touch;
                 }
             }
             t
+        };
+        // The group's sounds' base keys: the note each pad plays in Pad mode.
+        let base_keys = |app: &App, group: usize| {
+            let mut k = [60; 16];
+            if let Some(d) = &app.doc
+                && let Some(g) = d.borrow().project().groups.get(group)
+            {
+                for (k, s) in k.iter_mut().zip(&g.sounds) {
+                    *k = s.channel.base_key.clamp(0, 127);
+                }
+            }
+            k
         };
         let mut mixer_on = None;
         let out = if let Some(Ok(c)) = &mut self.controller {
@@ -5508,7 +6405,17 @@ impl App {
             }
             let scaling = self.settings.velocity_scaling;
             let pin_changed = c.sync_pins(&mut self.settings.pinned_pages);
-            let route = mk3_io::PadRoute { play, group, keys, chords, velocity, scaling, fixed, touches: touches(self, group) };
+            let route = mk3_io::PadRoute {
+                play,
+                group,
+                keys,
+                chords,
+                velocity,
+                scaling,
+                fixed,
+                touches: touches(self, group),
+                base_keys: base_keys(self, group),
+            };
             if pin_changed {
                 #[cfg(not(test))]
                 self.settings.save();
@@ -5574,8 +6481,10 @@ impl App {
                 scaling: self.settings.velocity_scaling,
                 fixed: fixed.clamp(0, 127),
                 touches: touches(self, self.group),
+                base_keys: base_keys(self, self.group),
             };
-            Mk3Out { route, leds, screens: screens.map(|(n, p)| (n, mk3_io::ScreenFrame::Picture(p))) }
+            self.frame_surface_view = Some((self.surface_view_stamp(), view));
+            Mk3Out { route, leds, screens: screens.map(|(n, p)| (n, mk3_io::ScreenFrame::Picture(std::sync::Arc::new(p)))) }
         };
         if let Some(on) = mixer_on {
             self.set_mixer(on);
@@ -5681,9 +6590,11 @@ impl App {
             }
             _ => text.to_string(),
         };
+        let mod_at: Vec<Option<f64>> = (0..8).map(|i| edits.get(i).copied().flatten().and_then(|e| self.mod_position(e))).collect();
         let control = ControlView {
             level: c.level,
             modules_visible: c.modules_visible,
+            quick_browse: self.quick_browse.is_some(),
             page_group: c.page_group,
             page_groups: c.page_groups,
             slot: c.focus_slot.and_then(|i| c.slots.get(i)).map(|s| s.name.clone()),
@@ -5708,6 +6619,17 @@ impl App {
                 .enumerate()
                 .map(|(i, k)| {
                     k.as_ref().map(|k| KnobView {
+                        mod_position: mod_at[i],
+                        mod_text: mod_at[i].and_then(|at| edits.get(i).copied().flatten().and_then(|e| self.mod_text(e, i, at))),
+                        choices: edits.get(i).copied().flatten().map(|e| self.knob_choices(e)).unwrap_or_default(),
+                        param_id: match edits.get(i).copied().flatten() {
+                            Some(
+                                layout::Edit::Plugin(_, id, _)
+                                | layout::Edit::PluginChoice(_, id, ..)
+                                | layout::Edit::PluginIn(_, _, id, _),
+                            ) => Some(id),
+                            _ => None,
+                        },
                         name: k.name.clone(),
                         section: k.section.clone(),
                         text: knob_text(i, &k.text),
@@ -5725,14 +6647,20 @@ impl App {
             eq: None,
             filter: None,
             picture: None,
+            output_spectrum: Vec::new(),
             zhora: None,
             tuner: None,
+            scope: None,
             euclid: self.euclid_view(c.level, c.page, head),
             random: self.random_view(c.level, c.page, head),
         };
         let mut v = View {
+            ask: self.confirm_question().map(|(question, revert)| deckard_surface::AskView { question, revert }),
             recent: self.recent.iter().map(|p| p.file_stem().map_or_else(String::new, |n| n.to_string_lossy().into_owned())).collect(),
             settings: self.surface_settings.clone(),
+            // (The strip hides while this is open, so a script declines an ENCODER press there.)
+            browser_open: self.browser.open,
+            page: self.surface.page(),
             lock: self.lock_view(),
             // (The waves' pictures, and the mod matrix's slots, only while their pages show.)
             lfos: self.lfo_views(self.surface.page() == "lfo"),
@@ -5757,8 +6685,9 @@ impl App {
             sampling: self.sampling_surface_view(),
             ..Default::default()
         };
-        // (Only while BROWSE shows, or the JAM has the panel open: the results can be long.)
-        if self.surface.page() == "browse" || (self.jam_device.is_some() && self.browser.open) {
+        // (Only while BROWSE or Quick Browse's list shows, or the JAM has the panel open:
+        // the results can be long.)
+        if self.surface.page() == "browse" || self.quick_browse.is_some() || (self.jam_device.is_some() && self.browser.open) {
             let b = self.browser.view();
             for name in &b.products {
                 plugin_pictures::ensure_browser_product(&self.surface, name);
@@ -5777,14 +6706,18 @@ impl App {
                 patterns: b.patterns,
             };
         }
-        let Some(doc) = &self.doc else { return v };
+        let Some(doc) = &self.doc else {
+            self.plugin_spectrum.borrow_mut().take();
+            return v;
+        };
         let d = doc.borrow();
         let p = d.project();
+        let chain = self.chain();
+        let slot = d.chain_slots(chain).and_then(|slots| self.slot.and_then(|i| slots.get(i)));
+        (v.control.eq, v.control.output_spectrum) = self.plugin_spectrum_view(chain, self.slot.zip(slot));
         v.tempo = self.playing_scene_tempo(p).map_or(p.tempo, |t| t.1);
         // The built-in EQ's or Filter's curve, for the right screen. Both pages use it.
         if !self.channel {
-            let slot = d.chain_slots(self.chain()).and_then(|slots| self.slot.and_then(|i| slots.get(i)));
-            v.control.eq = slot.and_then(Self::eq_curve);
             let tempo = v.tempo;
             let live = self.slot.is_some_and(|i| Self::sidechain_routed(p, self.chain(), i));
             v.control.filter = slot.and_then(|s| Self::filter_curve(s, tempo, live));
@@ -5794,6 +6727,7 @@ impl App {
             if self.surface.page() == "control" {
                 v.control.zhora = self.zhora_view(p);
                 v.control.tuner = self.tuner_view();
+                v.control.scope = self.scope_view();
             }
         }
         v.project = p.name.clone();
@@ -5812,6 +6746,30 @@ impl App {
         v.velocity = d.num(deckard_doc::Target::Song, "fixed_velocity").map_or(100, |v| (v as i64).clamp(0, 127));
         (_, v.scale_bank, v.scale_kind) = self.scale;
         let song = |field: &str, default: f64| d.num(deckard_doc::Target::Song, field).unwrap_or(default) as i64;
+        // The focused sound's Variation page (work-item 35).
+        v.variation = self.doc.as_ref().map(|doc| {
+            let d = doc.borrow();
+            let x = d.variation(self.group, self.sound);
+            deckard_surface::VariationView {
+                mode: x.mode,
+                velocity_lo: x.velocity_lo,
+                velocity_hi: x.velocity_hi,
+                time_shift: x.time_shift,
+                probability: x.probability,
+                note_lo: x.note_lo,
+                note_hi: x.note_hi,
+                note_count: x.note_count,
+                steps: x.steps,
+                dist_note_count: x.dist_note_count,
+                dist_notes: x.dist_notes,
+                dist_note_length: x.dist_note_length,
+                euclid_steps: d.groove_setting(self.group, self.sound, "sequence_generation/steps").unwrap_or(8.0) as i64,
+                fills: d.groove_setting(self.group, self.sound, "sequence_generation/fills").unwrap_or(5.0) as i64,
+                rotate: d.groove_setting(self.group, self.sound, "sequence_generation/rotate").unwrap_or(0.0) as i64,
+                division: d.groove_setting(self.group, self.sound, "sequence_generation/division").unwrap_or(0.0) as i64,
+                keyboard: self.piano_roll,
+            }
+        });
         v.grid = deckard_surface::GridView {
             perform: song("perform_grid", 5.0),
             arrange: song("arrange_grid", 0.0),
@@ -5911,12 +6869,35 @@ impl App {
             .collect();
         v.section = self.focused_section(p);
         let bar = (p.numerator.max(1) * 3840 / p.denominator.max(1)).max(1) as f64;
+        let (has_live_engine, out_is_current) = match &self.output {
+            Some(Ok(out)) if out.has_engine() => (true, out.is_current()),
+            _ => (false, false),
+        };
+        let active_mode = self.playing.map(|m| live.map_or(m, |h| h.mode));
         v.groups = (0..p.groups.len())
             .map(|g| {
                 let grp = &p.groups[g];
                 let loudest = (0..grp.sounds.len()).map(|s| meter(g, s)).fold((0f32, 0f32), |m, x| (m.0.max(x.0), m.1.max(x.1)));
                 // The sounds with notes in any of the group's patterns.
                 let noted = doc_cache.group_noted.get(g);
+                let scene_pattern = p.scenes.get(self.scene).and_then(|sc| sc.patterns.iter().find(|(pg, _)| *pg == g).map(|&(_, pi)| pi));
+                let loop_pattern = match active_mode {
+                    Some(Mode::Pattern(pg, pi)) => (pg == g).then(|| grp.patterns.get(pi)).flatten(),
+                    Some(Mode::Scene(sc)) => {
+                        p.scenes.get(sc).and_then(|s| s.patterns.iter().find(|&&(pg, _)| pg == g)).and_then(|&(_, pi)| grp.patterns.get(pi))
+                    }
+                    Some(Mode::Arrangement) => head
+                        .and_then(|h| p.section_at(h.position as i64))
+                        .and_then(|i| p.sections[i].scene)
+                        .and_then(|sc| p.scenes.get(sc))
+                        .and_then(|s| s.patterns.iter().find(|&&(pg, _)| pg == g))
+                        .map(|&(_, pi)| pi)
+                        .or(scene_pattern)
+                        .and_then(|pi| grp.patterns.get(pi)),
+                    None => scene_pattern.or((g == self.group).then_some(self.pattern)).and_then(|pi| grp.patterns.get(pi)),
+                };
+                let group_ahead = self.settings.render_ahead_ms > 0 && g != self.group;
+                let pat_at = if v.playing { self.pattern_at(g, head).map(|(at, _)| at) } else { None };
                 GroupView {
                     name: grp.name.clone(),
                     rgb: layout::rgb(p, g, None),
@@ -5954,7 +6935,7 @@ impl App {
                             slot: pt.slot,
                         })
                         .collect(),
-                    scene_pattern: p.scenes.get(self.scene).and_then(|sc| sc.patterns.iter().find(|(pg, _)| *pg == g).map(|&(_, pi)| pi)),
+                    scene_pattern,
                     progress: head.and_then(|_| layout::group_progress(p, head, self.scene, g)).map(|(bars, played)| played / bars as f64),
                     playing_progress: head
                         .and_then(|h| {
@@ -5965,6 +6946,8 @@ impl App {
                     sounds: (0..grp.sounds.len())
                         .map(|s| {
                             let snd = &grp.sounds[s];
+                            let loop_mode = snd.instrument == "AudioModule"
+                                && snd.audio.as_ref().is_some_and(|a| a.mode == deckard_model::AudioMode::Loop);
                             SoundView {
                                 name: snd.name.clone(),
                                 rgb: layout::rgb(p, g, Some(s)),
@@ -5978,6 +6961,12 @@ impl App {
                                     || snd.channel.midi_out != deckard_model::MidiDest::None
                                     || noted.is_some_and(|n| n.contains(&s)),
                                 playing: self.lit.contains(&(g, s)),
+                                hits: {
+                                    let mut hits: Vec<i64> =
+                                        self.hits.iter().filter(|&&(hg, hs, _)| (hg, hs) == (g, s)).map(|&(_, _, p)| p).collect();
+                                    hits.sort_unstable();
+                                    hits
+                                },
                                 mix: deckard_surface::MixView {
                                     aux: snd.aux,
                                     swing: snd.swing.amount,
@@ -5998,6 +6987,63 @@ impl App {
                                 prob_locked: snd.probability_locked,
                                 selected: g == self.group && (s == self.sound || self.sound_selection.contains(&s)),
                                 audio: if g == self.group { self.loop_view(p, g, s) } else { None },
+                                loop_mode,
+                                loop_playing: {
+                                    let audio_loop_active = loop_mode
+                                        && !grp.muted
+                                        && !snd.muted
+                                        && loop_pattern.is_some_and(|pt| pt.audio.iter().any(|c| c.sound == s));
+                                    let sampler_loop_active = !grp.muted
+                                        && !snd.muted
+                                        && snd.sampler.as_ref().is_some_and(|smp| {
+                                            if smp.envelope_type == 0 {
+                                                return false;
+                                            }
+                                            let zone_loops = |pitch: i64, vel: Option<i64>| {
+                                                smp.zones.iter().any(|z| {
+                                                    z.loop_active
+                                                        && z.loop_range.1 > z.loop_range.0
+                                                        && (z.key_range.0..=z.key_range.1).contains(&pitch)
+                                                        && vel.is_none_or(|v| (z.velocity_range.0..=z.velocity_range.1).contains(&v))
+                                                })
+                                            };
+                                            if has_live_engine && !group_ahead && self.loop_lit.contains(&(g, s)) {
+                                                return true;
+                                            }
+                                            if !out_is_current {
+                                                if self
+                                                    .held_pitches
+                                                    .get(&(g, s))
+                                                    .is_some_and(|ps| ps.iter().any(|&pt| zone_loops(pt, None)))
+                                                {
+                                                    return true;
+                                                }
+                                                if matches!(self.held, Some((hg, hs, hp)) if (hg, hs) == (g, s) && zone_loops(hp, None)) {
+                                                    return true;
+                                                }
+                                            }
+                                            if v.playing && (!has_live_engine || !out_is_current || group_ahead) {
+                                                if let Some(pt) = loop_pattern {
+                                                    return match pat_at {
+                                                        Some(at) => {
+                                                            let tick = pt.start + at;
+                                                            pt.notes.iter().any(|n| {
+                                                                n.sound == s
+                                                                    && n.position <= tick
+                                                                    && tick < n.position + n.length
+                                                                    && zone_loops(n.pitch, Some(n.velocity))
+                                                            })
+                                                        }
+                                                        None => {
+                                                            pt.notes.iter().any(|n| n.sound == s && zone_loops(n.pitch, Some(n.velocity)))
+                                                        }
+                                                    };
+                                                }
+                                            }
+                                            false
+                                        });
+                                    audio_loop_active || sampler_loop_active
+                                },
                             }
                         })
                         .collect(),
@@ -6055,6 +7101,17 @@ impl App {
             }
             A::Volume(level) => layout::apply_acts(self, vec![Act::SetLevel(Target::Song, level)]),
             A::VolumeDb(db) => layout::apply_acts(self, vec![Act::SetLevel(Target::Song, deckard_model::level_from_db(db))]),
+            A::Variation { field, value } => {
+                let Some(name) = variation_field(field) else { return };
+                let Some(doc) = self.doc.clone() else { return };
+                let (g, s) = (self.group, self.sound);
+                let done = doc.borrow_mut().set_groove_setting(g, s, name, value);
+                match done {
+                    Err(e) => self.status = format!("can't set that: {e}"),
+                    Ok(()) => self.live_groove(g, s, name),
+                }
+            }
+            A::ApplyVariation => self.groove(layout::GrooveButton::ApplyVariation),
             A::FocusGroup(group) => self.focus_group(group),
             A::FocusSound(s) => self.focus_sound(s),
             A::SelectPad { index, multi } => self.select_pad(index, multi),
@@ -6113,14 +7170,20 @@ impl App {
             }
             A::PatternSpan { start, length } => layout::apply_acts(self, vec![Act::PatternSpan(g, self.pattern, start, length)]),
             A::Color { of, color } => {
-                let t = match of {
-                    deckard_surface::ColorOf::Pattern => Target::Pattern(g, self.pattern),
-                    deckard_surface::ColorOf::Scene => Target::Scene(self.scene),
-                    deckard_surface::ColorOf::Group => Target::Group(g),
-                    deckard_surface::ColorOf::Sound => Target::Sound(g, self.sound),
+                let targets = match of {
+                    deckard_surface::ColorOf::Pattern => vec![Target::Pattern(g, self.pattern)],
+                    deckard_surface::ColorOf::Scene => vec![Target::Scene(self.scene)],
+                    deckard_surface::ColorOf::Group => vec![Target::Group(g)],
+                    deckard_surface::ColorOf::Sound => {
+                        let count = self.group_len();
+                        self.selected_sounds_for(g, self.sound, count).map_or_else(
+                            || vec![Target::Sound(g, self.sound)],
+                            |ss| ss.into_iter().map(|si| Target::Sound(g, si)).collect(),
+                        )
+                    }
                 };
                 let c = color.map_or(deckard_model::Color::Default, deckard_model::Color::Palette);
-                layout::apply_acts(self, vec![Act::SetColor(vec![t], c)]);
+                layout::apply_acts(self, vec![Act::SetColor(targets, c)]);
             }
             A::PatternEdit(what) => {
                 let a = match what {
@@ -6212,6 +7275,14 @@ impl App {
                     B::Prehear => C::Prehear,
                     B::Routing(on) => C::Routing(on),
                     B::Patterns(on) => C::Patterns(on),
+                    B::Locate => {
+                        self.browse_locate();
+                        return;
+                    }
+                    B::Quick(on) => {
+                        self.quick_browse = (on && self.browse_locate()).then_some((self.group, self.sound));
+                        return;
+                    }
                     B::SetFavorite => {
                         let i = self.browser.selected.unwrap_or(0);
                         let Some(on) = self.browser.results.items.get(i).map(|r| !r.favorite) else { return };
@@ -6343,6 +7414,11 @@ impl App {
                     layout::apply_acts(self, vec![Act::DeletePattern(group, pattern)]);
                 }
             }
+            A::ToggleAudioLoop { group, sound } => {
+                if let Err(e) = self.toggle_audio_loop(group, sound) {
+                    self.status = format!("can't switch the loop: {e}");
+                }
+            }
             A::CopyPattern { group, from, to } => {
                 if let Some(doc) = &self.doc
                     && let Err(e) = doc.borrow_mut().copy_pattern(group, from, to)
@@ -6420,7 +7496,9 @@ impl App {
             }
             A::ResetKnob(knob) => self.jam_reset_knob(knob),
             A::PerformMode { group, mode } => self.jam_perform_mode(group, mode),
-            A::SettingsWanted(on) => self.jam_settings_wanted = on,
+            // (A script asking for the Settings page's values is satisfied by
+            // construction: the View carries them as they are, whoever is looking.)
+            A::SettingsWanted(_) => {}
             A::Lfo(what, pad, v) => self.surface_lfo(what, pad, v),
             A::ModSlot(slot, row, steps) => mod_slots::step(self, slot, row, steps),
             A::ModSlotsClosed => self.mod_draft = None,
@@ -6434,6 +7512,13 @@ impl App {
                 "bank" => self.lock_bank(n == 1),
                 setting => self.lock_setting(setting, n as f64),
             },
+            A::Ask(what) => {
+                self.confirm_choice = match what {
+                    "save" => Some(0),
+                    "discard" => Some(1),
+                    _ => Some(2),
+                }
+            }
             A::File(what, n) => {
                 use menu::Command as C;
                 let cmd = match what {
@@ -6519,11 +7604,19 @@ impl App {
                     "choke_group" => "Choke Group",
                     "choke_mode" => "Choke Mode",
                     "link_group" => "Link Group",
+                    "base_key" => "Base Key",
                     _ => "Link Mode",
                 };
-                if let Some(doc) = &self.doc
-                    && let Err(e) = doc.borrow_mut().set(label, Target::Sound(g, self.sound), field, mxprj::decode::Value::Int(v))
-                {
+                let count = self.group_len();
+                let res = if let Some(sounds) = self.selected_sounds_for(g, self.sound, count) {
+                    let edits: Vec<_> = sounds.into_iter().map(|si| (Target::Sound(g, si), field, mxprj::decode::Value::Int(v))).collect();
+                    self.doc.as_ref().map(|doc| doc.borrow_mut().set_many(label, &edits))
+                } else {
+                    self.doc
+                        .as_ref()
+                        .map(|doc| doc.borrow_mut().set(label, Target::Sound(g, self.sound), field, mxprj::decode::Value::Int(v)))
+                };
+                if let Some(Err(e)) = res {
                     self.status = format!("{label}: {e}");
                 }
             }
@@ -6977,6 +8070,63 @@ impl App {
         }
     }
 
+    /// The key the Sampling page's PLAY plays: the focused zone's root (an Audio plug-in's
+    /// take: as its page shows it).
+    fn audition_key(&self) -> Option<i64> {
+        let doc = self.doc.as_ref()?.borrow();
+        layout::sampling::edited(doc.project(), (self.group, self.sound, self.zone)).map(|e| e.1.root_key)
+    }
+
+    /// The Sampling page's PLAY / STOP: the focused sound's note on `pitch` held until
+    /// the next press, which ends it and whatever of the sound still rings (a one-shot
+    /// doesn't end with its note). The song, if it plays, plays on.
+    pub(crate) fn audition_toggle(&mut self, pitch: i64) {
+        let (g, s) = (self.group, self.sound);
+        // Slice Motion would play another slice than the one shown: this one is heard by
+        // itself (as its pad on SLICE plays it).
+        let in_motion = self.doc.as_ref().is_some_and(|d| {
+            let d = d.borrow();
+            d.project().groups.get(g).and_then(|x| x.sounds.get(s)).is_some_and(|x| {
+                x.new_sampler.is_some_and(|n| n.motion != Default::default()) && x.sampler.as_ref().is_some_and(|z| z.zones.len() > 1)
+            })
+        });
+        if in_motion {
+            if self.prehear_from.take().is_some() {
+                if let Some(Ok(out)) = &self.output {
+                    out.prehear(None, 0.0);
+                }
+                return;
+            }
+            let selection = self.sampling.selection.take();
+            let range = self.edit_range();
+            self.sampling.selection = selection;
+            if let Some((a, b)) = range {
+                self.sampling_call(deckard_lua_host::state::SamplingCall::Prehear(a, b));
+            }
+            return;
+        }
+        let sounding = self.sampling.playhead.is_some();
+        if let Some((ag, asnd, ap)) = self.audition.take()
+            && let Some(Ok(out)) = &self.output
+        {
+            out.live(deckard_engine::Live::NoteRelease { group: ag, sound: asnd, pitch: ap });
+            out.live(deckard_engine::Live::ChokeSound { group: ag, sound: asnd });
+            if sounding {
+                return;
+            }
+        } else if sounding {
+            if let Some(Ok(out)) = &self.output {
+                out.live(deckard_engine::Live::ChokeSound { group: g, sound: s });
+            }
+            return;
+        }
+        let before = self.held.take();
+        self.hold_pitch(g, s, pitch);
+        // Not the mouse's: it stays down when the button comes up.
+        self.audition = self.held.take();
+        self.held = before;
+    }
+
     /// Start a note that sounds while the mouse button is held (a piano-roll key, or
     /// a note pressed in the pattern editor); `frame` ends it on release.
     pub fn hold_pitch(&mut self, group: usize, sound: usize, pitch: i64) {
@@ -7420,6 +8570,7 @@ impl App {
     fn undo(&mut self) {
         self.lock_end_morph();
         let Some(doc) = self.doc.clone() else { return };
+        self.forget_replaced_presets(doc.borrow().undo_label());
         let ok = doc.borrow_mut().undo();
         if !ok && !self.back_to_replaced() {
             self.status = "nothing to undo".into();
@@ -7429,7 +8580,8 @@ impl App {
 
     fn redo(&mut self) {
         self.lock_end_morph();
-        if let Some(doc) = &self.doc {
+        if let Some(doc) = self.doc.clone() {
+            self.forget_replaced_presets(doc.borrow().redo_label());
             let ok = doc.borrow_mut().redo();
             if !ok {
                 self.status = "nothing to redo".into();
@@ -7558,6 +8710,8 @@ impl App {
     fn update_sampling(&mut self) {
         self.open_saved_zone();
         self.poll_stems();
+        self.follow_analysis();
+        self.follow_renders();
         self.update_loop_peaks();
         // The focused Audio plug-in take's frames and rate (its tempo shows on its page).
         let take_key = self.doc.as_ref().and_then(|doc| {
@@ -7588,7 +8742,11 @@ impl App {
         // Sampling page), before recording too.
         let hw_record = matches!(&self.controller, Some(Ok(c)) if c.sampling() && c.host.state.borrow().sampling_tab == 0)
             || (self.mk3.is_some() && self.surface.page() == "sampling" && self.sampling.tab == 0);
-        let listen = self.meter_inputs && ((self.sampling_open && self.sampling.tab == 0) || hw_record);
+        // A session recording holds the master tap, so internal Sampling metering must not
+        // grab it at the same time (mutual exclusion).
+        let listen = self.meter_inputs
+            && ((self.sampling_open && self.sampling.tab == 0) || hw_record)
+            && !(self.session.active() && self.recorder.view.source == 2);
         self.recorder.meter(
             listen,
             recorder::StartWith {
@@ -7605,17 +8763,37 @@ impl App {
         if let Some(rec) = self.recorder.poll(output, clock) {
             self.finish_recording(rec);
         }
+        // The session recorder takes up its tap and keeps the file's length true to
+        // wall-clock time; it releases the tap itself on an auto-stop. (Re-borrow the
+        // output: `finish_recording` above needed `self` mutably.)
+        let output = match &self.output {
+            Some(Ok(o)) => Some(o),
+            _ => None,
+        };
+        self.session.poll(output);
         self.silence_while_recording();
         self.sync_sampling_page();
         self.sync_browse_page();
         self.sync_arp();
         self.sync_auto_write();
         self.tick_mod_take(self.playhead().map(|h| (h.mode, h.position)), std::time::Instant::now());
+        // What was asked of, or picked on, another sound is dropped with the focus.
+        let at = (self.group, self.sound);
+        if self.sampler_ask.is_some_and(|(of, _)| of != at) {
+            self.sampler_ask = None;
+        }
+        if self.take_shown.is_some_and(|of| of != at) {
+            self.take_shown = None;
+        }
         if !self.sampling_open {
             return;
         }
         let Some(doc) = self.doc.clone() else { return };
         let focused = self.focused_sample();
+        // A take on no layer: RECORD and EDIT only.
+        if self.shown_take().is_some() && self.sampling.tab > 1 {
+            self.sampling.tab = 1;
+        }
         // An Audio plug-in's take: RECORD and EDIT only.
         if focused.as_ref().is_some_and(|f| f.2.is_some()) && self.sampling.tab > 1 {
             self.sampling.tab = 1;
@@ -7626,6 +8804,8 @@ impl App {
             Some((zi, sref)) => {
                 let key = (self.group, self.sound, zi, sref.path.clone());
                 if self.sampling.sample_key.as_ref() != Some(&key) {
+                    // (A slice's pad was playing the sample before: not this one.)
+                    self.prehear_from = None;
                     match self.samples.sample(&sref, path.as_deref()) {
                         Some(s) => {
                             let frames = s.frames.len();
@@ -7637,10 +8817,16 @@ impl App {
                                 let z = z.and_then(|x| x.sampler.as_ref()).and_then(|x| x.zones.get(zi));
                                 self.sampling.selection = z.and_then(|z| layout::sampling::first_selection(z, frames));
                             }
+                            // Zoomed in elsewhere in the file: the zone's own part of it comes into view.
+                            let range = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, zi))
+                                .filter(|_| zi != usize::MAX)
+                                .map(|e| e.1.play_range);
+                            if let Some((lo, hi)) = range.filter(|r| r.1 > r.0) {
+                                self.sampling.reveal(lo as f64, hi as f64 + 1.0);
+                            }
                         }
                         None => {
-                            self.sampling.sample = None;
-                            self.sampling.sample_key = None;
+                            self.sampling.clear_sample();
                         }
                     }
                 }
@@ -7648,12 +8834,63 @@ impl App {
                     Some(Ok(out)) => out.zone_position(self.group, self.sound, zi),
                     _ => None,
                 };
+                // A slice's pad plays it: where that is by now.
+                if self.sampling.playhead.is_none()
+                    && let Some((start, a, b)) = self.prehear_from
+                {
+                    let rate = self.sampling.sample.as_ref().map_or(0, |s| s.rate);
+                    self.sampling.playhead = chop::heard(start, std::time::Instant::now(), (a, b), rate);
+                    if self.sampling.playhead.is_none() {
+                        self.prehear_from = None;
+                    }
+                }
+                // Its stem lanes' waveforms.
+                let files: [Option<String>; deckard_model::new_sampler::LANES] = {
+                    let d = doc.borrow();
+                    let z = layout::sampling::edited(d.project(), (self.group, self.sound, self.zone)).filter(|e| !e.3 && zi != usize::MAX);
+                    let stems = z.and_then(|(_, z, ..)| z.meta).map(|m| m.stems).unwrap_or_default();
+                    stems.map(|l| l.map(|l| l.file))
+                };
+                let samples = &mut self.samples;
+                self.sampling.set_lanes(files, |file| {
+                    samples.sample(&deckard_model::SampleRef { kind: 0, path: file.to_string(), ..Default::default() }, path.as_deref())
+                });
             }
             None => {
-                self.sampling.sample = None;
-                self.sampling.sample_key = None;
-                if self.sampling.tab != 0 {
+                self.sampling.clear_sample();
+                // (An empty New Sampler has its LAYERS.)
+                let layers = self.sampling.tab == 4 && layers::can_layer(doc.borrow().project(), self.group, self.sound);
+                if self.sampling.tab != 0 && !layers {
                     self.sampling.tab = 0;
+                }
+            }
+        }
+        // LAYERS: every layer's waveform, where each plays, where the morph is.
+        if self.sampling.tab == 4 {
+            let files: Vec<(usize, String)> = {
+                let d = doc.borrow();
+                let p = d.project();
+                let zones =
+                    p.groups.get(self.group).and_then(|g| g.sounds.get(self.sound)).and_then(|s| s.sampler.as_ref()).map(|x| &x.zones);
+                layers::layers_in(p, self.group, self.sound)
+                    .iter()
+                    .filter_map(|&(zi, _)| Some((zi, zones?.get(zi)?.sample.clone())))
+                    .map(|(zi, sref)| (zi, sref.path))
+                    .collect()
+            };
+            let samples = &mut self.samples;
+            self.sampling.set_layers(files.iter().map(|f| f.1.clone()).collect(), |file| {
+                samples.sample(&deckard_model::SampleRef { kind: 0, path: file.to_string(), ..Default::default() }, path.as_deref())
+            });
+            let (g, s) = (self.group, self.sound);
+            match &self.output {
+                Some(Ok(out)) => {
+                    self.sampling.layer_heads = files.iter().map(|&(zi, _)| out.zone_position(g, s, zi)).collect();
+                    self.sampling.morph_at = out.morph_position(g, s);
+                }
+                _ => {
+                    self.sampling.layer_heads.clear();
+                    self.sampling.morph_at = None;
                 }
             }
         }
@@ -7757,15 +8994,32 @@ impl App {
         }
     }
 
+    /// Whether STEMS puts the focused zone's stems on its lanes: an analysed zone of a
+    /// Sampler Preview in Advanced (the lanes are that mode's).
+    pub(crate) fn stems_onto_lanes(&self) -> bool {
+        self.doc.as_ref().is_some_and(|d| {
+            let d = d.borrow();
+            let p = d.project();
+            layers::mode_of(p, self.group, self.sound) == Some(deckard_model::new_sampler::SamplerMode::Advanced)
+                && p.groups[self.group].sounds[self.sound]
+                    .sampler
+                    .as_ref()
+                    .and_then(|x| x.zones.get(self.zone))
+                    .is_some_and(|z| z.meta.is_some())
+        })
+    }
+
     /// STEMS: separate the focused zone's sample in the background.
-    fn start_stems(&mut self) {
+    fn start_stems(&mut self, to_group: bool) {
         let (Some(sample), Some(dir)) = (self.sampling.sample.clone(), menu::settings_dir()) else { return };
+        let into_lanes = !to_group && self.stems_onto_lanes();
         let Some((_, sref, beats)) = self.focused_sample() else { return };
         let file = sref.path.rsplit(['/', '\\']).next().unwrap_or("Sample");
         let name = file.rsplit_once('.').map_or(file, |(stem, _)| stem).to_string();
         self.status = format!("separating {name} into stems…");
         let mut job = stems::Job::start(sample, name, (self.group, self.sound, self.zone), dir);
         job.beats = beats;
+        job.into_lanes = into_lanes;
         self.stems = Some(job);
     }
 
@@ -7773,6 +9027,11 @@ impl App {
     /// or its Audio plug-in's focused take's (with the take's length in beats); and
     /// which zone or take it is.
     fn focused_sample(&self) -> Option<(usize, deckard_model::SampleRef, Option<f64>)> {
+        // (In Layers, a take picked that is on no layer: no zone's, so no zone index.)
+        if let Some((_, file)) = self.shown_take() {
+            let sample = deckard_model::SampleRef { kind: 0, path: file.to_string_lossy().into(), ..Default::default() };
+            return Some((usize::MAX, sample, None));
+        }
         let doc = self.doc.as_ref()?.borrow();
         let snd = doc.project().groups.get(self.group)?.sounds.get(self.sound)?;
         if let Some(a) = snd.audio.as_ref().filter(|_| snd.instrument == "AudioModule") {
@@ -7785,14 +9044,247 @@ impl App {
         Some((k, smp.zones[k].sample.clone(), None))
     }
 
+    /// Analyse the New Sampler's zones that aren't yet, and keep what's found in each
+    /// zone still holding that file (no undo step).
+    fn follow_analysis(&mut self) {
+        let Some(doc) = self.doc.clone() else { return };
+        let done = self.analysis.poll();
+        if !done.is_empty() {
+            let mut targets = Vec::new();
+            {
+                let d = doc.borrow();
+                for (g, grp) in d.project().groups.iter().enumerate() {
+                    for (s, snd) in grp.sounds.iter().enumerate() {
+                        // (Not in Original: it knows of its zones what a Sampler does.)
+                        let Some(smp) = snd.sampler.as_ref().filter(|_| layers::own(d.project(), g, s)) else { continue };
+                        for (z, zone) in smp.zones.iter().enumerate() {
+                            if let Some(job) = done.iter().find(|j| zone.meta.is_none() && j.file == zone.sample.path) {
+                                let name = analysis::file_name_of(&zone.sample.path);
+                                targets.push((g, s, z, analysis::meta_from(&job.analysis, &job.file, &name)));
+                            }
+                        }
+                    }
+                }
+            }
+            for (g, s, z, meta) in targets {
+                let _ = doc.borrow_mut().note_zone_meta(g, s, z, &meta);
+            }
+        }
+        let revision = doc.borrow().revision();
+        if self.analysis_revision == Some(revision) {
+            return;
+        }
+        self.analysis_revision = Some(revision);
+        let mut wanted = Vec::new();
+        {
+            let d = doc.borrow();
+            let own =
+                |s: &&deckard_model::Sound| s.new_sampler.is_some_and(|n| n.mode != deckard_model::new_sampler::SamplerMode::Original);
+            for snd in d.project().groups.iter().flat_map(|g| &g.sounds).filter(own) {
+                for zone in snd.sampler.iter().flat_map(|x| &x.zones).filter(|z| z.meta.is_none() && !z.sample.path.is_empty()) {
+                    wanted.push(zone.sample.clone());
+                }
+            }
+        }
+        for sample in wanted {
+            if let Some(audio) = self.samples.sample(&sample, self.path.as_deref()) {
+                self.analysis.want(&sample.path, &analysis::file_name_of(&sample.path), audio);
+            }
+        }
+    }
+
+    /// The Sync and Keys renders engines asked for go to the render thread; those made
+    /// go to the samples, and playback is built again to play them (its voices carry on
+    /// where the music is).
+    fn follow_renders(&mut self) {
+        for job in self.samples.wanted_renders() {
+            self.renders.want(job);
+        }
+        let made = self.renders.poll();
+        if made.is_empty() {
+            return;
+        }
+        for (job, r) in made {
+            self.samples.add_render(&job, r);
+        }
+        // Built in full: the sounds' zones change, not the document.
+        self.built = None;
+        self.seen_revision = u64::MAX;
+    }
+
     /// A finished (or failed, or cancelled) stem separation.
     fn poll_stems(&mut self) {
         let Some(result) = self.stems.as_ref().and_then(stems::Job::poll) else { return };
         let job = self.stems.take().expect("the job polled");
         match result {
+            Ok(stems) if job.into_lanes => self.finish_stem_lanes(&job.name, job.rate, stems, job.source),
             Ok(stems) => self.finish_stems(&job.name, job.rate, stems, job.beats),
             Err(_) if job.cancelled() => self.status = "stem separation cancelled".into(),
             Err(e) => self.status = format!("stem separation failed: {e}"),
+        }
+    }
+
+    /// The stems as the zone's lanes (roadmap 2b): each saved as a sample ("<name>
+    /// Drums", …) and put on zone `at` (still playing the sample they came from), all
+    /// on. One undo step.
+    fn finish_stem_lanes(&mut self, name: &str, rate: u32, stems: Vec<deckard_stems::Stem>, at: (usize, usize, usize)) {
+        use deckard_model::new_sampler::StemLane;
+        use deckard_stems::Kind;
+        let Some(doc) = self.doc.clone() else { return };
+        let meta = doc
+            .borrow()
+            .project()
+            .groups
+            .get(at.0)
+            .and_then(|g| g.sounds.get(at.1))
+            .and_then(|x| x.sampler.as_ref())
+            .and_then(|x| x.zones.get(at.2))
+            .and_then(|z| z.meta.clone());
+        let Some(mut meta) = meta else {
+            self.status = "the zone changed while its stems were made: they weren't kept".into();
+            return;
+        };
+        // A root analysis wasn't sure of (none, or a guess) is heard again now there's a
+        // bass to hear: the stems together are the sample.
+        if !meta.root_locked
+            && (meta.root.is_none() || meta.root_guess)
+            && let Some(bass) = stems.iter().find(|s| s.kind == Kind::Bass)
+        {
+            let mut mix = vec![[0f32; 2]; bass.frames.len()];
+            for s in &stems {
+                for (m, f) in mix.iter_mut().zip(&s.frames) {
+                    (m[0], m[1]) = (m[0] + f[0], m[1] + f[1]);
+                }
+            }
+            if let Some(r) = deckard_analysis::root_by_bass(&mix, rate, Some(&bass.frames)) {
+                (meta.root, meta.cents, meta.root_guess, meta.key_minor) = (Some(r.note), r.cents, r.guess, r.minor);
+            }
+        }
+        let dir = self.sample_dir("Stems");
+        for s in stems {
+            let lane = match s.kind {
+                Kind::Drums => 0,
+                Kind::Vocals => 1,
+                Kind::Bass => 2,
+                Kind::Other => 3,
+            };
+            let path = dir.join(format!("{name} {}.wav", s.kind.name()).replace(['/', ':'], "-"));
+            if let Err(e) = deckard_engine::edit::write_wav_channels(&path, &deckard_engine::sample::Sample { rate, frames: s.frames }, 2) {
+                self.status = format!("can't save the stems: {e}");
+                return;
+            }
+            meta.stems[lane] = Some(StemLane::new(path.to_string_lossy().into()));
+        }
+        meta.stems_only = false;
+        match doc.borrow_mut().set_zone_meta(at.0, at.1, at.2, &meta, "Stems") {
+            Ok(()) => self.status = format!("{name}: stems on its lanes (M and S on each)"),
+            Err(e) => self.status = format!("can't put the stems on the zone: {e}"),
+        }
+    }
+
+    /// Stems of your own on the focused New Sampler zone's lanes: up to four files at
+    /// the sample's rate, each on the lane its name says (drums, vocals, bass; else
+    /// Leads, or the next free). One shorter than the sample is padded with silence (a
+    /// copy, in Stems); one longer is refused. One undo step.
+    fn load_stems(&mut self, files: &[PathBuf]) {
+        use deckard_model::new_sampler::StemLane;
+        let Some(doc) = self.doc.clone() else { return };
+        let Some((zi, zone, _, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {
+            return;
+        };
+        let (Some(mut meta), Some(sample)) = (zone.meta.filter(|_| self.stems_onto_lanes()), self.sampling.sample.clone()) else {
+            self.status = "stems go on a zone of a Sampler Preview in Advanced (once it's analysed)".into();
+            return;
+        };
+        let mut taken: [bool; 4] = std::array::from_fn(|k| meta.stems[k].is_some());
+        let mut left_out = Vec::new();
+        for f in files {
+            let name = f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let stem = match deckard_engine::sample::Sample::load(f) {
+                Ok(s) if s.rate != sample.rate => {
+                    left_out.push(format!("{name} ({} Hz, the sample is {})", s.rate, sample.rate));
+                    continue;
+                }
+                Ok(s) if s.frames.len() > sample.frames.len() => {
+                    left_out.push(format!("{name} (longer than the sample)"));
+                    continue;
+                }
+                Ok(s) => s,
+                Err(e) => {
+                    left_out.push(format!("{name} ({e})"));
+                    continue;
+                }
+            };
+            let Some(lane) = beat::lane_for(&name, &taken) else {
+                left_out.push(format!("{name} (four lanes at most)"));
+                continue;
+            };
+            let mut path = f.clone();
+            if stem.frames.len() < sample.frames.len() {
+                let mut frames = stem.frames;
+                frames.resize(sample.frames.len(), [0.0; 2]);
+                path = deckard_engine::edit::edited_path(&self.sample_dir("Stems"), f);
+                if let Err(e) =
+                    deckard_engine::edit::write_wav_channels(&path, &deckard_engine::sample::Sample { rate: stem.rate, frames }, 2)
+                {
+                    left_out.push(format!("{name} ({e})"));
+                    continue;
+                }
+            }
+            taken[lane] = true;
+            meta.stems[lane] = Some(StemLane::new(path.to_string_lossy().into()));
+        }
+        if let Err(e) = doc.borrow_mut().set_zone_meta(self.group, self.sound, zi, &meta, "Load Stems") {
+            self.status = format!("can't put the stems on the zone: {e}");
+        } else if !left_out.is_empty() {
+            self.status = format!("left out: {}", left_out.join(", "));
+        }
+    }
+
+    /// A stem lane of the focused zone muted, soloed, set to a gain, or all removed.
+    fn lane_act(&mut self, lane: usize, act: layout::sampling::LaneAct) {
+        use layout::sampling::LaneAct as L;
+        let Some(doc) = self.doc.clone() else { return };
+        let Some((zi, zone, _, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {
+            return;
+        };
+        let Some(mut meta) = zone.meta else { return };
+        let label = match act {
+            L::Clear => {
+                meta.stems = Default::default();
+                meta.stems_only = false;
+                "Remove Stems"
+            }
+            L::Delete => {
+                if meta.stems.get(lane).is_none_or(Option::is_none) {
+                    return;
+                }
+                meta.stems[lane] = None;
+                // What's left is all that plays; with none left, the sample again.
+                meta.stems_only = meta.has_stems();
+                "Delete Stem"
+            }
+            _ => {
+                let Some(l) = meta.stems.get_mut(lane).and_then(Option::as_mut) else { return };
+                match act {
+                    L::Mute => {
+                        l.mute = !l.mute;
+                        "Stem Mute"
+                    }
+                    L::Solo => {
+                        l.solo = !l.solo;
+                        "Stem Solo"
+                    }
+                    L::Gain(g) => {
+                        l.gain = g.clamp(0.0, 2.0);
+                        "Stem Gain"
+                    }
+                    L::Clear | L::Delete => return,
+                }
+            }
+        };
+        if let Err(e) = doc.borrow_mut().set_zone_meta(self.group, self.sound, zi, &meta, label) {
+            self.status = format!("can't change the stems: {e}");
         }
     }
 
@@ -7872,6 +9364,10 @@ impl App {
         if let Some(sel) = self.sampling.selection {
             return Some(sel);
         }
+        // (A take on no layer: all of it.)
+        if self.shown_take().is_some() {
+            return Some((0, self.sampling.len()));
+        }
         let doc = self.doc.as_ref()?.borrow();
         // The focused zone's play range, or an Audio plug-in's take's.
         let (_, z, ..) = layout::sampling::edited(doc.project(), (self.group, self.sound, self.zone))?;
@@ -7888,18 +9384,115 @@ impl App {
         }
     }
 
+    /// A New Sampler zone's meta after an edit of its sample: its stem lanes edited the
+    /// same way by `lane` (each written as a new file), so the zone stays four waveforms
+    /// cut alike; its tempo and grid follow (`stretched`: the tempo changes with the
+    /// length, else the beats do; `shift`: frames taken off the front). `None`: the zone
+    /// has no lanes, or one can't be carried (the edit then leaves the zone without).
+    fn carry_lanes(
+        &mut self,
+        key: &(usize, usize, usize, String),
+        new_len: usize,
+        lane: &dyn Fn(&deckard_engine::sample::Sample) -> deckard_engine::sample::Sample,
+        (shift, stretched): (usize, bool),
+    ) -> Option<deckard_model::new_sampler::ZoneMeta> {
+        let doc = self.doc.clone()?;
+        let mut meta = {
+            let d = doc.borrow();
+            let snd = d.project().groups.get(key.0)?.sounds.get(key.1)?;
+            snd.new_sampler.as_ref()?;
+            snd.sampler.as_ref()?.zones.get(key.2)?.meta.clone().filter(|m| m.has_stems())?
+        };
+        let old_len = self.sampling.len();
+        let rate = self.sampling.sample.as_ref()?.rate;
+        let dir = self.sample_dir("Stems");
+        let project = self.path.clone();
+        for k in 0..deckard_model::new_sampler::LANES {
+            let Some(l) = meta.stems[k].as_mut() else { continue };
+            let sref = deckard_model::SampleRef { kind: 0, path: l.file.clone(), ..Default::default() };
+            let src = self.samples.sample(&sref, project.as_deref()).filter(|x| x.frames.len() == old_len)?;
+            let out = lane(&src);
+            if out.frames.len() != new_len {
+                return None;
+            }
+            let path = deckard_engine::edit::edited_path(&dir, Path::new(&l.file));
+            deckard_engine::edit::write_wav(&path, &out).ok()?;
+            l.file = path.to_string_lossy().into();
+        }
+        resized(&mut meta, old_len, new_len, rate, (shift, stretched));
+        Some(meta)
+    }
+
+    /// A layer's meta for its edited file, `new_len` frames long: what it was, its tempo
+    /// and beats following the new length. None: the zone isn't a layer.
+    fn layer_meta_after(
+        &self,
+        key: &(usize, usize, usize, String),
+        new_len: usize,
+        how: (usize, bool),
+    ) -> Option<deckard_model::new_sampler::ZoneMeta> {
+        let doc = self.doc.clone()?;
+        let d = doc.borrow();
+        if !layers::can_layer(d.project(), key.0, key.1) {
+            return None;
+        }
+        let mut meta =
+            d.project().groups[key.0].sounds[key.1].sampler.as_ref()?.zones.get(key.2)?.meta.clone().filter(|m| m.layer.is_some())?;
+        meta.stems = Default::default();
+        meta.stems_only = false;
+        let rate = self.sampling.sample.as_ref().map_or(0, |x| x.rate);
+        resized(&mut meta, self.sampling.len(), new_len, rate, how);
+        Some(meta)
+    }
+
     /// Write `sample` as an edited copy of the focused zone's file and point the zone at
-    /// it (one undo step).
-    fn store_edit(&mut self, sample: deckard_engine::sample::Sample, label: &str) {
+    /// it (one undo step). `lanes`: how the edit goes for a stem lane (see
+    /// [`Self::carry_lanes`]); without it the zone's lanes don't follow. `meta`: what the
+    /// zone knows of the new file (its tempo, say) and zone parameters to set on it (its
+    /// play range, else all of the file), kept in the same step; else the file is looked
+    /// at afresh.
+    pub(crate) fn store_edit(
+        &mut self,
+        sample: deckard_engine::sample::Sample,
+        label: &str,
+        lanes: Option<(&dyn Fn(&deckard_engine::sample::Sample) -> deckard_engine::sample::Sample, (usize, bool))>,
+        meta: Option<(deckard_model::new_sampler::ZoneMeta, [(&'static str, i64); 4])>,
+    ) {
         let Some(doc) = self.doc.clone() else { return };
         let Some(key) = self.sampling.sample_key.clone() else { return };
         let original = PathBuf::from(&key.3);
+        // A take on no layer: the take list has the edited copy (the project isn't
+        // changed: the list isn't part of it), the original staying in Recordings.
+        if let Some((i, take)) = self.shown_take() {
+            let target = deckard_engine::edit::edited_path(&self.sample_dir("Recordings"), &take);
+            match deckard_engine::edit::write_wav(&target, &sample) {
+                Ok(()) => {
+                    let v = &mut self.recorder.view;
+                    v.take_waves.insert(target.clone(), recorder::mini_wave(&sample.frames));
+                    v.takes[i] = target.clone();
+                    self.status = format!("{label}: {}", target.display());
+                    self.sampling.selection = None;
+                }
+                Err(e) => self.status = format!("can't write the edited take: {e}"),
+            }
+            return;
+        }
         let target = deckard_engine::edit::edited_path(&self.sample_dir("Samples"), &original);
         if let Err(e) = deckard_engine::edit::write_wav(&target, &sample) {
             self.status = format!("can't write the edited sample: {e}");
             return;
         }
         let frames = sample.frames.len();
+        let carried = lanes.and_then(|(lane, how)| self.carry_lanes(&key, frames, lane, how));
+        // (The lanes are those carried: ones that couldn't be are left behind.)
+        // A layer stays one: its settings go with it to the new file.
+        let carried = carried.or_else(|| self.layer_meta_after(&key, frames, lanes.map_or((0, false), |l| l.1)));
+        let (meta, params) = meta.unzip();
+        let carried = match (meta, carried) {
+            (Some(m), Some(c)) => Some(deckard_model::new_sampler::ZoneMeta { stems: c.stems, stems_only: c.stems_only, ..m }),
+            (Some(m), None) => Some(deckard_model::new_sampler::ZoneMeta { stems: Default::default(), stems_only: false, ..m }),
+            (None, c) => c,
+        };
         // An Audio plug-in's take (its tempo kept), else a Sampler's zone.
         let audio = doc
             .borrow()
@@ -7911,13 +9504,32 @@ impl App {
         let done = if audio {
             doc.borrow_mut().set_take_sample(key.0, key.1, key.2, &target, frames, label)
         } else {
-            doc.borrow_mut().set_zone_sample(key.0, key.1, key.2, &target, frames, label)
+            doc.borrow_mut().transaction(label, |d| {
+                d.set_zone_sample(key.0, key.1, key.2, &target, frames, label)?;
+                // Its lanes, cut alike, on the new file.
+                if let Some(mut meta) = carried {
+                    meta.file = d.project().groups[key.0].sounds[key.1]
+                        .sampler
+                        .as_ref()
+                        .map_or_else(String::new, |x| x.zones[key.2].sample.path.clone());
+                    d.set_zone_meta(key.0, key.1, key.2, &meta, label)?;
+                }
+                for (field, v) in params.into_iter().flatten() {
+                    d.set(label, deckard_doc::Target::Zone(key.0, key.1, key.2), field, mxprj::decode::Value::Int(v))?;
+                }
+                Ok(())
+            })
         };
         match done {
             Ok(()) => {
                 self.status = format!("{label}: {}", target.display());
                 self.sampling.selection = None;
-                self.sampling.view = None;
+                // The take it was recorded as is this file now, in the list too.
+                let v = &mut self.recorder.view;
+                if let Some(t) = v.takes.iter_mut().find(|t| t.file_name() == original.file_name()) {
+                    v.take_waves.insert(target.clone(), recorder::mini_wave(&sample.frames));
+                    *t = target.clone();
+                }
             }
             Err(e) => self.status = format!("can't edit: {e}"),
         }
@@ -7927,32 +9539,114 @@ impl App {
     fn sampling_act(&mut self, a: layout::sampling::SamplingAct) {
         use deckard_engine::edit;
         use layout::sampling::{EditOp, RecordAct, SamplingAct as S};
+        // A take on no layer has no zone: only what works on its file, the recorder and
+        // the layers.
+        if self.shown_take().is_some() {
+            let file_edit = match &a {
+                S::Edit(op) => !matches!(op, EditOp::Stems | EditOp::AutoLoop | EditOp::Munge),
+                S::Open(_) | S::Tab(_) | S::Stereo | S::View(_) | S::Select(_) => true,
+                S::StretchOpen(_) | S::SetStretch(_) | S::StretchApply => true,
+                S::Record(_) | S::Layer(..) | S::Morph(_) | S::Sampler(_) | S::SamplerAnswer(_) => true,
+                _ => false,
+            };
+            if !file_edit {
+                self.status = "give the take a layer first (RECORD: LAYER, then APPLY)".into();
+                return;
+            }
+        }
+        // A layer has no play mode, tempo or Motion of its own: those are Advanced's.
+        if matches!(a, S::Meta(_) | S::PlayMode(_) | S::Tap(_) | S::ToProject(_) | S::Motion(_))
+            && self.doc.as_ref().is_some_and(|d| layers::can_layer(d.borrow().project(), self.group, self.sound))
+        {
+            return;
+        }
+        // LAYERS (and any tab but RECORD and EDIT) leaves a take on no layer.
+        if matches!(a, S::Tab(t) if t > 1) {
+            self.take_shown = None;
+        }
         match a {
-            S::Open(on) => self.sampling_open = on,
+            S::Sampler(mode) => self.ask_sampler_mode(mode, false),
+            S::SamplerAnswer(ok) => self.answer_sampler_mode(ok),
+            S::Open(on) => {
+                self.sampling_open = on;
+                // (The question is the open page's.)
+                if !on {
+                    self.sampler_ask = None;
+                }
+            }
             S::Tab(i) => {
                 self.sampling.tab = i;
                 if i == 2 && self.sampling.slices.is_empty() {
-                    self.compute_slices();
+                    // A sample already sliced shows its slices (Manual keeps them).
+                    match self.chops() {
+                        Some((_, starts, _)) => {
+                            self.sampling.slices = starts;
+                            self.sampling.slice_mode = 3;
+                            self.sampling.kept.clear();
+                        }
+                        None => self.compute_slices(),
+                    }
                 }
             }
             S::Stereo => self.sampling.stereo = !self.sampling.stereo,
+            S::Audition(pitch) => self.audition_toggle(pitch),
             S::View(v) => self.sampling.view = v,
-            S::Select(s) => self.sampling.selection = s,
+            S::Select(s) => {
+                self.sampling.selected = s.is_some() && self.sampling.tab == 1;
+                self.sampling.selection = s;
+            }
             S::Edit(EditOp::AutoLoop) => self.auto_loop(),
             S::Edit(EditOp::Stems) => match &self.stems {
                 Some(job) => job.cancel(),
-                None => self.start_stems(),
+                None => self.start_stems(false),
             },
+            S::StemsToGroup => {
+                if self.stems.is_none() {
+                    self.start_stems(true);
+                }
+            }
+            S::LoadStems => {
+                if let Some(files) = rfd::FileDialog::new().add_filter("Audio", &deckard_engine::sample::EXTENSIONS).pick_files() {
+                    self.load_stems(&files);
+                }
+            }
+            S::Layer(lane, act) => self.layer_act(lane, act),
+            S::Morph(act) => self.morph_act(act),
+            S::Lane(k, act) => self.lane_act(k, act),
+            S::LanesMix(on) => self.sampling.lanes_mix = on,
+            S::DragOut(lane, whole) => self.drag_out(lane, whole),
+            S::LaneHear(lane, root, tempo) => self.hear_lane(lane, root, tempo),
             S::Edit(op) => {
                 let (Some(s), Some(r)) = (self.sampling.sample.clone(), self.edit_range()) else { return };
-                let (out, label) = match op {
-                    EditOp::Truncate => (edit::truncate(&s, r), "Truncate"),
-                    EditOp::Normalize => (edit::normalize(&s, r), "Normalize"),
-                    EditOp::Reverse => (edit::reverse(&s, r), "Reverse"),
-                    EditOp::FadeIn => (edit::fade(&s, r, true), "Fade In"),
-                    EditOp::FadeOut => (edit::fade(&s, r, false), "Fade Out"),
-                    EditOp::Dc => (edit::remove_dc(&s, r), "DC Correction"),
-                    EditOp::Silence => (edit::silence(&s, r), "Silence"),
+                type Lane = Box<dyn Fn(&deckard_engine::sample::Sample) -> deckard_engine::sample::Sample>;
+                // The edit, and the same for a stem lane (`None`: the lanes can't follow).
+                let (out, label, lane): (_, _, Option<Lane>) = match op {
+                    EditOp::Truncate => (edit::truncate(&s, r), "Truncate", Some(Box::new(move |l| edit::truncate(l, r)))),
+                    EditOp::Normalize => {
+                        let out = edit::normalize(&s, r);
+                        // The lanes by as much as the sample was (each to its own peak would
+                        // change their balance).
+                        let peak = |x: &deckard_engine::sample::Sample| {
+                            x.frames
+                                .get(r.0..r.1.min(x.frames.len()))
+                                .map_or(0.0, |f| f.iter().flat_map(|f| [f[0].abs(), f[1].abs()]).fold(0.0, f32::max))
+                        };
+                        let gain = if peak(&s) > 0.0 { peak(&out) / peak(&s) } else { 1.0 };
+                        let lane: Lane = Box::new(move |l| {
+                            let mut l = l.clone();
+                            let end = r.1.min(l.frames.len());
+                            for f in l.frames.get_mut(r.0..end).into_iter().flatten() {
+                                *f = [f[0] * gain, f[1] * gain];
+                            }
+                            l
+                        });
+                        (out, "Normalize", Some(lane))
+                    }
+                    EditOp::Reverse => (edit::reverse(&s, r), "Reverse", Some(Box::new(move |l| edit::reverse(l, r)))),
+                    EditOp::FadeIn => (edit::fade(&s, r, true), "Fade In", Some(Box::new(move |l| edit::fade(l, r, true)))),
+                    EditOp::FadeOut => (edit::fade(&s, r, false), "Fade Out", Some(Box::new(move |l| edit::fade(l, r, false)))),
+                    EditOp::Dc => (edit::remove_dc(&s, r), "DC Correction", Some(Box::new(|l| l.clone()))),
+                    EditOp::Silence => (edit::silence(&s, r), "Silence", Some(Box::new(move |l| edit::silence(l, r)))),
                     EditOp::Copy => {
                         self.sampling.clipboard = Some(edit::copy(&s, r));
                         self.status = "copied".into();
@@ -7961,18 +9655,28 @@ impl App {
                     EditOp::Cut => {
                         let (rest, clip) = edit::cut(&s, r);
                         self.sampling.clipboard = Some(clip);
-                        (rest, "Cut")
+                        (rest, "Cut", Some(Box::new(move |l| edit::cut(l, r).0)))
                     }
                     EditOp::Paste => {
                         let Some(clip) = self.sampling.clipboard.clone() else { return };
-                        (edit::paste(&s, r.0, &clip), "Paste")
+                        // What's pasted has no stems of its own.
+                        (edit::paste(&s, r.0, &clip), "Paste", None)
                     }
-                    EditOp::Duplicate => (edit::duplicate(&s, r), "Duplicate"),
-                    EditOp::Stretch | EditOp::AutoLoop | EditOp::Stems => return,
+                    EditOp::Duplicate => (edit::duplicate(&s, r), "Duplicate", Some(Box::new(move |l| edit::duplicate(l, r)))),
+                    EditOp::Stretch | EditOp::Munge | EditOp::AutoLoop | EditOp::Stems => return,
                 };
-                self.store_edit(out, label);
+                let shift = if op == EditOp::Truncate { r.0 } else { 0 };
+                self.store_edit(out, label, lane.as_deref().map(|l| (l, (shift, false))), None);
             }
+            S::MungeOpen(on) => {
+                self.sampling.munge = on.then(Default::default);
+                self.sampling.stretch = None;
+            }
+            S::SetMunge(m) => self.sampling.munge = Some(m),
+            S::MungeApply => self.munge_apply(),
+            S::MungeHear => self.munge_hear(),
             S::StretchOpen(on) => {
+                self.sampling.munge = None;
                 let tempo = self.doc.as_ref().map_or(120.0, |d| d.borrow().project().tempo);
                 self.sampling.stretch =
                     on.then_some(layout::sampling::Stretch { beat: true, tune: 0.0, src_bpm: tempo, new_bpm: tempo, speed: 100.0 });
@@ -7983,7 +9687,9 @@ impl App {
                 self.status = "stretching…".into();
                 let out = edit::stretch(&s, r, sx.factor(), sx.tune);
                 self.sampling.stretch = None;
-                self.store_edit(out, "Stretch");
+                let (factor, tune) = (sx.factor(), sx.tune);
+                let lane = move |l: &deckard_engine::sample::Sample| edit::stretch(l, r, factor, tune);
+                self.store_edit(out, "Stretch", Some((&lane, (0, true))), None);
             }
             S::SliceMode(m) => {
                 self.sampling.slice_mode = m;
@@ -7993,6 +9699,21 @@ impl App {
                 self.sampling.split = i;
                 self.compute_slices();
             }
+            S::FindCount(i) => {
+                self.sampling.find = i.min(layout::sampling::FIND_COUNTS.len() - 1);
+                self.compute_slices();
+            }
+            S::RandomCount(i) => {
+                self.sampling.random = i.min(layout::sampling::FIND_COUNTS.len() - 1);
+                self.compute_slices();
+            }
+            S::Reroll => {
+                self.sampling.seed = self.sampling.seed.wrapping_add(1);
+                self.compute_slices();
+            }
+            S::KeepSlice(i) => self.keep_slice(i),
+            S::Catch(free) => self.catch_slice(free),
+            S::KeyShift(i) => self.key_shift(i),
             S::GridDiv(i) => {
                 self.sampling.grid = i;
                 self.compute_slices();
@@ -8012,10 +9733,24 @@ impl App {
                     self.sampling.slices.sort_unstable();
                 }
             }
+            S::PlaySliceAt(f) => {
+                // To the next slice, or the end of what is being sliced.
+                let s = &self.sampling.slices;
+                if let Some(i) = s.iter().rposition(|&a| a <= f) {
+                    let selection = self.sampling.selection.take();
+                    let end = self.edit_range().map_or(self.sampling.len(), |r| r.1);
+                    self.sampling.selection = selection;
+                    let (a, b) = (s[i], s.get(i + 1).copied().unwrap_or(end));
+                    if b > a {
+                        self.sampling_call(deckard_lua_host::state::SamplingCall::Prehear(a, b));
+                    }
+                }
+            }
             S::RemoveSliceAt(f) => {
                 // The slice containing `f` joins the previous one.
                 if let Some(i) = self.sampling.slices.iter().rposition(|&s| s <= f).filter(|&i| i > 0) {
-                    self.sampling.slices.remove(i);
+                    let gone = self.sampling.slices.remove(i);
+                    self.sampling.kept.retain(|k| *k != gone);
                 }
             }
             S::MoveSlice(i, f) => {
@@ -8023,16 +9758,78 @@ impl App {
                 if i > 0 && i < s.len() {
                     let lo = s[i - 1] + 1;
                     let hi = s.get(i + 1).map_or(usize::MAX, |n| n - 1);
-                    s[i] = f.clamp(lo, hi);
+                    let was = std::mem::replace(&mut s[i], f.clamp(lo, hi));
+                    // (Kept, it stays kept where it goes.)
+                    let now = s[i];
+                    if let Some(k) = self.sampling.kept.iter_mut().find(|k| **k == was) {
+                        *k = now;
+                    }
                 }
             }
-            S::ClearSlices => self.sampling.slices.clear(),
+            S::ClearSlices => {
+                self.sampling.slices.clear();
+                self.sampling.kept.clear();
+            }
             S::PatternMode(m) => self.sampling.pattern_mode = m,
+            S::ApplyTo(k) => self.sampling.apply_to = k.min(1),
+            S::NoteOrder(on) => self.sampling.shuffle = on,
+            S::ExportSlices => self.export_slices(),
+            S::SliceToEnd(on) => self.sampling.slice_to_end = Some(on),
             S::ApplySlices => self.apply_slices(),
             S::FocusZone(i) => self.zone = i,
             S::ZoneMap(on) => self.sampling.zone_map = on,
             S::ZoneList(on) => self.sampling.zone_list = on,
             S::AddZones => self.add_zones(),
+            S::Meta(meta) => {
+                let Some(doc) = self.doc.clone() else { return };
+                let p = doc.borrow().project().clone();
+                let Some((zi, _, _, false)) = layout::sampling::edited(&p, (self.group, self.sound, self.zone)) else { return };
+                if let Err(e) = doc.borrow_mut().set_zone_meta(self.group, self.sound, zi, &meta, "Zone Tempo") {
+                    self.status = format!("can't change the zone: {e}");
+                }
+            }
+            S::Tap(t) => {
+                let taps = &mut self.sampling.taps;
+                if taps.last().is_some_and(|l| t - l > beat::TAP_GAP || t < *l) {
+                    taps.clear();
+                }
+                taps.push(t);
+                let Some(bpm) = beat::tap_bpm(taps) else { return };
+                let Some(doc) = self.doc.clone() else { return };
+                let p = doc.borrow().project().clone();
+                let Some((zi, zone, _, false)) = layout::sampling::edited(&p, (self.group, self.sound, self.zone)) else { return };
+                let (Some(meta), Some(s)) = (zone.meta, self.sampling.sample.as_ref()) else { return };
+                let meta = beat::with_bpm(&meta, bpm, s.frames.len() as f64 / s.rate.max(1) as f64);
+                // The taps of one count are one undo step.
+                let label = "Tap Tempo";
+                let mut d = doc.borrow_mut();
+                if self.sampling.taps.len() > 2 && d.undo_label() == Some(label) {
+                    d.undo();
+                }
+                if let Err(e) = d.set_zone_meta(self.group, self.sound, zi, &meta, label) {
+                    self.status = format!("can't change the zone: {e}");
+                }
+            }
+            S::Warp(w) => self.warp_act(w),
+            S::Reanalyze => self.reanalyze(),
+            S::ToProject(bpm) => {
+                let Some(doc) = self.doc.clone() else { return };
+                if let Err(e) = doc.borrow_mut().set_tempo(bpm) {
+                    self.status = format!("can't set the tempo: {e}");
+                }
+            }
+            S::PlayMode(mode) => {
+                let Some(doc) = self.doc.clone() else { return };
+                let p = doc.borrow().project().clone();
+                let Some((zi, zone, _, false)) = layout::sampling::edited(&p, (self.group, self.sound, self.zone)) else { return };
+                let Some(meta) = zone.meta else { return };
+                let meta = deckard_model::new_sampler::ZoneMeta { mode, ..meta };
+                if let Err(e) = doc.borrow_mut().set_zone_meta(self.group, self.sound, zi, &meta, "Play Mode") {
+                    self.status = format!("can't change how the zone plays: {e}");
+                }
+            }
+            S::Plays(plays) => self.set_plays(plays),
+            S::Motion(motion) => self.set_motion(motion),
             S::RemoveZone(i) => {
                 let Some(doc) = self.doc.clone() else { return };
                 let n = doc.borrow().project().groups[self.group].sounds[self.sound].sampler.as_ref().map_or(0, |s| s.zones.len());
@@ -8069,7 +9866,14 @@ impl App {
                 }
             }
             S::Record(r) => match r {
-                RecordAct::Start => self.start_recording(),
+                RecordAct::Start => {
+                    if self.session.active() && self.recorder.view.source == 2 {
+                        self.recorder.view.error =
+                            Some("Can't record from an internal source while a session recording is running. Stop it first.".into());
+                    } else {
+                        self.start_recording();
+                    }
+                }
                 RecordAct::Stop => {
                     let clock = self.record_clock();
                     let output = match &self.output {
@@ -8088,6 +9892,9 @@ impl App {
                     self.recorder.cancel(output);
                 }
                 // Parameters stay as they are while armed or recording.
+                RecordAct::Set(layout::sampling::RecParam::Layer, v) if !self.recorder.busy() => {
+                    self.recorder.view.choose_layer((self.group, self.sound), v)
+                }
                 RecordAct::Set(p, v) if !self.recorder.busy() => self.recorder.view.set(p, v),
                 RecordAct::Threshold(t) if !self.recorder.busy() => self.recorder.view.threshold = t.clamp(-60.0, 0.0),
                 RecordAct::MidiTo(m) if !self.recorder.busy() => self.recorder.view.auto.midi_to = m,
@@ -8095,9 +9902,34 @@ impl App {
                 RecordAct::Set(..) | RecordAct::Threshold(_) | RecordAct::MidiTo(_) => {}
                 RecordAct::FocusTake(i) => {
                     self.recorder.view.focused = Some(i);
+                    self.recorder.view.layer_choice = None;
+                    let (g, s) = (self.group, self.sound);
+                    // In Layers the take picked is what EDIT works on: its layer, if it
+                    // is on one; else the take itself, until it has one.
+                    let on = self.doc.as_ref().and_then(|d| {
+                        let d = d.borrow();
+                        let take = self.recorder.view.takes.get(i)?;
+                        layers::can_layer(d.project(), g, s).then(|| layers::take_layer(d.project(), g, s, take))
+                    });
+                    match on {
+                        Some(Some(lane)) => (self.zone, self.take_shown) = (lane, None),
+                        Some(None) => self.take_shown = Some((g, s)),
+                        None => self.take_shown = None,
+                    }
+                    // A Sampler Preview with a sample keeps it: a take clicked is only
+                    // focused, and its menu puts it on a layer. [DECKARD's choice]
+                    let kept = self.doc.as_ref().is_some_and(|d| !layers::layers_in(d.borrow().project(), g, s).is_empty());
+                    if let Some(p) = self.recorder.view.takes.get(i).cloned().filter(|_| !kept) {
+                        self.place_take(g, s, &p);
+                    }
+                }
+                RecordAct::ApplyLayer => self.apply_take_layer(),
+                RecordAct::TakeToLayer(i, lane) => {
+                    self.recorder.view.focused = Some(i);
+                    self.recorder.view.layer_choice = None;
                     if let Some(p) = self.recorder.view.takes.get(i).cloned() {
                         let (g, s) = (self.group, self.sound);
-                        self.place_take(g, s, &p);
+                        self.take_to_layer(g, s, &p, lane);
                     }
                 }
                 RecordAct::DeleteTake(i) => {
@@ -8107,25 +9939,170 @@ impl App {
                         self.unload_take(&path);
                     }
                     self.recorder.view.focused = None;
+                    self.recorder.view.layer_choice = None;
                 }
             },
+        }
+    }
+
+    /// The focused New Sampler zone's tempo and root again, heard in the part selected
+    /// (else the part it plays): a stretch of a song may have a tempo and a key of its
+    /// own. Its root stays if set by hand; its warp markers go (they were the old tempo's).
+    fn reanalyze(&mut self) {
+        let Some(doc) = self.doc.clone() else { return };
+        let Some(s) = self.sampling.sample.clone() else { return };
+        let p = doc.borrow().project().clone();
+        let Some((zi, zone, _, false)) = layout::sampling::edited(&p, (self.group, self.sound, self.zone)) else { return };
+        let Some(meta) = zone.meta else { return };
+        let (a, b) = self.sampling.selection.or_else(|| self.play_range_of_focused()).unwrap_or((0, s.frames.len()));
+        let (a, b) = (a.min(s.frames.len()), b.min(s.frames.len()));
+        if b <= a || s.rate == 0 {
+            return;
+        }
+        let mut found = deckard_analysis::analyse(&s.frames[a..b], s.rate, "");
+        // Its bass lane, if it has one, settles a key that's a close call.
+        if let Some(l) = self.sampling.lanes[BASS_LANE].as_ref().filter(|l| l.sample.frames.len() >= b) {
+            found.root = deckard_analysis::root_by_bass(&s.frames[a..b], s.rate, Some(&l.sample.frames[a..b]));
+        }
+        let seconds = s.frames.len() as f64 / f64::from(s.rate);
+        let mut m = meta.clone();
+        if let Some(t) = found.tempo {
+            m = deckard_model::new_sampler::ZoneMeta {
+                bpm_source: deckard_model::new_sampler::BpmSource::Audio,
+                grid_offset: (a + t.offset) as u64,
+                warps: Vec::new(),
+                ..beat::with_bpm(&m, t.bpm, seconds)
+            };
+        }
+        if let Some(r) = found.root.filter(|_| !m.root_locked) {
+            (m.root, m.cents, m.root_guess, m.key_minor) = (Some(r.note), r.cents, r.guess, r.minor);
+        }
+        self.status = match (found.tempo, found.root) {
+            (None, None) => "Reanalyze: no tempo or root heard there".into(),
+            (t, r) => format!(
+                "Reanalyze: {}{}",
+                t.map_or("no tempo".into(), |t| format!("{:.2} BPM", t.bpm)),
+                r.map_or(String::new(), |r| format!(", root {}{}", analysis::note_name(r.note), if r.guess { "?" } else { "" }))
+            ),
+        };
+        if m != meta
+            && let Err(e) = doc.borrow_mut().set_zone_meta(self.group, self.sound, zi, &m, "Reanalyze")
+        {
+            self.status = format!("can't change the zone: {e}");
+        }
+    }
+
+    /// The focused zone's root and/or tempo as stem lane `lane` alone has them (the part
+    /// selected, else the part the zone plays): a root set by hand stays. One undo step.
+    fn hear_lane(&mut self, lane: usize, root: bool, tempo: bool) {
+        let Some(doc) = self.doc.clone() else { return };
+        let name = deckard_model::new_sampler::LANE_NAMES.get(lane).copied().unwrap_or("stem");
+        let Some(l) = self.sampling.lanes.get(lane).and_then(Option::as_ref).map(|l| l.sample.clone()) else {
+            self.status = format!("no {name} stem here");
+            return;
+        };
+        let p = doc.borrow().project().clone();
+        let Some((zi, zone, _, false)) = layout::sampling::edited(&p, (self.group, self.sound, self.zone)) else { return };
+        let Some(meta) = zone.meta else { return };
+        let (a, b) = self.sampling.selection.or_else(|| self.play_range_of_focused()).unwrap_or((0, l.frames.len()));
+        let (a, b) = (a.min(l.frames.len()), b.min(l.frames.len()));
+        if b <= a || l.rate == 0 {
+            return;
+        }
+        let part = &l.frames[a..b];
+        let mut m = meta.clone();
+        let mut said = Vec::new();
+        if tempo {
+            match deckard_analysis::tempo(part, l.rate, None) {
+                Some(t) => {
+                    let seconds = l.frames.len() as f64 / f64::from(l.rate);
+                    m = deckard_model::new_sampler::ZoneMeta {
+                        bpm_source: deckard_model::new_sampler::BpmSource::Audio,
+                        grid_offset: (a + t.offset) as u64,
+                        warps: Vec::new(),
+                        ..beat::with_bpm(&m, t.bpm, seconds)
+                    };
+                    said.push(format!("{:.2} BPM", t.bpm));
+                }
+                None => said.push("no tempo heard".into()),
+            }
+        }
+        if root {
+            match deckard_analysis::root(part, l.rate) {
+                Some(_) if m.root_locked => said.push("the root is set by hand: it stays".into()),
+                Some(r) => {
+                    (m.root, m.cents, m.root_guess, m.key_minor) = (Some(r.note), r.cents, r.guess, r.minor);
+                    said.push(format!("root {}{}", analysis::note_name(r.note), if r.guess { "?" } else { "" }));
+                }
+                None => said.push("no root heard".into()),
+            }
+        }
+        self.status = format!("From the {name} stem: {}", said.join(", "));
+        if m != meta
+            && let Err(e) = doc.borrow_mut().set_zone_meta(self.group, self.sound, zi, &m, "Analyse Stem")
+        {
+            self.status = format!("can't change the zone: {e}");
         }
     }
 
     /// Slice positions for the current mode (Manual keeps the ones set by hand).
     fn compute_slices(&mut self) {
         use deckard_engine::edit;
-        use layout::sampling::{GRID_DIVS, SPLIT_COUNTS};
+        use layout::sampling::{FIND_COUNTS, GRID_DIVS, SPLIT_COUNTS};
         let Some(s) = self.sampling.sample.clone() else { return };
-        let r = self.play_range_of_focused().unwrap_or((0, s.frames.len()));
-        let st = &mut self.sampling;
-        st.slices = match st.slice_mode {
-            0 => edit::split_positions(r, SPLIT_COUNTS[st.split]),
+        let r = self.slice_range().unwrap_or((0, s.frames.len()));
+        // Kept slices are Find's and Random's, and only where slicing still reaches.
+        if !matches!(self.sampling.slice_mode, 4 | 5) {
+            self.sampling.kept.clear();
+        }
+        self.sampling.kept.retain(|k| (r.0..r.1).contains(k));
+        // Split and Grid go from the playhead on while the sample plays, or from where a
+        // selection starts (a sliced sample's is its focused slice: not that).
+        let selection = self.sampling.selection.filter(|_| self.sampling.selected && self.chops().is_none());
+        // (PLAY's playhead: not a slice pad's, nor the song's notes.)
+        let playhead = self.sampling.playhead.filter(|_| self.audition.is_some());
+        let from = chop::slicer_range(r, playhead, selection);
+        let st = &self.sampling;
+        let slices = match st.slice_mode {
+            0 => edit::split_positions(from, SPLIT_COUNTS[st.split]),
             1 => {
-                let tempo = self.doc.as_ref().map_or(120.0, |d| d.borrow().project().tempo);
-                edit::grid_positions(s.rate, r, tempo, GRID_DIVS[st.grid].0)
+                // A New Sampler zone with a tempo: on its own beats. Else at the song's.
+                let map = self.doc.as_ref().and_then(|d| {
+                    let d = d.borrow();
+                    let snd = d.project().groups.get(self.group)?.sounds.get(self.sound)?;
+                    snd.new_sampler?;
+                    let m = snd.sampler.as_ref()?.zones.get(self.zone)?.meta.as_ref()?;
+                    deckard_model::new_sampler::BeatMap::of(m, s.rate)
+                });
+                match map {
+                    Some(map) => beat::grid_slices(&map, from, GRID_DIVS[st.grid].0),
+                    None => {
+                        let tempo = self.doc.as_ref().map_or(120.0, |d| d.borrow().project().tempo);
+                        edit::grid_positions(s.rate, from, tempo, GRID_DIVS[st.grid].0)
+                    }
+                }
             }
             2 => edit::detect_positions(&s, r, st.sensitivity, st.zero_x),
+            4 => {
+                // Where things start: on the sample's own bars (or beats, of a short one)
+                // when the zone has a tempo, else on its hits.
+                let count = FIND_COUNTS[st.find.min(FIND_COUNTS.len() - 1)];
+                let lines = self.find_lines(s.rate, r, count);
+                let mut found = deckard_analysis::find_samples_keeping(&s.frames, s.rate, r, &lines, count, &st.kept);
+                if found.is_empty() {
+                    found.push(r.0);
+                }
+                found
+            }
+            5 => {
+                // Any of the places Find weighs, the kept ones staying.
+                let count = FIND_COUNTS[st.random.min(FIND_COUNTS.len() - 1)];
+                let mut picked = chop::random_picks(&self.slice_candidates(&s, r, count), &st.kept, count, st.seed, s.rate as usize / 25);
+                if picked.is_empty() {
+                    picked.push(r.0);
+                }
+                picked
+            }
             _ => {
                 if st.slices.is_empty() {
                     vec![r.0]
@@ -8134,6 +10111,35 @@ impl App {
                 }
             }
         };
+        self.sampling.slices = slices;
+    }
+
+    /// The focused sound's zones of the focused zone's file, when there's more than one
+    /// (the sample was sliced): the frames they play between them, their starts in
+    /// order, and each start's zone.
+    fn chops(&self) -> Option<((usize, usize), Vec<usize>, Vec<usize>)> {
+        let doc = self.doc.as_ref()?.borrow();
+        let zones = &doc.project().groups.get(self.group)?.sounds.get(self.sound)?.sampler.as_ref()?.zones;
+        let file = &zones.get(self.zone)?.sample;
+        let len = self.sampling.len();
+        let mut of: Vec<(usize, usize, usize)> = zones
+            .iter()
+            .enumerate()
+            .filter(|(_, z)| &z.sample == file && z.play_range.1 > z.play_range.0)
+            .map(|(i, z)| (z.play_range.0.max(0) as usize, (z.play_range.1 as usize + 1).min(len), i))
+            .collect();
+        of.sort_unstable();
+        of.dedup_by_key(|z| z.0);
+        (of.len() > 1).then(|| {
+            let span = (of[0].0, of.iter().map(|z| z.1).max().unwrap_or(len));
+            (span, of.iter().map(|z| z.0).collect(), of.iter().map(|z| z.2).collect())
+        })
+    }
+
+    /// The frames slicing works on: all a sliced sample's slices play, else the focused
+    /// zone's play range.
+    fn slice_range(&self) -> Option<(usize, usize)> {
+        self.chops().map(|c| c.0).or_else(|| self.play_range_of_focused())
     }
 
     fn play_range_of_focused(&self) -> Option<(usize, usize)> {
@@ -8143,24 +10149,107 @@ impl App {
         Some(if z.play_range.1 > z.play_range.0 { (z.play_range.0 as usize, (z.play_range.1 as usize + 1).min(len)) } else { (0, len) })
     }
 
-    /// APPLY: one zone per slice on the same sample, keys from C1 (MIDI 36); with
+    /// What a note does with the focused New Sampler slice. A one-shot that would play on
+    /// to the sample's end stops at the next slice instead (its E marker moves from there);
+    /// a loop with no frame of its own takes the slice (its start to the next one's); held
+    /// again, a slice cut short at the next one plays on to the end as it did.
+    fn set_plays(&mut self, plays: deckard_model::new_sampler::Plays) {
+        use deckard_model::new_sampler::{Plays, ZoneMeta};
+        use mxprj::decode::Value;
+        let Some(doc) = self.doc.clone() else { return };
+        let p = doc.borrow().project().clone();
+        let (g, s) = (self.group, self.sound);
+        let Some((zi, zone, _, false)) = layout::sampling::edited(&p, (g, s, self.zone)) else { return };
+        let Some(meta) = zone.meta.clone() else { return };
+        let Some(zones) = p.groups.get(g).and_then(|x| x.sounds.get(s)).and_then(|x| x.sampler.as_ref()).map(|x| &x.zones) else { return };
+        let len = self.sampling.len() as i64;
+        if len < 2 {
+            return;
+        }
+        let (lo, hi) = zone.play_range;
+        let (a, b) = if hi > lo { (lo.max(0), hi.min(len - 1)) } else { (0, len - 1) };
+        // Where this slice ends: the next one's start, or the sample's end.
+        let next = zones
+            .iter()
+            .filter(|z| z.sample == zone.sample && z.play_range.1 > z.play_range.0)
+            .map(|z| z.play_range.0)
+            .filter(|&x| x > a)
+            .min();
+        let slice_end = next.map_or(len - 1, |n| n - 1).max(a + 1);
+        let mut set: Vec<(&str, f64)> = Vec::new();
+        // No longer a one-shot, it plays on past the next slice again.
+        let mut b = b;
+        if plays != Plays::Once && meta.once && b == slice_end {
+            b = len - 1;
+            set.push(("play_range/high", b as f64));
+        }
+        match plays {
+            Plays::Held => set.push(("loop_active", 0.0)),
+            Plays::Once => {
+                set.push(("loop_active", 0.0));
+                if b >= len - 1 {
+                    set.push(("play_range/high", slice_end as f64));
+                }
+            }
+            Plays::Loop => {
+                let (la, lb) = zone.loop_range;
+                // A frame of its own: inside what it plays, and not the whole sample's.
+                let own = lb > la && la >= a && lb <= b && !(la <= 0 && lb >= len - 1 && slice_end < len - 1);
+                if !own {
+                    set.push(("loop_range/low", a as f64));
+                    set.push(("loop_range/high", slice_end.min(b) as f64));
+                }
+                set.push(("loop_active", 1.0));
+            }
+        }
+        let meta = ZoneMeta { once: plays == Plays::Once, ..meta };
+        let label = "Slice Plays";
+        let done = doc.borrow_mut().transaction(label, |d| {
+            for (field, v) in &set {
+                d.set(label, deckard_doc::Target::Zone(g, s, zi), field, Value::Float(*v))?;
+            }
+            d.set_zone_meta(g, s, zi, &meta, label)
+        });
+        if let Err(e) = done {
+            self.status = format!("can't change how the slice plays: {e}");
+        }
+    }
+
+    /// APPLY: one zone per slice on the same sample, keys from C3 (`SLICE_KEY`, where a pad plays); with
     /// "Create/Replace Pattern", a note per slice at its time in the focused pattern.
     fn apply_slices(&mut self) {
+        /// The first slice's key: C3, the key a pad plays.
+        const SLICE_KEY: usize = 60;
         let Some(doc) = self.doc.clone() else { return };
         let Some(s) = self.sampling.sample.clone() else { return };
-        let end = self.play_range_of_focused().map_or(s.frames.len(), |r| r.1);
+        let end = self.slice_range().map_or(s.frames.len(), |r| r.1);
         let slices = deckard_engine::edit::slices_from(&self.sampling.slices, end);
         if slices.len() < 2 {
             return;
         }
+        if self.sampling.apply_to == 1 {
+            return self.apply_slices_to_pads(&s, &slices, end);
+        }
         let zi = self.zone;
+        // Sliced before: a slice still where it was keeps its zone's settings (its lanes'
+        // mutes, its tune), a new or moved one takes the focused zone's.
+        let was = self.chops().map(|c| (c.1, c.2)).unwrap_or_default();
+        let zone_of = |a: usize| was.0.iter().position(|&s| s == a).map_or(zi, |k| was.1[k]);
+        let (g, snd) = (self.group, self.sound);
+        // Start points: each slice plays on to the end, for as long as its pad is held.
+        let new_sampler = layers::own(doc.borrow().project(), g, snd);
+        let to_end = self.sampling.slices_to_end(new_sampler);
+        // (Before the zones change: a Sync zone's notes go by its own tempo.)
+        let ticks_per_frame = self.slice_ticks_per_frame(doc.borrow().project(), s.rate);
+        let shuffle_seed = self.shuffle_seed();
         let specs: Vec<deckard_doc::ZoneSpec> = slices
             .iter()
             .enumerate()
             .map(|(i, &(a, b))| {
-                let key = (36 + i).min(127) as f64;
+                let b = if to_end { end } else { b };
+                let key = (SLICE_KEY + i).min(127) as f64;
                 deckard_doc::ZoneSpec {
-                    from: deckard_doc::ZoneFrom::Zone(zi),
+                    from: deckard_doc::ZoneFrom::Zone(zone_of(a)),
                     file: None,
                     set: vec![
                         ("play_range/low", a as f64),
@@ -8175,13 +10264,23 @@ impl App {
                 }
             })
             .collect();
-        let (g, snd) = (self.group, self.sound);
-        if let Err(e) = doc.borrow_mut().set_zones(g, snd, &specs, "Apply Slices") {
+        let done = doc.borrow_mut().transaction("Apply Slices", |d| {
+            d.set_zones(g, snd, &specs, "Apply Slices")?;
+            // A one-shot would play on to the end whatever the pad does: the notes end it.
+            let one_shot = d.project().groups[g].sounds[snd].sampler.as_ref().is_some_and(|x| x.envelope_type == 0);
+            if to_end && one_shot {
+                d.set("Apply Slices", deckard_doc::Target::Sampler(g, snd), "envelope_type", mxprj::decode::Value::Float(2.0))?;
+                d.set("Apply Slices", deckard_doc::Target::Sampler(g, snd), "volume_envelope/release", mxprj::decode::Value::Float(0.1))?;
+            }
+            Ok(())
+        });
+        if let Err(e) = done {
             self.status = format!("can't apply the slices: {e}");
             return;
         }
         self.zone = 0;
         self.sampling.slices.clear();
+        self.sampling.kept.clear();
         self.sampling.tab = 3;
         if self.sampling.pattern_mode < 2 {
             // A note per slice, at the slice's time at the song tempo.
@@ -8189,18 +10288,19 @@ impl App {
             let p = d.project().clone();
             let pi = self.pattern;
             let Some(pat) = p.groups.get(g).and_then(|gr| gr.patterns.get(pi)) else { return };
-            let ticks_per_frame = p.tempo / 60.0 * deckard_model::PPQ as f64 / s.rate.max(1) as f64;
             let a0 = slices[0].0;
+            // (Shuffled: a note's time is its own, the slice it plays another's.)
+            let order = chop::note_order(slices.len(), self.sampling.shuffle, shuffle_seed);
             let add: Vec<Note> = slices
                 .iter()
-                .enumerate()
-                .map(|(i, &(a, b))| Note {
+                .zip(&order)
+                .map(|(&(a, _), &k)| Note {
                     ratchet: Default::default(),
                     expr: None,
                     sound: snd,
                     position: pat.start + ((a - a0) as f64 * ticks_per_frame) as i64,
-                    length: (((b - a) as f64 * ticks_per_frame) as i64).max(1),
-                    pitch: (36 + i).min(127) as i64,
+                    length: (((slices[k].1 - slices[k].0) as f64 * ticks_per_frame) as i64).max(1),
+                    pitch: (SLICE_KEY + k).min(127) as i64,
                     velocity: 100,
                     probability: 100,
                 })
@@ -8216,7 +10316,12 @@ impl App {
     /// Zone list "+": load samples as new zones (each over all keys and velocities).
     fn add_zones(&mut self) {
         let Some(doc) = self.doc.clone() else { return };
-        let Some(files) = rfd::FileDialog::new().add_filter("Audio", &["wav", "aif", "aiff", "aifc"]).pick_files() else { return };
+        let Some(files) = rfd::FileDialog::new().add_filter("Audio", &deckard_engine::sample::EXTENSIONS).pick_files() else { return };
+        // (In Layers what comes in is a layer.)
+        if layers::can_layer(doc.borrow().project(), self.group, self.sound) {
+            let at = layers::layers_in(doc.borrow().project(), self.group, self.sound).len();
+            return self.layer_files(at, &files);
+        }
         let n = doc.borrow().project().groups[self.group].sounds[self.sound].sampler.as_ref().map_or(0, |s| s.zones.len());
         let mut specs: Vec<deckard_doc::ZoneSpec> =
             (0..n).map(|k| deckard_doc::ZoneSpec { from: deckard_doc::ZoneFrom::Zone(k), file: None, set: Vec::new() }).collect();
@@ -8337,48 +10442,63 @@ impl App {
         let mut open = true;
         let mut edits: Vec<(String, f64)> = Vec::new();
         let (mut on, mut lock) = (self.repeat_soft, self.arp_locked);
-        egui::Window::new("Note Repeat / Arp").open(&mut open).resizable(false).show(ctx, |ui| {
-            crate::layout::dialog_style(ui);
-            ui.horizontal(|ui| {
-                ui.toggle_value(&mut on, "On").on_hover_text("Held pads (and ⌘K's keys) repeat; the Arp with the pads in keyboard mode");
-                ui.toggle_value(&mut lock, "Lock").on_hover_text("Stays on outside the MK3's NOTE REPEAT page");
-                ui.separator();
-                let shown = view.knobs.iter().find(|k| k.key == "arp/preset").map_or(0, |k| k.value as usize);
-                // Presets 1–4 (item 0 is none).
-                for (i, name) in
-                    view.lists.iter().find(|(k, _)| k == "arp/preset").map(|x| x.1.clone()).unwrap_or_default().iter().enumerate().skip(1)
-                {
-                    if ui.selectable_label(shown == i, name).clicked() {
-                        edits.push(("arp/preset".into(), i as f64));
-                    }
-                }
-            });
-            ui.separator();
-            egui::Grid::new("arp-settings").num_columns(2).spacing([20.0, 10.0]).show(ui, |ui| {
-                for k in view.knobs.iter().filter(|k| k.key != "arp/preset") {
-                    ui.label(&k.name);
-                    match view.lists.iter().find(|(key, _)| *key == k.key) {
-                        Some((_, list)) => {
-                            crate::layout::combo(&k.key).selected_text(&k.text).show_ui(ui, |ui| {
-                                for (i, name) in list.iter().enumerate() {
-                                    if ui.selectable_label(k.value.round() as usize == i, name).clicked() {
-                                        edits.push((k.key.clone(), i as f64));
-                                    }
-                                }
-                            });
+        egui::Window::new("Note Repeat / Arp")
+            .open(&mut open)
+            .resizable(false)
+            .max_height(crate::layout::dialog_max_height(ctx))
+            .max_width(crate::layout::dialog_max_width(ctx))
+            .vscroll(true)
+            .show(ctx, |ui| {
+                crate::layout::dialog_style(ui);
+                ui.horizontal(|ui| {
+                    ui.toggle_value(&mut on, "On")
+                        .on_hover_text("Held pads (and ⌘K's keys) repeat; the Arp with the pads in keyboard mode");
+                    ui.toggle_value(&mut lock, "Lock").on_hover_text("Stays on outside the MK3's NOTE REPEAT page");
+                    ui.separator();
+                    let shown = view.knobs.iter().find(|k| k.key == "arp/preset").map_or(0, |k| k.value as usize);
+                    // Presets 1–4 (item 0 is none).
+                    for (i, name) in view
+                        .lists
+                        .iter()
+                        .find(|(k, _)| k == "arp/preset")
+                        .map(|x| x.1.clone())
+                        .unwrap_or_default()
+                        .iter()
+                        .enumerate()
+                        .skip(1)
+                    {
+                        if ui.selectable_label(shown == i, name).clicked() {
+                            edits.push(("arp/preset".into(), i as f64));
                         }
-                        None => {
-                            let mut v = k.value;
-                            let slider = egui::Slider::new(&mut v, k.min..=k.max).step_by(k.step).custom_formatter(|_, _| k.text.clone());
-                            if ui.add(slider).changed() {
-                                edits.push((k.key.clone(), v));
+                    }
+                });
+                ui.separator();
+                egui::Grid::new("arp-settings").num_columns(2).spacing([20.0, 10.0]).show(ui, |ui| {
+                    for k in view.knobs.iter().filter(|k| k.key != "arp/preset") {
+                        ui.label(&k.name);
+                        match view.lists.iter().find(|(key, _)| *key == k.key) {
+                            Some((_, list)) => {
+                                crate::layout::combo(&k.key).selected_text(&k.text).show_ui(ui, |ui| {
+                                    for (i, name) in list.iter().enumerate() {
+                                        if ui.selectable_label(k.value.round() as usize == i, name).clicked() {
+                                            edits.push((k.key.clone(), i as f64));
+                                        }
+                                    }
+                                });
+                            }
+                            None => {
+                                let mut v = k.value;
+                                let slider =
+                                    egui::Slider::new(&mut v, k.min..=k.max).step_by(k.step).custom_formatter(|_, _| k.text.clone());
+                                if ui.add(slider).changed() {
+                                    edits.push((k.key.clone(), v));
+                                }
                             }
                         }
+                        ui.end_row();
                     }
-                    ui.end_row();
-                }
+                });
             });
-        });
         self.repeat_panel = open;
         self.repeat_soft = on;
         if lock != self.arp_locked {
@@ -8506,18 +10626,20 @@ impl App {
         }
         // The tab: whichever side changed it since they last agreed (at first, the app's).
         let mut tab = None;
+        // (Maschine's scripts have no LAYERS: they show ZONE for it.)
+        let app_tab = self.sampling.tab.min(3);
         if self.hw_sampling_tab.is_some_and(|t| t != hw_tab) {
             self.sampling_act(layout::sampling::SamplingAct::Tab(hw_tab));
-        } else if self.sampling.tab != hw_tab {
-            tab = Some(self.sampling.tab);
+        } else if app_tab != hw_tab {
+            tab = Some(app_tab);
         }
-        self.hw_sampling_tab = Some(self.sampling.tab);
+        self.hw_sampling_tab = Some(self.sampling.tab.min(3));
         let at = (self.group, self.sound, self.zone);
         let pages = self.doc.as_ref().map(|d| {
             let d = d.borrow();
-            let record = record_knobs::knobs(&self.recorder.view, &self.settings, d.project());
+            let record = record_knobs::knobs(&self.recorder.view, &self.settings, d.project(), (self.group, self.sound), false, None);
             (
-                sampling_hw::pages(record, &self.sampling, d.project(), at),
+                sampling_hw::pages(record, &self.sampling, d.project(), at, false),
                 sampling_hw::sample_view(&self.sampling, d.project(), at, focus_slice),
             )
         });
@@ -8537,7 +10659,7 @@ impl App {
         st.stems = self.stems.as_ref().map(|j| deckard_lua_host::state::StemsRun { focused: j.source == at, progress: j.progress() });
         if let Some((k, sample)) = pages {
             st.sample = sample;
-            for (t, pages) in k.tabs.into_iter().enumerate() {
+            for (t, pages) in k.tabs.into_iter().take(4).enumerate() {
                 st.sampling_page[t] = st.sampling_page[t].min(pages.len().saturating_sub(1));
                 st.sampling_pages[t] = pages;
             }
@@ -8554,6 +10676,10 @@ impl App {
         let act = match self.record_apply.get(key).cloned() {
             Some(Apply::Record(a)) => {
                 use record_knobs::Apply as R;
+                if a == R::Sampler {
+                    let mode = deckard_model::new_sampler::SamplerMode::ALL[at.min(2)];
+                    return self.ask_sampler_mode(mode, true);
+                }
                 SamplingAct::Record(match a {
                     R::Param(p, None) => RecordAct::Set(p, value.round() as i64),
                     R::Param(p, Some(values)) => match values.get(at) {
@@ -8565,6 +10691,7 @@ impl App {
                         Some(p) => RecordAct::MidiTo(p.clone()),
                         None => return,
                     },
+                    R::Sampler => return,
                 })
             }
             Some(Apply::Zone(path)) => {
@@ -8579,17 +10706,132 @@ impl App {
             }
             Some(Apply::Selection(end)) => {
                 let len = self.sampling.len();
-                let (a, b) = self.sampling.selection.unwrap_or_else(|| self.play_range_of_focused().unwrap_or((0, len)));
+                // (A take on no layer: all of it, not the layer's range behind it.)
+                let whole = self.shown_take().map(|_| (0, len));
+                let (a, b) = self.sampling.selection.or(whole).unwrap_or_else(|| self.play_range_of_focused().unwrap_or((0, len)));
                 let v = value.round().max(0.0) as usize;
                 let (a, b) = if end { (a, v.max(a + 1)) } else { (v.min(b.saturating_sub(1)), b) };
                 SamplingAct::Select(Some((a, b.min(len))))
             }
             Some(Apply::SliceMode) => SamplingAct::SliceMode(sampling_hw::app_slice_mode(value)),
             Some(Apply::SplitCount) => SamplingAct::SplitCount(at),
+            Some(Apply::FindCount) => SamplingAct::FindCount(at),
+            Some(Apply::RandomCount) => SamplingAct::RandomCount(at),
             Some(Apply::GridDiv) => SamplingAct::GridDiv(at),
             Some(Apply::Sensitivity) => SamplingAct::Sensitivity(value.clamp(0.0, 1.0)),
             Some(Apply::ZeroX) => SamplingAct::ZeroX(value >= 0.5),
             Some(Apply::PatternMode) => SamplingAct::PatternMode(at),
+            Some(Apply::ApplyTo) => SamplingAct::ApplyTo(at),
+            Some(Apply::NoteOrder) => SamplingAct::NoteOrder(value >= 0.5),
+            Some(Apply::LaneGain(k)) => {
+                let gain = if value <= -60.0 { 0.0 } else { 10f64.powf(value.min(6.0) / 20.0) };
+                SamplingAct::Lane(k, layout::sampling::LaneAct::Gain(gain))
+            }
+            Some(Apply::Layer(k)) => {
+                use layout::sampling::LayerAct as L;
+                use sampling_hw::{LayerKnob as K, time_at};
+                let lane = self.zone;
+                SamplingAct::Layer(
+                    lane,
+                    match k {
+                        K::Pan => L::Pan(value),
+                        K::Tune => L::Tune(value),
+                        K::Root => L::Root(value.round() as i64),
+                        K::Attack => L::Attack(time_at(at)),
+                        K::Decay => L::Decay(time_at(at)),
+                        K::Sustain => L::Sustain(value),
+                        K::Release => L::Release(time_at(at)),
+                        K::Window(point) => L::Window(point, value),
+                    },
+                )
+            }
+            Some(Apply::Morph(k)) => {
+                use deckard_model::layers::{Fade, Shape};
+                use layout::sampling::MorphAct as M;
+                use sampling_hw::MorphKnob as K;
+                SamplingAct::Morph(match k {
+                    K::On => M::On(value >= 0.5),
+                    K::Position => M::Position(value),
+                    K::Rate => match sampling_hw::rate_at(at) {
+                        (true, bars) => M::Bars(bars),
+                        (false, seconds) => M::Seconds(seconds),
+                    },
+                    K::Shape => M::Shape(if value >= 0.5 { Shape::Back } else { Shape::Round }),
+                    K::Depth => M::Depth(value),
+                    K::Reset => M::Reset(value >= 0.5),
+                    K::Fade => M::Fade(if value >= 0.5 { Fade::Power } else { Fade::Linear }),
+                })
+            }
+            Some(Apply::WarpGrid) => SamplingAct::Warp(layout::sampling::WarpAct::Grid(at)),
+            Some(Apply::WarpStrength) => SamplingAct::Warp(layout::sampling::WarpAct::Strength(value.clamp(0.0, 1.0))),
+            Some(Apply::LoopLength) => {
+                let Some(doc) = self.doc.clone() else { return };
+                let Some((_, z, t, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {
+                    return;
+                };
+                let Some(rate) = self.sampling.sample.as_ref().map(|s| s.rate) else { return };
+                let (unit, step, _) = sampling_hw::loop_unit(z.meta.as_ref().and_then(|m| m.bpm), rate);
+                // On the step's lines: a loop of an odd length takes the nearest.
+                let n = ((value / step).round().max(1.0) * step * unit).round() as i64;
+                let last = if z.play_range.1 > z.play_range.0 { z.play_range.1 } else { self.sampling.len() as i64 - 1 };
+                let end = (z.loop_range.0 + n - 1).clamp(z.loop_range.0 + 1, last.max(z.loop_range.0 + 1));
+                layout::apply_acts(self, vec![layout::Act::SetParam(t, "loop_range/high", end as f64)]);
+                return;
+            }
+            Some(Apply::Plays) => SamplingAct::Plays(deckard_model::new_sampler::Plays::ALL[at.min(2)]),
+            Some(Apply::Motion) => SamplingAct::Motion(deckard_model::new_sampler::Motion::ALL[at.min(2)]),
+            Some(
+                a @ (Apply::PlayMode
+                | Apply::Bpm
+                | Apply::Beats
+                | Apply::Root
+                | Apply::PlaysAt
+                | Apply::StartGrid
+                | Apply::Speed
+                | Apply::Reverse
+                | Apply::Tail),
+            ) => {
+                use deckard_model::new_sampler::PlayMode;
+                let Some(doc) = self.doc.clone() else { return };
+                let Some((_, z, t, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {
+                    return;
+                };
+                let Some(m) = z.meta else { return };
+                let seconds = self.sampling.sample.as_ref().map_or(0.0, |s| s.frames.len() as f64 / s.rate.max(1) as f64);
+                match a {
+                    Apply::PlayMode => {
+                        let mode = [PlayMode::Repitch, PlayMode::Sync, PlayMode::Keys][at.min(2)];
+                        if mode != PlayMode::Repitch && m.bpm.is_none() {
+                            return;
+                        }
+                        SamplingAct::PlayMode(mode)
+                    }
+                    Apply::Bpm => SamplingAct::Meta(beat::with_bpm(&m, value, seconds)),
+                    Apply::Beats => match beat::with_beats(&m, sampling_hw::beats_turned(m.beats, value), seconds) {
+                        Some(m) => SamplingAct::Meta(m),
+                        None => return,
+                    },
+                    Apply::Root => SamplingAct::Meta(beat::with_root(&m, at.min(127) as u8)),
+                    Apply::Speed => {
+                        SamplingAct::Meta(deckard_model::new_sampler::ZoneMeta { speed: (value.round() / 100.0).clamp(0.25, 4.0), ..m })
+                    }
+                    Apply::Reverse => SamplingAct::Meta(deckard_model::new_sampler::ZoneMeta { reverse: value >= 0.5, ..m }),
+                    Apply::Tail => {
+                        use deckard_model::new_sampler::{TAIL_MAX, ZoneMeta};
+                        SamplingAct::Meta(ZoneMeta { tail: ((value / 10.0).round() * 10.0).clamp(0.0, TAIL_MAX), ..m })
+                    }
+                    Apply::StartGrid => {
+                        use deckard_model::new_sampler::{StartGrid, ZoneMeta};
+                        SamplingAct::Meta(ZoneMeta { start: StartGrid::ALL[at.min(StartGrid::ALL.len() - 1)], ..m })
+                    }
+                    _ => {
+                        let Some(r) = m.root else { return };
+                        let tune = beat::tune_for(r, m.cents, at.min(127) as i64).clamp(-36.0, 36.0);
+                        layout::apply_acts(self, vec![layout::Act::SetParam(t, "tune", tune)]);
+                        return;
+                    }
+                }
+            }
             Some(Apply::None) | None => return,
         };
         self.sampling_act(act);
@@ -8630,6 +10872,7 @@ impl App {
                 if end > a + 1 {
                     s.insert(i + 1, (a + end) / 2);
                     self.sampling.slice_mode = 3;
+                    self.sampling.kept.clear();
                 }
                 return;
             }
@@ -8637,26 +10880,196 @@ impl App {
                 if i > 0 && i < self.sampling.slices.len() {
                     self.sampling.slices.remove(i);
                     self.sampling.slice_mode = 3;
+                    self.sampling.kept.clear();
                 }
                 return;
             }
             C::ClearSlices => S::ClearSlices,
+            C::CatchSlice(free) => S::Catch(free),
+            C::KeepSlice(i) => S::KeepSlice(i),
+            C::KeyShift(i) => S::KeyShift(i),
+            C::Reroll => S::Reroll,
             C::MoveSlice(i, f) => S::MoveSlice(i, f),
             C::ApplySlices => S::ApplySlices,
             C::RemoveZone(i) => S::RemoveZone(i),
             C::FocusZone(i) => S::FocusZone(i),
+            C::FocusLayer(k) => S::Layer(k, layout::sampling::LayerAct::Focus),
+            C::LayerMute(k) => S::Layer(k, layout::sampling::LayerAct::Mute),
+            C::LayerSolo(k) => S::Layer(k, layout::sampling::LayerAct::Solo),
+            C::RemoveLayer(k) => S::Layer(k, layout::sampling::LayerAct::Remove),
+            C::ApplyTakeLayer => S::Record(layout::sampling::RecordAct::ApplyLayer),
+            C::SamplerMode(m) => S::Sampler(deckard_model::new_sampler::SamplerMode::ALL[usize::from(m).min(2)]),
+            C::SamplerAnswer(ok) => S::SamplerAnswer(ok),
+            C::LayerLevel(v) => S::Layer(self.zone, layout::sampling::LayerAct::Level(v)),
+            C::SpreadLayers => S::Morph(layout::sampling::MorphAct::Spread),
+            C::LaneMute(k) => S::Lane(k, layout::sampling::LaneAct::Mute),
+            C::LaneSolo(k) => S::Lane(k, layout::sampling::LaneAct::Solo),
+            C::Warp(k) => {
+                use layout::sampling::WarpAct as W;
+                S::Warp([W::Detect, W::Quantize, W::Clear][k.min(2)])
+            }
+            C::Convert => {
+                let Some(doc) = self.doc.clone() else { return };
+                let to_new = doc
+                    .borrow()
+                    .project()
+                    .groups
+                    .get(self.group)
+                    .and_then(|x| x.sounds.get(self.sound))
+                    .is_some_and(|x| x.new_sampler.is_none());
+                self.convert_instrument(to_new);
+                return;
+            }
+            C::Reanalyze => {
+                self.reanalyze();
+                return;
+            }
+            C::LaneHear(lane, root, tempo) => {
+                self.hear_lane(lane, root, tempo);
+                return;
+            }
+            C::MatchKey => {
+                let Some(doc) = self.doc.clone() else { return };
+                let Some((_, z, t, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {
+                    return;
+                };
+                let Some((r, cents)) = z.meta.and_then(|m| Some((m.root?, m.cents))) else { return };
+                let tune = beat::match_tune(r, cents, self.scale.0).clamp(-36.0, 36.0);
+                layout::apply_acts(self, vec![layout::Act::SetParam(t, "tune", tune)]);
+                return;
+            }
+            C::ScaleBpm(_) | C::ToProject => {
+                let Some(doc) = self.doc.clone() else { return };
+                let Some((_, z, _, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {
+                    return;
+                };
+                let Some((m, bpm)) = z.meta.and_then(|m| Some((m.clone(), m.bpm?))) else { return };
+                match c {
+                    C::ScaleBpm(up) => {
+                        let seconds = self.sampling.sample.as_ref().map_or(0.0, |s| s.frames.len() as f64 / s.rate.max(1) as f64);
+                        S::Meta(beat::with_bpm(&m, if up { bpm * 2.0 } else { bpm / 2.0 }, seconds))
+                    }
+                    _ => S::ToProject(bpm),
+                }
+            }
             // A slice's pad: hear the slice (C63).
             C::Prehear(a, b) => {
                 if let Some(part) = self.sampling_part(a, b) {
                     self.ensure_engine();
+                    // As loud as the sound is in the mix: its level, its group's, the master's
+                    // (the prehear itself goes round all three).
+                    let gain = self.doc.as_ref().map_or(1.0, |d| {
+                        let d = d.borrow();
+                        let p = d.project();
+                        let g = p.groups.get(self.group);
+                        let s = g.and_then(|g| g.sounds.get(self.sound));
+                        deckard_model::level_gain(p.master_level) * g.map_or(1.0, |g| g.level) * s.map_or(1.0, |s| s.level)
+                    });
                     if let Some(Ok(out)) = &self.output {
-                        out.prehear(Some(std::sync::Arc::new(part)), 1.0);
+                        out.prehear(Some(std::sync::Arc::new(part)), gain as f32);
+                        self.prehear_from = Some((std::time::Instant::now(), a, b.min(self.sampling.len())));
                     }
                 }
                 return;
             }
         };
         self.sampling_act(act);
+    }
+
+    /// Arm a session recording of the master output (pick the file and open the Recorder
+    /// window, metering but not yet writing — Play begins it), or stop/cancel a live one.
+    /// Refuses when the Sampling recorder already holds the engine tap (mutual exclusion).
+    fn toggle_session_record(&mut self) {
+        if self.session.active() {
+            self.stop_session_record();
+            return;
+        }
+        let Some(rate) = self.session_record_rate() else { return };
+        let project = self.path.as_ref().and_then(|p| p.file_stem()).map(|n| n.to_string_lossy().into_owned());
+        let default = session_record::session_filename(project.as_deref(), &session_record::session_stamp());
+        let mut dialog = rfd::FileDialog::new().add_filter("WAV", &["wav"]).set_file_name(default);
+        if let Some(dir) = &self.settings.session_dir {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.save_file() else { return };
+        self.arm_session_record(path, rate);
+    }
+
+    /// The rate a session recording would be made at, if one can start now: not while
+    /// Sampling records an internal source (it holds the engine's one tap), and only with
+    /// an engine to tap. Says why not.
+    fn session_record_rate(&mut self) -> Option<u32> {
+        if self.recorder.busy() && self.recorder.is_internal_active() {
+            self.error = Some("Can't start a session recording while Sampling is recording from an internal source. Stop it first.".into());
+            return None;
+        }
+        // The tap is the engine's: without one (nothing played yet) it would be dropped, and
+        // the whole recording would be silence.
+        self.ensure_engine();
+        match &self.output {
+            Some(Ok(o)) if o.has_engine() => Some(o.rate),
+            Some(Ok(_)) => {
+                self.error = Some("Nothing to record a session from: open a project first.".into());
+                None
+            }
+            _ => {
+                self.error = Some("No audio output to record from.".into());
+                None
+            }
+        }
+    }
+
+    /// Arm a session recording to `path`, at the output's `rate`.
+    fn arm_session_record(&mut self, path: PathBuf, rate: u32) {
+        let reserve = self.settings.session_reserve_mb as u64 * 1024 * 1024;
+        let free = session_record::free_bytes(path.parent().unwrap_or(&path)).unwrap_or(u64::MAX);
+        if !session_record::can_start(free, reserve) {
+            self.error = Some("Not enough free disk space to start a session recording.".into());
+            return;
+        }
+        let output = match &self.output {
+            Some(Ok(o)) => Some(o),
+            _ => None,
+        };
+        // Sampling only metering an internal source makes way: its meter lets the tap go,
+        // and takes it up again when the session ends.
+        if self.recorder.is_internal_active() {
+            self.recorder.cancel(output);
+        }
+        // Arm: attach the master tap now so the window meters live, but write nothing until Play.
+        let buffer = self.session.attach_tap();
+        self.session.arm(path.clone(), rate, reserve);
+        if let Some(o) = output {
+            o.set_tap(Some(deckard_engine::Tap { source: deckard_engine::TapSource::Master, buffer }));
+        }
+        self.settings.session_dir = path.parent().map(Path::to_path_buf);
+        self.settings.save();
+        self.session_window_open = true;
+        // Surface the time-available estimate once (the OS save dialog can't carry it); the
+        // window then shows it live once recording starts.
+        let left = session_record::seconds_available(free, reserve, rate);
+        self.status = format!("Session armed — press Play ({})", session_window::format_time_left(left));
+    }
+
+    /// Resume/begin recording, or pause it, from the window's Play/Pause control.
+    fn toggle_session_play(&mut self) {
+        match self.session.phase() {
+            session_record::SessionPhase::Armed | session_record::SessionPhase::Paused => {
+                self.session.play(session_record::started_label());
+            }
+            session_record::SessionPhase::Recording => self.session.pause(),
+            session_record::SessionPhase::Idle => {}
+        }
+    }
+
+    /// Stop and finalize a session recording (or cancel an armed one), releasing the tap and
+    /// closing the window.
+    fn stop_session_record(&mut self) {
+        self.session.stop();
+        if let Some(Ok(o)) = &self.output {
+            o.set_tap(None);
+        }
+        self.session_window_open = false;
     }
 
     fn start_recording(&mut self) {
@@ -8706,6 +11119,7 @@ impl App {
                 self.recorder.view.take_waves.insert(path.clone(), recorder::mini_wave(&sample.frames));
                 self.recorder.view.takes.push(path.clone());
                 self.recorder.view.focused = Some(self.recorder.view.takes.len() - 1);
+                self.recorder.view.layer_choice = None;
                 if mode == 2 {
                     self.finish_loop(&path, sample.frames.len(), sample.rate, ticks, focus);
                 } else {
@@ -8717,7 +11131,16 @@ impl App {
                         let ticks = if mode == 0 { (ticks / sixteenth).round().max(1.0) * sixteenth } else { ticks };
                         self.put_audio_take(g, s, &path, sample.frames.len(), sample.rate, ticks, 0, true, "Record");
                     } else {
-                        self.load_take(g, s, &path, sample.frames.len());
+                        self.take_into(g, s, &path, sample.frames.len());
+                        // In Layers, a take that waits for its layer is what EDIT works
+                        // on meanwhile (as one picked in the list).
+                        let waits = self.doc.as_ref().is_some_and(|d| {
+                            let d = d.borrow();
+                            layers::can_layer(d.project(), g, s) && layers::take_layer(d.project(), g, s, &path).is_none()
+                        });
+                        if waits && (g, s) == (self.group, self.sound) {
+                            self.take_shown = Some((g, s));
+                        }
                     }
                 }
                 if let Some(doc) = &self.doc
@@ -9047,7 +11470,9 @@ impl App {
     fn finish_auto(&mut self, done: Vec<recorder::AutoTake>, focus: (usize, usize)) {
         let Some(doc) = self.doc.clone() else { return };
         let (g, from) = focus;
-        let has_sampler = doc.borrow().project().groups.get(g).and_then(|x| x.sounds.get(from)).is_some_and(|x| x.sampler.is_some());
+        // (A sound in Layers has no key-mapped zones: the notes go to the next free sound.)
+        let has_sampler = doc.borrow().project().groups.get(g).and_then(|x| x.sounds.get(from)).is_some_and(|x| x.sampler.is_some())
+            && !layers::can_layer(doc.borrow().project(), g, from);
         let s = if has_sampler { from } else { self.next_free_sound(g, from, false) };
         if !self.ensure_sampler(g, s) {
             return;
@@ -9196,6 +11621,41 @@ impl App {
         roots
     }
 
+    fn forget_group_presets(&mut self, g: usize) {
+        use deckard_doc::FileItem;
+        self.saved.retain(|item, _| !matches!(item, FileItem::Group(group) | FileItem::Sound(group, _) if *group == g));
+    }
+
+    // Loads and resets retain the document slot's ID. Undo or redo can
+    // change which preset occupies that ID.
+    fn forget_replaced_presets(&mut self, label: Option<&str>) {
+        use deckard_doc::FileItem;
+        match label {
+            Some("Load Group" | "Paste Group" | "Clear Group" | "Clear rig group") => {
+                self.saved.retain(|item, _| !matches!(item, FileItem::Group(_) | FileItem::Sound(..)));
+            }
+            Some("Load Sound" | "Cut Sound" | "Paste Sound" | "Paste Sounds" | "Reset Sound" | "Reset Sounds") => {
+                self.saved.retain(|item, _| !matches!(item, FileItem::Sound(..)));
+            }
+            _ => {}
+        }
+    }
+
+    /// Remember an editable preset only after its load succeeds.
+    fn remember_preset_source(
+        &mut self,
+        what: deckard_doc::FileItem,
+        item: &deckard_library::Item,
+        info: Option<mxprj::sound_info::SoundInfo>,
+    ) {
+        self.saved.remove(&what);
+        let Some(info) = info else { return };
+        let id = self.doc.as_ref().and_then(|d| d.borrow().file_item_id(what));
+        if id.is_some() {
+            self.saved.insert(what, Saved { id, path: item.path.clone(), info, samples: false, preview: false });
+        }
+    }
+
     /// Save a sound, group or preset: again where it was (Save), or through the dialog.
     fn save_item(&mut self, what: deckard_doc::FileItem, mode: SaveMode) {
         use deckard_doc::FileItem;
@@ -9234,7 +11694,9 @@ impl App {
                 None => self.user_dir().join(folder),
             },
             samples: mode == SaveMode::WithSamples,
+            preview: !self.preview_declined,
             confirm_overwrite: false,
+            error: None,
         });
     }
 
@@ -9356,6 +11818,7 @@ impl App {
         let name = dlg.name.trim().replace(['/', '\\', ':'], "-");
         if name.is_empty() {
             self.status = "a name, to save it".into();
+            dlg.error = Some("It needs a name.".into());
             return;
         }
         let path = dlg.folder.join(format!("{name}.{ext}"));
@@ -9385,9 +11848,15 @@ impl App {
         }
         let what = dlg.what;
         let id = doc.borrow().file_item_id(what);
-        let saved = Saved { id, path, info, samples: dlg.samples };
+        let saved = Saved { id, path, info, samples: dlg.samples, preview: dlg.preview };
+        if matches!(what, deckard_doc::FileItem::Sound(..)) {
+            self.preview_declined = !saved.preview;
+        }
         if self.write_item(what, saved) {
             self.save_dialog = None;
+        } else if let Some(d) = &mut self.save_dialog {
+            // The status line is easy to miss behind the dialog.
+            d.error = Some(self.status.clone());
         }
     }
 
@@ -9405,6 +11874,11 @@ impl App {
             Ok(()) => {
                 self.status = format!("saved {}", s.path.display());
                 self.browser.add_saved(&s.path);
+                if s.preview
+                    && let deckard_doc::FileItem::Sound(g, n) = what
+                {
+                    self.start_preview(g, n, &s.path);
+                }
                 self.saved.insert(what, s);
                 true
             }
@@ -9413,6 +11887,24 @@ impl App {
                 false
             }
         }
+    }
+
+    /// Render sound (`g`, `n`)'s audio preview beside its saved file `file`, for the
+    /// browser to prehear; the engine is built on the main thread (so plug-ins can load)
+    /// and rendered on a worker thread so saving doesn't wait for it.
+    fn start_preview(&mut self, g: usize, n: usize, file: &Path) {
+        self.store_plugin_states();
+        let Some(doc) = &self.doc else { return };
+        let (p, path, rate) = (doc.borrow().project().clone(), self.path.clone(), self.render_rate());
+        let mut cache = SampleCache::default();
+        cache.library_dirs = self.samples.library_dirs.clone();
+        let engine = deckard_engine::export::preview_engine(&p, path.as_deref(), (g, n), rate, &mut cache);
+        let out = browser::preview_path(file);
+        // Nobody waits for it: the file appearing is the result.
+        drop(export::Offline::start("Preview", move |_, cancel| {
+            let audio = deckard_engine::export::render_preview_engine(engine, rate, cancel).ok_or("cancelled")?;
+            browser::write_preview(&out, &audio, rate)
+        }));
     }
 
     /// Open…: a sound, group or preset file chosen in a dialog, loaded into `what`.
@@ -9452,6 +11944,26 @@ impl App {
         if let Err(e) = r {
             self.status = e;
         }
+    }
+
+    /// The controller's magnifier: the library on the focused sound's sample (its Sampler's
+    /// focused zone), else its preset by name, with that result focused and the filters
+    /// set to its own (user or factory, product, top-level type).
+    /// Whether it had something to look for.
+    fn browse_locate(&mut self) -> bool {
+        let Some(doc) = self.doc.clone() else { return false };
+        let target = {
+            let d = doc.borrow();
+            d.project().groups.get(self.group).and_then(|g| g.sounds.get(self.sound)).and_then(|snd| browser::locate_target(snd, self.zone))
+        };
+        let Some((kind, name)) = target else { return false };
+        if !self.browser.started() {
+            self.browse(browser::BrowseAct::Toggle);
+            self.browse(browser::BrowseAct::Toggle);
+        }
+        self.browser.touch();
+        self.browser.locate_item(kind, name);
+        true
     }
 
     /// What the browser asks for.
@@ -9523,6 +12035,8 @@ impl App {
             B::Load(i, target) => {
                 let Some(item) = b.results.items.get(i).cloned() else { return };
                 b.selected = Some(i);
+                // (For Quick Browse to recall.)
+                b.searches.remember(&item, &b.query);
                 self.stop_prehear();
                 let result = if item.kind == deckard_library::Kind::Group {
                     self.queue_group_load(&item, target.map_or(self.group, |t| t.0))
@@ -9536,8 +12050,8 @@ impl App {
             }
             B::Favorite(i, on) => {
                 if let Some(item) = b.results.items.get(i) {
-                    let p = item.path.clone();
-                    b.set_favorite(&p, on);
+                    let key = item.favorite_key();
+                    b.set_favorite(&key, on);
                 }
                 return;
             }
@@ -9595,6 +12109,17 @@ impl App {
                 }
                 return;
             }
+            B::StopPrehear => {
+                self.stop_prehear();
+                return;
+            }
+            B::PrehearFile(path) => {
+                b.file_selected = Some(path.clone());
+                if let Some(item) = browser::item_of(&path) {
+                    self.prehear_item(&item);
+                }
+                return;
+            }
             B::Rescan => return,
             B::LibraryFolder(dir, on) => {
                 let folders = &mut self.settings.library_folders;
@@ -9636,15 +12161,42 @@ impl App {
     }
 
     /// Stop whatever the browser is prehearing.
-    fn stop_prehear(&self) {
+    fn stop_prehear(&mut self) {
+        self.prehear_generation = self.prehear_generation.wrapping_add(1);
+        self.prehear_task = None;
         if let Some(Ok(out)) = &self.output {
             out.prehear(None, 0.0);
         }
     }
 
-    /// The MK3 left its Browse page: what it was prehearing stops.
+    fn poll_prehear(&mut self) {
+        let Some((generation, receiver)) = self.prehear_task.take() else { return };
+        match receiver.try_recv() {
+            Ok(result) if generation == self.prehear_generation => match result {
+                Ok(sample) => {
+                    self.open_output_now();
+                    if let Some(Ok(out)) = &self.output {
+                        out.prehear(Some(std::sync::Arc::new(sample)), self.browser.prehear_gain);
+                    }
+                }
+                Err(e) => self.status = e,
+            },
+            Ok(_) => {}
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.prehear_task = Some((generation, receiver));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+        }
+    }
+
+    /// The MK3 left its Browse page, or Quick Browse's list closed: what it was
+    /// prehearing stops. The list closes with the Control page, or when another sound is
+    /// focused.
     fn stop_prehear_after_browse(&mut self) {
-        let browsing = self.surface.page() == "browse";
+        if self.quick_browse.is_some_and(|at| at != (self.group, self.sound) || self.surface.page() != "control") {
+            self.quick_browse = None;
+        }
+        let browsing = self.surface.page() == "browse" || self.quick_browse.is_some();
         if self.surface_was_browsing && !browsing {
             self.stop_prehear();
         }
@@ -9652,19 +12204,20 @@ impl App {
     }
 
     pub(crate) fn prehear_item(&mut self, item: &deckard_library::Item) {
+        self.prehear_from = None;
         let Some(file) = browser::prehear_file(item) else {
             self.stop_prehear();
             return;
         };
-        let gain = self.browser.prehear_gain;
-        match deckard_engine::sample::Sample::load(&file) {
-            Ok(s) => {
-                if let Some(Ok(out)) = &self.output {
-                    out.prehear(Some(std::sync::Arc::new(s)), gain);
-                }
-            }
-            Err(e) => self.status = format!("can't prehear {}: {e}", file.display()),
-        }
+        self.stop_prehear();
+        self.open_output_now();
+        let generation = self.prehear_generation;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = deckard_engine::sample::Sample::load(&file).map_err(|e| format!("can't prehear {}: {e}", file.display()));
+            let _ = sender.send(result);
+        });
+        self.prehear_task = Some((generation, receiver));
     }
 
     /// Load a library item: a project opens; a group replaces the focused group; a
@@ -9690,8 +12243,9 @@ impl App {
                 return self.load_nks_preset(&item.name, (g, s), &bytes);
             }
             if !matches!(ext.as_str(), "mxinst" | "mxfx") {
-                let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-                if let Some(res) = deckard_plugins::nks::native_preset(&ext, &bytes, &self.catalog.entries) {
+                if let Some(res) =
+                    deckard_plugins::nks::native_preset_file(path, item.uuid.as_deref(), item.kind == Kind::Effect, &self.catalog.entries)
+                {
                     let plugin = res.map_err(|e| format!("{}: {e}", item.name))?;
                     return self.load_resolved_preset(&item.name, (g, s), plugin);
                 }
@@ -9730,7 +12284,12 @@ impl App {
                     }
                 };
                 drop(d);
+                if matches!(item.kind, Kind::Sound) {
+                    self.remember_preset_source(deckard_doc::FileItem::Sound(g, s), item, preset_load::editable_preset_info(item, &bytes));
+                }
                 if matches!(item.kind, Kind::Group) {
+                    self.forget_group_presets(g);
+                    self.remember_preset_source(deckard_doc::FileItem::Group(g), item, preset_load::editable_preset_info(item, &bytes));
                     self.editors
                         .retain(|&(c, ..)| !matches!(c, deckard_doc::Chain::Group(cg) | deckard_doc::Chain::Sound(cg, _) if cg == g));
                     self.slot_of = None;
@@ -9771,6 +12330,10 @@ impl App {
                         if has { deckard_doc::ZoneFrom::Zone(0) } else { deckard_doc::ZoneFrom::Template },
                     );
                     d.set_zones(g, s, &[spec], "Load Sample")?;
+                    // (In Layers what comes in is a layer.)
+                    if layers::can_layer(d.project(), g, s) {
+                        layers::make_layered(d, g, s, "Load Sample")?;
+                    }
                     if let Some(stem) = path.file_stem() {
                         d.rename(deckard_doc::Target::Sound(g, s), &stem.to_string_lossy())?;
                     }
@@ -9879,6 +12442,13 @@ impl App {
         };
         if g != self.group {
             self.focus_group(g);
+        }
+        // A sound in Layers takes them as layers more.
+        let layers = layers::layers_in(doc.borrow().project(), g, s).len();
+        if layers::can_layer(doc.borrow().project(), g, s) {
+            self.sound = s;
+            self.layer_files(layers, files);
+            return;
         }
         let mut loaded = Vec::new();
         for (k, file) in files.iter().enumerate() {
@@ -10040,7 +12610,11 @@ impl App {
                 }
             }
             (0 | 1, _) => self.put_audio_take(g, s, path, smp.frames.len(), smp.rate, ticks, 0, true, "Place Take"),
-            (2, _) => self.load_take(g, s, path, smp.frames.len()),
+            // A sound with layers keeps them: the take is one more.
+            (2, _) => match self.doc.as_ref().map_or(0, |d| layers::layers_in(d.borrow().project(), g, s).len()) {
+                0 => self.take_into(g, s, path, smp.frames.len()),
+                have => self.take_to_layer(g, s, path, have),
+            },
             _ => self.status = "a take goes on an empty sound, an Audio plug-in or a Sampler".into(),
         }
     }
@@ -10266,9 +12840,17 @@ impl App {
             layout::ChainTab::Group => "group",
             layout::ChainTab::Sound => "sound",
         };
+        let (loop_start, loop_end) = self.song_loop.unwrap_or((0, 0));
         let mut t = format!(
-            "song {}\ntab {tab}\nmixer {}\nmixer_sounds {}\npiano_roll {}\nprops {}\n",
-            self.song_view as u8, self.mixer as u8, self.mixer_sounds as u8, self.piano_roll as u8, self.prop_set
+            "song {}\ntab {tab}\nmixer {}\nmixer_sounds {}\npiano_roll {}\nprops {}\nsong_loop {} {} {}\n",
+            self.song_view as u8,
+            self.mixer as u8,
+            self.mixer_sounds as u8,
+            self.piano_roll as u8,
+            self.prop_set,
+            self.looping as u8,
+            loop_start,
+            loop_end,
         );
         let mut chains: Vec<_> = self.chain_pages.iter().collect();
         chains.sort_by_key(|(c, _)| format!("{c:?}"));
@@ -10295,6 +12877,15 @@ impl App {
             let flag = |i: usize| w.get(i).map(|v| *v == "1");
             match w.first().copied() {
                 Some("song") => self.song_view = flag(1).unwrap_or(self.song_view),
+                Some("song_loop") => {
+                    self.looping = flag(1).unwrap_or(false);
+                    if let (Some(start), Some(end)) =
+                        (w.get(2).and_then(|v| v.parse::<i64>().ok()), w.get(3).and_then(|v| v.parse::<i64>().ok()))
+                        && end > start
+                    {
+                        self.song_loop = Some((start.max(0), end));
+                    }
+                }
                 Some("mixer") => self.mixer = flag(1).unwrap_or(self.mixer),
                 Some("mixer_sounds") => self.mixer_sounds = flag(1).unwrap_or(self.mixer_sounds),
                 Some("piano_roll") => self.piano_roll = flag(1).unwrap_or(self.piano_roll),
@@ -10434,7 +13025,7 @@ impl App {
             let cid = deckard_plugins::state::PluginId::parse(&pr.id, &pr.name).map(|i| i.cid);
             let (pages, sc) = match p.try_lock() {
                 // (Still the slot's old plug-in: once it's replaced.)
-                Ok(g) if Some(g.id.cid) == cid => (view_pages(&g, &saved), sidechain(&g)),
+                Ok(g) if Some(g.id.cid) == cid => (view_pages(&g, &saved, self.surface.mapping_pages(&g.name).as_deref()), sidechain(&g)),
                 Ok(_) | Err(std::sync::TryLockError::WouldBlock) => return None,
                 Err(_) => (Vec::new(), false),
             };
@@ -10453,7 +13044,7 @@ impl App {
                             let _ = g.load_chunk(&nks.chunk);
                             g.mark_saved(Vec::new());
                         }
-                        (view_pages(&g, &saved), sidechain(&g))
+                        (view_pages(&g, &saved, self.surface.mapping_pages(&g.name).as_deref()), sidechain(&g))
                     })
                     .unwrap_or_default();
                 Some(view(pages, sc, std::sync::Arc::downgrade(&p), None))
@@ -10534,7 +13125,7 @@ impl App {
 
     /// Add a module or plug-in at the end of the focused sound's chain, and show it.
     /// The MIDI input plug-in on `group`, as the audio output has it.
-    pub(crate) fn midi_input(&self, group: usize) -> Option<deckard_engine::midi_input::Info> {
+    pub(crate) fn midi_input(&self, group: usize) -> Option<std::sync::Arc<deckard_engine::midi_input::Info>> {
         match &self.output {
             Some(Ok(out)) => out.midi_input(group),
             _ => None,
@@ -10562,9 +13153,29 @@ impl App {
     /// Make a routing choice from the channel properties.
     fn set_route(&mut self, r: layout::RouteSet) {
         let Some(doc) = self.doc.clone() else { return };
+        let count = doc.borrow().project().groups.get(self.group).map_or(0, |gr| gr.sounds.len());
         let mut d = doc.borrow_mut();
         let done = match r {
-            layout::RouteSet::Sound(g, s, route) => d.set_sound_route(g, s, route),
+            layout::RouteSet::Sound(g, s, route) => {
+                if let Some(sounds) = self.selected_sounds_for(g, s, count) {
+                    d.transaction("Sound Routing", |d| {
+                        for &si in &sounds {
+                            let self_route = matches!(
+                                &route,
+                                deckard_doc::SoundRoute::Output(deckard_model::AudioDest::Sound(dg, ds))
+                                    | deckard_doc::SoundRoute::Aux(_, deckard_model::AudioDest::Sound(dg, ds))
+                                    if (*dg, *ds) == (g, si)
+                            );
+                            if !self_route {
+                                d.set_sound_route(g, si, route.clone())?;
+                            }
+                        }
+                        Ok(())
+                    })
+                } else {
+                    d.set_sound_route(g, s, route)
+                }
+            }
             layout::RouteSet::Group(g, aux, dest) => d.set_group_route(g, aux, dest),
             layout::RouteSet::GroupMidiInput(g, name) => {
                 drop(d);
@@ -10597,12 +13208,28 @@ impl App {
         let (root, bank, kind) = self.scale;
         let in_scale = ((bank, kind) != (0, 0)).then_some(move |p: i64| deckard_lua_host::api::scales::in_scale(bank, kind, root, p));
         let in_scale: Option<&dyn Fn(i64) -> bool> = in_scale.as_ref().map(|f| f as &dyn Fn(i64) -> bool);
+        // What the sound has there now, so Apply can say when it changed nothing (a
+        // Humanize at 100–127 and no time shift does exactly that, as Maschine's does).
+        let sound_notes = |d: &deckard_doc::Document| -> Vec<deckard_model::Note> {
+            d.project()
+                .groups
+                .get(g)
+                .and_then(|x| x.patterns.get(p))
+                .map_or(Vec::new(), |pat| pat.notes.iter().filter(|n| n.sound == s).copied().collect())
+        };
+        let before = sound_notes(&doc.borrow());
         let done = match b {
-            layout::GrooveButton::ApplyVariation => doc.borrow_mut().apply_variation(g, p, s, grid, &get),
+            // The page's one action: Humanize varies what is there, Random and Euclid run
+            // the generator — the same code the Jam's Apply asks for.
+            layout::GrooveButton::ApplyVariation => doc.borrow_mut().apply_groove_page(g, p, s, grid, polyphonic, in_scale, &get),
             layout::GrooveButton::Generate => doc.borrow_mut().generate(g, p, s, grid, polyphonic, in_scale, &get),
         };
-        if let Err(e) = done {
-            self.status = format!("can't do that: {e}");
+        match done {
+            Err(e) => self.status = format!("can't do that: {e}"),
+            Ok(()) if matches!(b, layout::GrooveButton::ApplyVariation) && sound_notes(&doc.borrow()) == before => {
+                self.status = "Apply changed nothing: mind the mode, the ranges and the time shift".into();
+            }
+            Ok(()) => {}
         }
     }
 
@@ -10637,7 +13264,12 @@ impl App {
             GROOVE_FIELDS.iter().filter_map(|f| doc.borrow().groove_setting(g, s, f).map(|v| (f.to_string(), v))).collect();
         let get = |f: &str| settings.iter().find(|(k, _)| k == f).map(|(_, v)| *v);
         let grid = self.grid;
-        if let Err(e) = doc.borrow_mut().apply_variation_from(g, p, s, grid, &get, &base) {
+        let polyphonic = self.piano_roll;
+        // The scale Random keeps to (the controller's Keyboard scale too; Chromatic is none).
+        let (root, bank, kind) = self.scale;
+        let in_scale = ((bank, kind) != (0, 0)).then_some(move |p: i64| deckard_lua_host::api::scales::in_scale(bank, kind, root, p));
+        let in_scale: Option<&dyn Fn(i64) -> bool> = in_scale.as_ref().map(|f| f as &dyn Fn(i64) -> bool);
+        if let Err(e) = doc.borrow_mut().apply_groove_page_from(g, p, s, grid, polyphonic, in_scale, &get, &base) {
             self.status = format!("can't vary: {e}");
             return;
         }
@@ -10770,6 +13402,28 @@ impl App {
             }));
         }
         if self.key_focus == KeyFocus::Sounds {
+            if cmd(egui::Key::A) {
+                self.select_all_sounds();
+            }
+            if !self.sound_selection.is_empty() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+                self.select_no_sounds();
+            }
+            let arrow = |m: egui::Modifiers, k: egui::Key| ctx.input_mut(|i| i.consume_key(m, k));
+            if arrow(egui::Modifiers::SHIFT, egui::Key::ArrowUp) {
+                if s > 0 {
+                    acts.push(Act::ClickSound { sound: s - 1, shift: true, toggle: false });
+                }
+            } else if arrow(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                if s > 0 {
+                    acts.push(Act::ClickSound { sound: s - 1, shift: false, toggle: false });
+                }
+            } else if arrow(egui::Modifiers::SHIFT, egui::Key::ArrowDown) {
+                if s + 1 < self.group_len() {
+                    acts.push(Act::ClickSound { sound: s + 1, shift: true, toggle: false });
+                }
+            } else if arrow(egui::Modifiers::NONE, egui::Key::ArrowDown) && s + 1 < self.group_len() {
+                acts.push(Act::ClickSound { sound: s + 1, shift: false, toggle: false });
+            }
             if cmd(egui::Key::X) || ev(|e| matches!(e, egui::Event::Cut)) {
                 acts.push(Act::CutSound(g, s));
             }
@@ -10979,6 +13633,37 @@ impl App {
         &self.midi_ports
     }
 
+    fn copy_plugin(&mut self, chain: deckard_doc::Chain, at: usize) {
+        let Some(doc) = self.doc.clone() else { return };
+        let key = self.plugin_slot_key(chain, at);
+        self.store_plugin_states_of(|slot| *slot == key);
+        match doc.borrow().copy_slot(chain, at) {
+            Ok(copy) => {
+                self.plugin_clipboard = Some(copy);
+                self.status = "Copied plug-in".into();
+            }
+            Err(e) => self.status = format!("Can't copy plug-in: {e}"),
+        }
+    }
+
+    fn paste_plugin(&mut self, chain: deckard_doc::Chain, over: Option<usize>) {
+        let Some(doc) = self.doc.clone() else { return };
+        self.store_plugin_states();
+        let Some(copy) = &self.plugin_clipboard else { return };
+        let pasted = match over {
+            Some(at) => doc.borrow_mut().paste_over_instrument(chain, at, copy).map(|()| at),
+            None => doc.borrow_mut().paste_slot(chain, copy),
+        };
+        match pasted {
+            Ok(at) => {
+                self.editors.retain(|(c, ..)| *c != chain);
+                self.plugin_views.clear();
+                layout::apply_acts(self, vec![layout::Act::FocusChainSlot(chain, at)]);
+            }
+            Err(e) => self.status = format!("Can't paste plug-in: {e}"),
+        }
+    }
+
     /// Move slot `from` of the focused chain to `to`; it stays shown.
     fn move_slot(&mut self, from: usize, to: usize) {
         self.move_slot_in(self.chain(), from, to);
@@ -11034,7 +13719,11 @@ impl App {
             (PluginEntry { name: name.to_string(), instrument, format: PluginFormat::Internal, vendor: "Native Instruments".into() }, what)
         };
         let native = |instrument: bool| deckard_plugins::native::CLASSES.iter().filter(move |c| c.instrument == instrument);
-        let mut out = vec![internal("Sampler", true, AddWhat::Sampler), internal("Audio", true, AddWhat::Audio)];
+        let mut out = vec![
+            internal("Sampler", true, AddWhat::Sampler),
+            internal("Sampler Preview", true, AddWhat::NewSampler),
+            internal("Audio", true, AddWhat::Audio),
+        ];
         for class in deckard_model::INTERNAL_INSTRUMENTS {
             out.push(internal(deckard_model::module_label(class), true, AddWhat::Instrument(class)));
         }
@@ -11097,9 +13786,125 @@ impl App {
         doc.borrow_mut().end_take();
     }
 
+    /// The focused New Sampler zone's warp markers (roadmap 1e): one undo step each.
+    fn warp_act(&mut self, w: layout::sampling::WarpAct) {
+        use deckard_model::new_sampler::{Warp, quantize, warps_at};
+        use layout::sampling::WarpAct as W;
+        match w {
+            W::Strength(v) => return self.sampling.warp_strength = v,
+            W::Grid(k) => return self.sampling.warp_grid = k.min(beat::WARP_GRIDS.len() - 1),
+            _ => {}
+        }
+        let Some(doc) = self.doc.clone() else { return };
+        let Some((zi, zone, _, false)) = layout::sampling::edited(doc.borrow().project(), (self.group, self.sound, self.zone)) else {
+            return;
+        };
+        let (Some(meta), Some(sample)) = (zone.meta.clone(), self.sampling.sample.clone()) else { return };
+        let mut warps = meta.warps.clone();
+        let label = match w {
+            W::Detect => {
+                let len = sample.frames.len();
+                let (lo, hi) = if zone.play_range.1 > zone.play_range.0 {
+                    (zone.play_range.0 as usize, zone.play_range.1 as usize + 1)
+                } else {
+                    (0, len)
+                };
+                // Every hit (detection merges those closer than 50 ms).
+                let hits = deckard_engine::edit::detect_positions(&sample, (lo, hi.min(len)), 1.0, false);
+                warps = warps_at(&meta, sample.rate, &hits);
+                "Warp Markers"
+            }
+            W::Quantize => {
+                let (div, _) = beat::WARP_GRIDS[self.sampling.warp_grid.min(beat::WARP_GRIDS.len() - 1)];
+                warps = quantize(&warps, div, self.sampling.warp_strength);
+                "Quantize Audio"
+            }
+            W::Clear => {
+                warps.clear();
+                "Clear Warp Markers"
+            }
+            W::Add(frame) => {
+                let Some(map) = deckard_model::new_sampler::BeatMap::of(&meta, sample.rate) else { return };
+                let at = warps.partition_point(|x| x.frame < frame as u64);
+                if warps.get(at).is_some_and(|x| x.frame == frame as u64) {
+                    return;
+                }
+                warps.insert(at, Warp { frame: frame as u64, beat: map.beat_at(frame as f64) });
+                "Add Warp Marker"
+            }
+            W::Remove(i) => {
+                if i >= warps.len() {
+                    return;
+                }
+                warps.remove(i);
+                "Remove Warp Marker"
+            }
+            W::Move(i, beat) => {
+                // Between its neighbours' beats.
+                let lo = i.checked_sub(1).and_then(|k| warps.get(k)).map_or(f64::MIN, |x| x.beat + 1e-3);
+                let hi = warps.get(i + 1).map_or(f64::MAX, |x| x.beat - 1e-3);
+                let Some(x) = warps.get_mut(i) else { return };
+                x.beat = beat.clamp(lo, hi.max(lo));
+                "Move Warp Marker"
+            }
+            W::Strength(_) | W::Grid(_) => return,
+        };
+        let meta = deckard_model::new_sampler::ZoneMeta { warps, ..meta };
+        if let Err(e) = doc.borrow_mut().set_zone_meta(self.group, self.sound, zi, &meta, label) {
+            self.status = format!("can't change the warp markers: {e}");
+        }
+    }
+
+    /// The focused sound's instrument made a New Sampler (`to_new`: a Sampler keeps its
+    /// zones; an Audio plug-in's takes become zones in Sync at their tempos), or a New
+    /// Sampler made a plain Sampler (roadmap 1f). One undo step.
+    fn convert_instrument(&mut self, to_new: bool) {
+        let Some(doc) = self.doc.clone() else { return };
+        let (g, s) = (self.group, self.sound);
+        let Some(snd) = doc.borrow().project().groups.get(g).and_then(|x| x.sounds.get(s)).cloned() else { return };
+        let result = if !to_new {
+            let synced = snd
+                .sampler
+                .iter()
+                .flat_map(|x| &x.zones)
+                .any(|z| z.meta.as_ref().is_some_and(|m| m.mode != deckard_model::new_sampler::PlayMode::Repitch));
+            let r = doc.borrow_mut().new_sampler_to_sampler(g, s);
+            if r.is_ok() && synced {
+                self.status = "converted to a Sampler: its loops play at their own speed now (no Sync or Keys)".into();
+            }
+            r
+        } else if let Some(a) = snd.audio.as_ref().filter(|_| snd.instrument == "AudioModule") {
+            let mut takes = Vec::new();
+            for t in &a.takes {
+                let Some(file) = self.samples.path_of(&t.sample, self.path.as_deref()) else {
+                    self.status = format!("can't convert: {} is missing", t.sample.path);
+                    return;
+                };
+                let audio = self.samples.sample(&t.sample, self.path.as_deref());
+                let play = (t.play_range.1 > t.play_range.0).then_some(t.play_range);
+                let bpm = audio.filter(|_| t.beats > 0.0).map(|x| {
+                    let frames = play.map_or(x.frames.len(), |(lo, hi)| (hi - lo).max(1) as usize);
+                    t.tempo(frames, x.rate)
+                });
+                takes.push(deckard_doc::TakeZone { file, play, bpm, beats: (t.beats > 0.0).then_some(t.beats) });
+            }
+            doc.borrow_mut().audio_to_new_sampler(g, s, &takes, a.tune, a.mode == deckard_model::AudioMode::Gate)
+        } else if snd.sampler.is_some() && snd.new_sampler.is_none() {
+            // (In Original: it plays as it did.)
+            let n =
+                deckard_model::new_sampler::NewSampler { mode: deckard_model::new_sampler::SamplerMode::Original, ..Default::default() };
+            doc.borrow_mut().transaction("Convert to Sampler Preview", |d| d.set_new_sampler(g, s, Some(&n)))
+        } else {
+            return;
+        };
+        if let Err(e) = result {
+            self.status = format!("can't convert it: {e}");
+        }
+    }
+
     fn is_instrument(what: &layout::AddWhat) -> bool {
         match what {
-            layout::AddWhat::Sampler | layout::AddWhat::Audio | layout::AddWhat::Instrument(_) => true,
+            layout::AddWhat::Sampler | layout::AddWhat::NewSampler | layout::AddWhat::Audio | layout::AddWhat::Instrument(_) => true,
             layout::AddWhat::Plugin(e) => e.instrument,
             layout::AddWhat::Effect(_) | layout::AddWhat::PerformFx(_) => false,
         }
@@ -11124,7 +13929,7 @@ impl App {
             return;
         }
         let module = match &what {
-            layout::AddWhat::Sampler => deckard_doc::NewModule::Sampler,
+            layout::AddWhat::Sampler | layout::AddWhat::NewSampler => deckard_doc::NewModule::Sampler,
             layout::AddWhat::Audio => deckard_doc::NewModule::Audio,
             layout::AddWhat::Effect(class) => deckard_doc::NewModule::Effect(class),
             layout::AddWhat::PerformFx(_) => return,
@@ -11163,8 +13968,12 @@ impl App {
             deckard_doc::NewModule::Effect(_) => "Load Effect",
             _ => "Load Module",
         };
+        let label = if matches!(what, layout::AddWhat::NewSampler) { "Add Sampler Preview" } else { label };
         let added = doc.borrow_mut().transaction(label, |d| {
             d.add_slot_in(c, at, &module)?;
+            if let (layout::AddWhat::NewSampler, deckard_doc::Chain::Sound(g, s)) = (&what, c) {
+                d.set_new_sampler(g, s, Some(&deckard_model::new_sampler::NewSampler::default()))?;
+            }
             if let deckard_doc::Chain::Sound(g, s) = c
                 && at == 0
                 && instrument
@@ -11241,11 +14050,37 @@ impl App {
         if failed.is_empty() { format!("{n} plug-ins loaded ({secs:.1} s)") } else { format!("plug-ins failed: {}", failed.join(", ")) }
     }
 
+    /// Ensure a stopped live engine is running on the audio output so plug-ins, buses,
+    /// worker threads and direct controller-thread pad hits are warm before the first Play.
+    pub(crate) fn ensure_idle_engine(&mut self) {
+        if self.screenshot.is_some() || self.playing.is_some() {
+            return;
+        }
+        let Some(doc) = self.doc.clone() else { return };
+        #[cfg(not(test))]
+        if self.output.is_none() {
+            self.output = Some(open_output(&self.settings, &mut self.output_fallback));
+        }
+        let Some(Ok(out)) = &self.output else { return };
+        if out.has_engine() {
+            return;
+        }
+        self.remember_libraries();
+        let d = doc.borrow();
+        let Some(Ok(out)) = &self.output else { return };
+        let (mut engine, report) = Engine::new(d.project(), self.path.as_deref(), out.rate, Mode::Arrangement, &mut self.samples);
+        engine.sequencing = false;
+        out.play(engine);
+        self.seen_revision = d.revision();
+        self.built = Some((out.plays(), d.project().clone(), report.chains));
+    }
+
     /// Load every plug-in instrument of the project (at the output's rate), so playing
     /// and editing never wait for one.
     fn load_plugins(&mut self) {
         let wanted = self.wanted_plugins();
         if wanted.is_empty() {
+            self.ensure_idle_engine();
             return;
         }
         let rate = match self.output.get_or_insert_with(|| open_output(&self.settings, &mut self.output_fallback)) {
@@ -11260,6 +14095,7 @@ impl App {
             }
         }
         self.status = Self::plugins_loaded_status(wanted.len(), t.elapsed().as_secs_f64(), &failed);
+        self.ensure_idle_engine();
     }
 
     /// Write the state of plug-ins edited in their windows into the document.
@@ -11267,8 +14103,8 @@ impl App {
         self.store_plugin_states_of(|_| true);
     }
 
-    /// [`App::store_plugin_states`] for the instances `which` picks (saving a
-    /// plug-in's state holds it, and the audio thread waits for it).
+    /// [`App::store_plugin_states`] for the instances `which` picks. Saving a
+    /// plug-in's state can make that instance skip audio until the lock is released.
     pub(crate) fn store_plugin_states_of(&mut self, which: impl Fn(&deckard_plugins::Slot) -> bool) {
         let Some(doc) = self.doc.clone() else { return };
         let mut stored = Vec::new();
@@ -11519,8 +14355,21 @@ impl App {
     fn sync_notes_played(&mut self) {
         let played = self.notes_played();
         self.lit = played.iter().map(|&(g, s, _)| (g, s)).collect();
+        self.hits.clone_from(&played);
+        self.loop_lit.clear();
+        self.held_pitches.clear();
         if let Some(Ok(out)) = &self.output {
             self.lit.extend(out.played_sounds());
+            self.hits.extend(out.played_notes());
+            self.held_pitches = out.held_pitches();
+            for (g, mask) in out.loop_playing().into_iter().enumerate() {
+                let mut m = mask;
+                while m != 0 {
+                    let s = m.trailing_zeros() as usize;
+                    self.loop_lit.insert((g, s));
+                    m &= m - 1;
+                }
+            }
         }
         if !matches!(self.controller, Some(Ok(_))) {
             return;
@@ -11588,6 +14437,7 @@ impl App {
 
     /// What [`App::logic`] does while the window is covered or minimized.
     fn background(&mut self, ctx: &egui::Context) {
+        self.poll_prehear();
         self.watch_tunes(ctx);
         self.share_tempo();
         self.follow_engine(ctx, undrawn(ctx, BACKGROUND_PACE));
@@ -11603,8 +14453,10 @@ impl App {
             c.tick(&mut requests);
             ctx.request_repaint_after(undrawn(ctx, c.interval()));
         }
+        self.frame_surface_view = None;
         self.mk3_sync(ctx, &mut requests, true);
         self.jam_sync(ctx, true);
+        self.frame_surface_view = None;
         self.handle(requests);
         self.sync_selection();
         self.sync_audio_settings();
@@ -11674,10 +14526,13 @@ impl eframe::App for App {
     /// Leave the MK3 dark, as it was before DECKARD started.
     fn on_exit(&mut self) {
         self.end_session();
+        // A session recording is finalized here (the app leaves without running destructors,
+        // and the file would be short of what was written since its last flush).
+        self.session.stop();
         self.midi_port_watch = None;
         self.midi_devices.close_all();
         if let Some(m) = &self.mk3 {
-            m.shut_down(goodbye::picture());
+            m.shut_down();
         }
         if let Some(j) = &self.jam {
             j.shut_down();
@@ -11708,6 +14563,28 @@ impl eframe::App for App {
     /// `--input FILE`: feed scripted pointer input to the running app, for reproducing
     /// what a user does with plug-ins loaded (which tests can't, off the main thread).
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if std::mem::take(&mut self.drag_release)
+            && let Some(pos) = ctx.input(|i| i.pointer.latest_pos())
+        {
+            let button = egui::PointerButton::Primary;
+            raw.events.push(egui::Event::PointerButton { pos, button, pressed: false, modifiers: Default::default() });
+        }
+        #[cfg(not(test))]
+        {
+            static VSYNC: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            static ACCESSKIT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if !*VSYNC.get_or_init(|| std::env::var_os("DECKARD_VSYNC").is_some()) {
+                // With AutoNoVsync, present() does not block for 16.67 ms; egui's default
+                // predicted_dt (1/60s) would subtract 16.67 ms from request_repaint_after(16ms)
+                // and spin the UI thread without pacing.
+                raw.predicted_dt = 0.002;
+            }
+            if !*ACCESSKIT.get_or_init(|| std::env::var_os("DECKARD_ACCESSKIT").is_some()) {
+                // Remote-desktop / shell WM_GETOBJECT probes otherwise enable full AccessKit
+                // widget-tree building and diffing on every 60 Hz frame.
+                ctx.disable_accesskit();
+            }
+        }
         let t = self.started.elapsed().as_secs_f32();
         while let Some(&(at, ev)) = self.input_script.first()
             && at <= t
@@ -11781,9 +14658,11 @@ impl App {
         if self.stems.is_some() {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         }
-        // The recorder takes up its audio every frame while armed, recording, or metering.
-        if self.recorder.busy() || self.recorder.is_metering() {
-            ctx.request_repaint();
+        // The recorder takes up its audio while armed, recording, or metering (buffer holds ~340 ms);
+        // a session recording must keep rendering too, or its silence-pad grows between
+        // polls and the meters freeze.
+        if self.recorder.busy() || self.recorder.is_metering() || self.session.active() {
+            ctx.request_repaint_after(BACKGROUND_PACE);
         }
         self.update_slot_view();
         if self.catalog.poll() {
@@ -11814,6 +14693,7 @@ impl App {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
         ctx.data_mut(|d| d.remove::<Vec<(egui::Rect, (usize, usize))>>(egui::Id::new(layout::DROP_ROWS)));
+        ctx.data_mut(|d| d.remove::<Vec<egui::Rect>>(egui::Id::new(layout::sampling::layers::LANE_RECTS)));
         self.dropped_samples = samples;
         if let Some(path) = other.into_iter().next() {
             self.open_file(path);
@@ -11857,9 +14737,14 @@ impl App {
             self.launch_scene(scene);
         }
 
-        self.follow_engine(ctx, std::time::Duration::ZERO);
+        self.follow_engine(ctx, BACKGROUND_PACE);
         if !ctx.egui_wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
-            self.toggle_play();
+            // SHIFT+Space on the Sampling page: its sample's PLAY / STOP.
+            let zone_key = (self.sampling_open && ctx.input(|i| i.modifiers.shift)).then(|| self.audition_key()).flatten();
+            match zone_key {
+                Some(pitch) => self.audition_toggle(pitch),
+                None => self.toggle_play(),
+            }
         }
         // The mouse modes' keys (not while the keys play notes).
         if !ctx.egui_wants_keyboard_input() && !self.keys.on && ctx.input(|i| i.modifiers.is_none()) {
@@ -11875,7 +14760,7 @@ impl App {
         if self.lock_morph.is_some() {
             let tick = self.playhead().map(|h| h.position);
             self.lock_tick(lock::clock(), tick);
-            ctx.request_repaint();
+            ctx.request_repaint_after(BACKGROUND_PACE);
         }
         self.menu_frame(ctx);
         if self.finish_quit(ctx) {
@@ -11909,13 +14794,17 @@ impl App {
         // Hardware controllers and MIDI run before plug-in editor timers and UI panels so
         // mutes, pattern switches and transport commands reach the audio thread at once.
         self.sync_notes_played();
-        if !self.lit.is_empty() {
+        if !self.lit.is_empty() || !self.hits.is_empty() {
             // Unlight the flashed numbers on time.
             ui.ctx().request_repaint_after(deckard_engine::output::FLASH);
+        } else if !self.loop_lit.is_empty() {
+            ui.ctx().request_repaint_after(BACKGROUND_PACE);
         }
         let mut hw_requests = Vec::new();
+        self.frame_surface_view = None;
         self.mk3_sync(ui.ctx(), &mut hw_requests, false);
         self.jam_sync(ui.ctx(), false);
+        self.frame_surface_view = None;
         if !hw_requests.is_empty() {
             self.handle(hw_requests);
         }
@@ -11946,9 +14835,13 @@ impl App {
         if let Some(Ok(out)) = &self.output {
             out.set_focus(Some(self.group));
         }
-        self.update_meters(ctx, std::time::Duration::ZERO);
         if self.settings.scrolling_sampler {
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        }
+        self.update_meters(ctx, BACKGROUND_PACE);
+        self.poll_prehear();
+        if self.prehear_task.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
 
         layout::header(self, ui);
@@ -12009,14 +14902,55 @@ impl App {
                 self.follow_root(from, now.0);
             }
         }
+        // The Jam's strip is its own window: the page its script published, shown and hidden
+        // by that page's own lifetime (never by a mode), over whatever view is showing, and
+        // never in front of the mouse. No page draws no window.
+        let shown = self.jam_shown();
+        let strip = if self.settings.show_overlay { shown.as_ref().map(|(page, rows)| (page, rows.as_slice())) } else { None };
+        let saved = self.settings.jam_strip_pos.map(|(x, y)| egui::Vec2::new(x, y));
+        if let Some(offset) = crate::jam_window::show(ctx, strip, saved) {
+            // Where the window manager put it, which is where the user has it now.
+            self.settings.jam_strip_pos = Some((offset.x, offset.y));
+            #[cfg(not(test))]
+            self.settings.save();
+        }
         layout::body(self, ui);
+        if self.jam_shot
+            && let Some((page, rows)) = &shown
+        {
+            // The window's own drawing, at its own size, over the app: `--screenshot` captures
+            // it and the run crops the corner back out. (A second viewport is not in the main
+            // one's picture, and Screen Recording is not always granted.)
+            let width = crate::jam_strip::width_for(ui.max_rect().width());
+            let size = crate::jam_window::window_size(width);
+            let at = egui::Rect::from_min_size(egui::pos2(8.0, 8.0), size);
+            let (name, counter) = (crate::jam_strip::name(page), crate::jam_strip::counter(page));
+            egui::Area::new(egui::Id::new("jam strip preview")).fixed_pos(at.min).order(egui::Order::Foreground).show(ctx, |ui| {
+                ui.painter().rect_filled(at, 0.0, egui::Color32::BLACK);
+                ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
+                    crate::jam_window::paint(ui, &name, counter.as_deref(), rows, width, false);
+                });
+            });
+        }
         self.update_slot_view();
         self.follow_edits();
         if !self.dropped_samples.is_empty() {
             let files = std::mem::take(&mut self.dropped_samples);
-            let rows = ctx.data(|d| d.get_temp::<Vec<(egui::Rect, (usize, usize))>>(egui::Id::new(layout::DROP_ROWS))).unwrap_or_default();
-            let at = self.file_drag.and_then(|p| rows.iter().find(|(r, _)| r.contains(p)).map(|&(_, gs)| gs));
-            self.drop_samples(at.unwrap_or((self.group, self.sound)), &files);
+            // On a lane of the LAYERS tab: a layer there.
+            let lanes =
+                ctx.data(|d| d.get_temp::<Vec<egui::Rect>>(egui::Id::new(layout::sampling::layers::LANE_RECTS))).unwrap_or_default();
+            let lane = self
+                .file_drag
+                .filter(|_| self.sampling_open && self.sampling.tab == 4)
+                .and_then(|p| lanes.iter().position(|r| r.contains(p)));
+            if let Some(lane) = lane {
+                self.layer_files(lane, &files);
+            } else {
+                let rows =
+                    ctx.data(|d| d.get_temp::<Vec<(egui::Rect, (usize, usize))>>(egui::Id::new(layout::DROP_ROWS))).unwrap_or_default();
+                let at = self.file_drag.and_then(|p| rows.iter().find(|(r, _)| r.contains(p)).map(|&(_, gs)| gs));
+                self.drop_samples(at.unwrap_or((self.group, self.sound)), &files);
+            }
             self.file_drag = None;
         }
         // A browser result dropped on a sound's row loads there.
@@ -12087,6 +15021,15 @@ impl App {
         if self.export.open {
             self.export_window(ctx);
         }
+        if self.session_window_open {
+            match session_window::show(ctx, &self.session.view, self.session_window_pin.on()) {
+                session_window::WindowAction::TogglePlay => self.toggle_session_play(),
+                session_window::WindowAction::Stop => self.stop_session_record(),
+                session_window::WindowAction::Hide => self.session_window_open = false,
+                session_window::WindowAction::TogglePin => self.session_window_pin = self.session_window_pin.toggled(),
+                session_window::WindowAction::None => {}
+            }
+        }
         if (self.group, self.sound, self.scene, self.section, self.song_view) != before {
             self.sync_controller();
         }
@@ -12109,6 +15052,8 @@ fn preset_sound_name(name: &str) -> &str {
 mod tests {
     //! The window driven with simulated mouse input (egui_kittest).
     use super::*;
+
+    mod layers_ui;
     use deckard_model::Dim;
     use deckard_model::Note;
     use egui::{Event, PointerButton, Pos2};
@@ -12290,6 +15235,40 @@ mod tests {
         }
         app.open(Path::new(&path));
         Some(harness_of(app, song_view))
+    }
+
+    /// The Jam's VARIATION page's Apply reaches the app: the sound's pattern gains notes
+    /// where it had none, which is what the rig found missing (work-item 35).
+    #[test]
+    fn the_jams_apply_variation_reaches_the_app() {
+        let mut h = blank_harness(false);
+        let doc = h.state().doc.clone().expect("a project");
+        {
+            let mut d = doc.borrow_mut();
+            d.add_pattern(0, 0, "P").expect("a pattern");
+            let notes: Vec<deckard_model::Note> = (0..4)
+                .map(|i| deckard_model::Note {
+                    ratchet: Default::default(),
+                    expr: None,
+                    sound: 0,
+                    position: i * 960,
+                    length: 240,
+                    pitch: 60,
+                    velocity: 100,
+                    probability: 100,
+                })
+                .collect();
+            d.edit_notes("Seed", 0, 0, &[], &notes).expect("seeded");
+            for (field, value) in [("mode", 1.0), ("probability", 100.0)] {
+                d.set_groove_setting(0, 0, &format!("sequence_variation/{field}"), value).expect("the page's setting");
+            }
+        }
+        let count = |d: &deckard_doc::Document| d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).count();
+        assert_eq!(count(&doc.borrow()), 4, "four to the bar");
+        h.state_mut().surface_act(deckard_surface::Action::ApplyVariation);
+        h.run_steps(2);
+        let after = count(&doc.borrow());
+        assert!(after > 4, "the empty steps fill: {after} notes, status {:?}", h.state().status);
     }
 
     /// [`harness`] on a new project (one group of 16 empty sounds, one scene), so the
@@ -12840,6 +15819,47 @@ mod tests {
         assert!(asked.iter().all(|d| *d >= BACKGROUND_PACE), "{asked:?}");
     }
 
+    /// With `AutoNoVsync`, a visible playing frame must never schedule an immediate (`0 ms`)
+    /// repaint on its own (such as the playing scene tab's progress strip), or the UI thread
+    /// spins unthrottled at 400+ FPS.
+    #[test]
+    fn visible_frame_paces_repaints_while_playing() {
+        let mut app = App::default();
+        app.new_project();
+        app.preload_plugins = false;
+        if let Some(doc) = &app.doc {
+            let mut d = doc.borrow_mut();
+            let p = d.add_pattern(0, 0, "Pattern 1").unwrap();
+            let _ = play_in_scene(&mut d, 0, 0, p);
+        }
+        app.metronome = true;
+        app.transport_play();
+        if !matches!(app.output, Some(Ok(_))) {
+            eprintln!("no audio output; skipping");
+            return;
+        }
+        let ctx = egui::Context::default();
+        // Settle initial two layout passes (egui requests one immediate pass on new widgets).
+        for _ in 0..3 {
+            let mut raw = egui::RawInput::default();
+            raw.predicted_dt = 0.002;
+            ctx.run_ui(raw, |ui| app.frame(ui)).textures_delta.clear();
+        }
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = asked.clone();
+        ctx.set_request_repaint_callback(move |info| log.lock().unwrap().push(info.delay));
+        for _ in 0..4 {
+            let mut raw = egui::RawInput::default();
+            raw.predicted_dt = 0.002;
+            ctx.run_ui(raw, |ui| app.frame(ui)).textures_delta.clear();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        app.stop();
+        let asked = asked.lock().unwrap();
+        assert!(!asked.is_empty(), "playing frame schedules next tick");
+        assert!(asked.iter().all(|d| *d >= std::time::Duration::from_millis(10)), "unexpected unthrottled repaint: {asked:?}");
+    }
+
     /// #15: with the window covered, the meters (the MK3's Mixer shows them) still move.
     #[test]
     fn meters_move_while_the_window_is_covered() {
@@ -13201,6 +16221,15 @@ mod tests {
         assert_eq!(theme_name("lcd"), "LCD");
     }
 
+    #[test]
+    fn opening_the_controller_folder_copies_the_stock_themes() {
+        let dir = controller_folder().unwrap();
+        let nord = std::fs::read_to_string(dir.join("defaults/themes/nord.lua")).unwrap();
+        assert!(nord.contains("base = \"maschine\""));
+        let readme = std::fs::read_to_string(dir.join("README.txt")).unwrap();
+        assert!(readme.contains("import or export"));
+    }
+
     /// TAP on the controller sets the song's tempo from the taps; SHIFT + TAP and the
     /// header's switch turn the metronome on and off in both.
     #[test]
@@ -13436,6 +16465,90 @@ mod tests {
         let names: Vec<String> = p.groups[groups].sounds[..4].iter().map(|s| s.name.clone()).collect();
         assert!(names[0].ends_with(" Drums") && names[3].ends_with(" Vocal"), "{names:?}");
         let _ = std::fs::remove_dir_all(settings);
+    }
+
+    /// A Loop-mode Audio plug-in's pad (MK3 Pad mode) switches its loop off in the
+    /// pattern the group plays, and on again with its focused take.
+    #[test]
+    fn toggling_an_audio_loop_switches_it_in_the_playing_pattern() {
+        let mut app = App::default();
+        app.new_project();
+        {
+            let mut d = app.doc.as_ref().unwrap().borrow_mut();
+            d.add_pattern(0, 0, "Part").unwrap();
+            d.assign_pattern(0, 0, Some(0)).unwrap();
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let wav = tmp.path().join("Loop 120 bpm.wav");
+        {
+            let spec = hound::WavSpec { channels: 1, sample_rate: 48_000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+            let mut w = hound::WavWriter::create(&wav, spec).unwrap();
+            for i in 0..96_000 {
+                w.write_sample(((i as f64 * 0.05).sin() * 8_000.0) as i16).unwrap();
+            }
+            w.finalize().unwrap();
+        }
+        let smp = deckard_engine::sample::Sample::load(&wav).unwrap();
+        app.load_loop(0, 2, &wav, &smp).unwrap();
+        let on = |app: &App| app.doc.as_ref().unwrap().borrow().project().groups[0].patterns[0].audio.iter().any(|c| c.sound == 2);
+        let loop_playing = |app: &App| app.surface_view().groups[0].sounds[2].loop_playing;
+        assert!(on(&app), "a loop loaded is on in the pattern");
+        assert!(loop_playing(&app), "active in the pattern even while stopped");
+        app.playing = Some(deckard_engine::Mode::Scene(0));
+        assert!(loop_playing(&app), "song playing and on in the group's pattern");
+        assert!(!app.surface_view().groups[0].sounds[3].loop_playing, "another sound");
+        app.toggle_audio_loop(0, 2).unwrap();
+        assert!(!on(&app), "the pad switches it off");
+        assert!(!loop_playing(&app), "off in the pattern: no longer active");
+        app.toggle_audio_loop(0, 2).unwrap();
+        assert!(on(&app), "and on again");
+        assert!(loop_playing(&app), "on again while song plays");
+        let slot =
+            app.doc.as_ref().unwrap().borrow().project().groups[0].sounds[2].slots.iter().position(|x| x.module == "AudioModule").unwrap();
+        layout::apply_acts(&mut app, vec![layout::Act::SetParam(deckard_doc::Target::Module(0, 2, slot), "mode", 1.0)]);
+        assert!(!loop_playing(&app), "Gate mode plays with notes, not the pattern");
+        assert!(app.toggle_audio_loop(0, 3).is_err(), "a sound without an Audio plug-in");
+
+        // A looped sustaining Sampler sound stays flagged as `loop_playing` while active in the pattern or engine.
+        {
+            let mut d = app.doc.as_ref().unwrap().borrow_mut();
+            d.add_slot(0, 3, 0, &deckard_doc::NewModule::Sampler).unwrap();
+            let spec = deckard_doc::ZoneSpec {
+                from: deckard_doc::ZoneFrom::Template,
+                file: Some(wav.clone()),
+                set: vec![
+                    ("key_range/low".into(), 0.0),
+                    ("key_range/high".into(), 127.0),
+                    ("velocity_range/low".into(), 0.0),
+                    ("velocity_range/high".into(), 127.0),
+                    ("root_key".into(), 60.0),
+                    ("play_range/low".into(), 0.0),
+                    ("play_range/high".into(), 95_999.0),
+                    ("loop_active".into(), 1.0),
+                    ("loop_range/low".into(), 0.0),
+                    ("loop_range/high".into(), 95_999.0),
+                ],
+            };
+            d.set_zones(0, 3, &[spec], "Loop").unwrap();
+            d.set("Sustaining", deckard_doc::Target::Sampler(0, 3), "envelope_type", mxprj::decode::Value::Int(2)).unwrap();
+            let note = deckard_model::Note {
+                ratchet: Default::default(),
+                expr: None,
+                sound: 3,
+                position: 0,
+                length: 3840,
+                pitch: 60,
+                velocity: 100,
+                probability: 100,
+            };
+            d.edit_notes("Loop note", 0, 0, &[], &[note]).unwrap();
+        }
+        assert!(app.surface_view().groups[0].sounds[3].loop_playing, "looped Sampler note active in playing pattern");
+        app.playing = None;
+        assert!(!app.surface_view().groups[0].sounds[3].loop_playing, "stopped with no held note: Sampler loop inactive");
+        app.held = Some((0, 3, 60));
+        assert!(app.surface_view().groups[0].sounds[3].loop_playing, "held looped Sampler pad: active");
+        app.held = None;
     }
 
     #[test]
@@ -14439,6 +17552,61 @@ mod tests {
         assert_eq!((touch(&h).min, touch(&h).max), (40, 40));
         h.state_mut().doc.as_ref().unwrap().borrow_mut().undo();
         assert_eq!((touch(&h).mode, touch(&h).min, touch(&h).max), (TouchMode::Cc, 0, 100), "one undo step back");
+    }
+
+    /// Wheel input over either the sound names or drum lanes moves both together.
+    #[test]
+    fn sound_list_scrolls_with_drum_lanes() {
+        for over_names in [true, false] {
+            let mut h = blank_harness(false);
+            h.state_mut().piano_roll = false;
+            h.state_mut().mouse = layout::MouseMode::Draw;
+            h.state().doc.as_ref().unwrap().borrow_mut().add_pattern(0, 0, "Pattern 1").unwrap();
+            h.run_steps(3);
+            let grid: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new("deckard-grid"))).expect("grid drawn");
+            assert!(grid.height() < 16.0 * 24.0 - 48.0, "room to scroll two rows");
+            let name = Pos2::new(grid.left() - 80.0, grid.top() + 12.0);
+            let note = Pos2::new(grid.left() + 10.0, name.y);
+            for (delta, sound) in [(-48.0, 2), (48.0, 0)] {
+                h.hover_at(if over_names { name } else { grid.center() });
+                h.step();
+                h.event(egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, delta),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::NONE,
+                });
+                h.run_steps(30);
+                click(&mut h, name);
+                assert_eq!(h.state().sound, sound, "sound name after scrolling {delta} over names={over_names}");
+                click(&mut h, note);
+                assert!(notes_of(&h).iter().any(|n| n.sound == sound), "the lane beside the name belongs to sound {sound}");
+            }
+        }
+    }
+
+    /// Piano-roll pitches are independent of the sound list's rows.
+    #[test]
+    fn sound_list_scroll_keeps_piano_roll_pitches_in_place() {
+        let mut h = blank_harness(false);
+        h.state_mut().piano_roll = true;
+        h.run_steps(3);
+        let grid: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new("deckard-grid"))).expect("grid drawn");
+        let key = egui::Id::new(("piano-zoom", h.state().group, h.state().sound));
+        let pitches = h.ctx.data(|d| d.get_temp::<(f32, f32)>(key)).expect("pitches shown");
+        let name = Pos2::new(grid.left() - 100.0, grid.top() + 12.0);
+        h.hover_at(name);
+        h.step();
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -48.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.run_steps(30);
+        assert_eq!(h.ctx.data(|d| d.get_temp::<(f32, f32)>(key)), Some(pitches), "scrolling names does not scroll pitches");
+        click(&mut h, name);
+        assert_eq!(h.state().sound, 2, "the sound list still scrolls in piano-roll mode");
     }
 
     /// The Pattern Editor's horizontal zooming scroll bar (as the manual has it): drag it
@@ -15602,6 +18770,303 @@ mod tests {
         h.render().unwrap().save(dir.join("sampling-long.png")).unwrap();
     }
 
+    /// A catalog of 200 plug-ins, longer than any screen: the Plug-in Manager's list.
+    fn many_plugins(app: &mut App) {
+        app.catalog.entries = (0..200)
+            .map(|i| deckard_plugins::scan::Entry {
+                kind: deckard_plugins::scan::Kind::Vst3,
+                vendor: "Acme".into(),
+                name: format!("Plug-in {i:03}"),
+                instrument: i % 3 == 0,
+                location: String::new(),
+                cid: format!("{i:032X}"),
+            })
+            .collect();
+    }
+
+    /// On a short screen (shorter than a 1920x515 monitor, so that the Hardware tab of a
+    /// new project doesn't fit), Preferences and the panels that open as dialogs stay
+    /// inside the window, and what doesn't fit scrolls into view: the Hardware tab's last
+    /// setting is reached with the wheel instead of being cut off.
+    #[test]
+    fn dialogs_fit_a_short_window_and_scroll() {
+        let mut app = App { settings: settings::Settings::default(), model: "M3".into(), ..Default::default() };
+        app.new_project();
+        many_plugins(&mut app);
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1920.0, 380.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+        layout::style(&h.ctx);
+        h.run_steps(3);
+        let screen = h.ctx.content_rect();
+        let window = |h: &Harness<'static, App>, title: &str| {
+            // (A window's id is its title's text, which egui keeps as an `Option`.)
+            h.ctx.memory(|m| m.area_rect(egui::Id::new(Some(std::borrow::Cow::Borrowed(title))))).unwrap_or_else(|| panic!("{title} shown"))
+        };
+        for tab in [7, 2, 3, 4, 5, 6, 0, 1] {
+            h.state_mut().prefs = Some(tab);
+            h.run_steps(3);
+            let r = window(&h, "Preferences");
+            assert!(r.top() >= screen.top() - 0.5 && r.bottom() <= screen.bottom() + 0.5, "tab {tab}: {r:?} in {screen:?}");
+        }
+        // The Plug-in Manager: its settings at the top, inside the window, and the end of
+        // its list out of sight (it scrolls, rather than the window growing). (On Linux the
+        // Wine settings come first and are taller than this screen: the tab scrolls too.)
+        h.state_mut().prefs = Some(0);
+        h.run_steps(3);
+        let prefs = window(&h, "Preferences");
+        let r = h.get_by_label("Use VST3 Plug-ins").rect();
+        assert!(r.top() >= prefs.top() && r.bottom() <= prefs.bottom(), "{r:?} in {prefs:?}");
+        assert!(h.query_by_label("Acme — Plug-in 199").is_none_or(|n| n.rect().top() > prefs.bottom()), "the list scrolls");
+        h.state_mut().prefs = Some(4);
+        h.run_steps(3);
+        let prefs = window(&h, "Preferences");
+        let last = |h: &Harness<'static, App>| h.get_by_label("Desktop theme").rect();
+        assert!(last(&h).bottom() > prefs.bottom(), "the Hardware tab is taller than the window: {:?} vs {prefs:?}", last(&h));
+        h.hover_at(prefs.center());
+        for _ in 0..20 {
+            h.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -120.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            });
+            h.step();
+        }
+        h.run_steps(3);
+        let prefs = window(&h, "Preferences");
+        assert!(last(&h).bottom() <= prefs.bottom(), "scrolled into view: {:?} in {prefs:?}", last(&h));
+        h.state_mut().prefs = None;
+        for (title, open) in [("Note Repeat / Arp", 0), ("Lock", 1)] {
+            h.state_mut().repeat_panel = open == 0;
+            h.state_mut().lock_panel = open == 1;
+            h.run_steps(3);
+            let r = window(&h, title);
+            assert!(r.top() >= screen.top() - 0.5 && r.bottom() <= screen.bottom() + 0.5, "{title}: {r:?} in {screen:?}");
+        }
+    }
+
+    /// Renders every Preferences tab on a laptop screen into `DECKARD_RENDER_DIR`, to look
+    /// at (`cargo test -p deckard --bin deckard -- --ignored render_laptop_dialogs`).
+    #[test]
+    #[ignore]
+    fn render_laptop_dialogs() {
+        let Some(dir) = std::env::var_os("DECKARD_RENDER_DIR").map(PathBuf::from) else { return };
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = App { settings: settings::Settings::default(), model: "M3".into(), ..Default::default() };
+        app.new_project();
+        many_plugins(&mut app);
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1366.0, 768.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+        // (The app's own fonts, as at start-up: the harness has egui's.)
+        layout::style(&h.ctx);
+        h.run_steps(3);
+        for tab in [7, 2, 3, 4, 5, 6, 0, 1] {
+            h.state_mut().prefs = Some(tab);
+            h.run_steps(4);
+            h.render().unwrap().save(dir.join(format!("prefs-{tab}.png"))).unwrap();
+        }
+        // The Plug-in Manager on a short screen.
+        h.set_size(egui::vec2(1366.0, 380.0));
+        h.state_mut().prefs = Some(0);
+        h.run_steps(4);
+        h.render().unwrap().save(dir.join("prefs-0-short.png")).unwrap();
+        h.set_size(egui::vec2(1366.0, 768.0));
+        h.state_mut().prefs = None;
+        // The main window's toolbars, in each view, at both laptop sizes.
+        for (w, ht) in [(1366.0, 768.0), (1280.0, 720.0)] {
+            h.set_size(egui::vec2(w, ht));
+            for (name, song, mixer, lfos, browser) in [
+                ("ideas", false, false, false, false),
+                ("song", true, false, false, false),
+                ("mixer", false, true, false, false),
+                ("lfos", false, false, true, false),
+                ("browser", false, false, false, true),
+            ] {
+                let app = h.state_mut();
+                (app.song_view, app.lfos, app.browser.open) = (song, lfos, browser);
+                app.set_mixer(mixer);
+                h.run_steps(4);
+                h.render().unwrap().save(dir.join(format!("main-{name}-{w}.png"))).unwrap();
+            }
+        }
+        h.set_size(egui::vec2(1366.0, 768.0));
+        let app = h.state_mut();
+        (app.song_view, app.lfos, app.browser.open) = (false, false, false);
+        app.set_mixer(false);
+        for (name, set) in [("repeat", 0), ("lock", 1), ("monitor", 2)] {
+            h.state_mut().repeat_panel = set == 0;
+            h.state_mut().lock_panel = set == 1;
+            h.state_mut().midi_monitor = set == 2;
+            h.run_steps(4);
+            h.render().unwrap().save(dir.join(format!("{name}.png"))).unwrap();
+        }
+    }
+
+    /// On a laptop screen (1366x768, and 1280x720 to be safe) every Preferences tab and
+    /// the dialogs a laptop user opens most stay inside the window, both ways.
+    #[test]
+    fn dialogs_fit_a_laptop_screen() {
+        for (w, ht) in [(1366.0, 768.0), (1280.0, 720.0)] {
+            let mut app = App { settings: settings::Settings::default(), model: "M3".into(), ..Default::default() };
+            app.new_project();
+            many_plugins(&mut app);
+            let mut h = Harness::builder()
+                .with_size(egui::vec2(w, ht))
+                .with_step_dt(1.0 / 60.0)
+                .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+            layout::style(&h.ctx);
+            h.run_steps(3);
+            let screen = h.ctx.content_rect();
+            let fits = |h: &Harness<'static, App>, title: &str, what: &str| {
+                let r = h
+                    .ctx
+                    .memory(|m| m.area_rect(egui::Id::new(Some(std::borrow::Cow::Borrowed(title)))))
+                    .unwrap_or_else(|| panic!("{what} shown"));
+                assert!(screen.expand(0.5).contains_rect(r), "{w}x{ht} {what}: {r:?} in {screen:?}");
+            };
+            for tab in [7, 2, 3, 4, 5, 6, 0, 1] {
+                h.state_mut().prefs = Some(tab);
+                h.run_steps(3);
+                fits(&h, "Preferences", &format!("Preferences tab {tab}"));
+            }
+            h.state_mut().prefs = None;
+            h.state_mut().repeat_panel = true;
+            h.run_steps(3);
+            fits(&h, "Note Repeat / Arp", "Note Repeat / Arp");
+            h.state_mut().repeat_panel = false;
+            h.state_mut().lock_panel = true;
+            h.run_steps(3);
+            fits(&h, "Lock", "Lock");
+            h.state_mut().lock_panel = false;
+            h.state_mut().midi_monitor = true;
+            h.run_steps(3);
+            fits(&h, "MIDI Monitor", "MIDI Monitor");
+            let opened = h.ctx.memory(|m| m.area_rect(egui::Id::new(Some(std::borrow::Cow::Borrowed("MIDI Monitor"))))).unwrap();
+            h.run_steps(20);
+            fits(&h, "MIDI Monitor", "MIDI Monitor, later");
+            let later = h.ctx.memory(|m| m.area_rect(egui::Id::new(Some(std::borrow::Cow::Borrowed("MIDI Monitor"))))).unwrap();
+            assert!(
+                (later.width() - opened.width()).abs() < 1.0,
+                "{w}x{ht}: the MIDI Monitor doesn't keep widening: {opened:?} → {later:?}"
+            );
+            h.state_mut().midi_monitor = false;
+        }
+    }
+
+    /// Every character the app's own text uses (outside ASCII) has a glyph in its fonts:
+    /// none draws as a box ("Preferences ▸ General" did). Read from the sources, so a new
+    /// symbol is checked too.
+    #[test]
+    fn every_symbol_in_the_ui_has_a_glyph() {
+        fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                let name = p.file_name().unwrap().to_string_lossy().to_string();
+                if p.is_dir() {
+                    sources(&p, out);
+                } else if name.ends_with(".rs") && !name.ends_with("tests.rs") {
+                    out.push(p);
+                }
+            }
+        }
+        // The non-ASCII characters inside string literals (not comments).
+        let mut used = std::collections::BTreeMap::<char, String>::new();
+        let mut files = Vec::new();
+        sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        for f in &files {
+            let text = std::fs::read_to_string(f).unwrap();
+            let (mut in_str, mut escaped) = (false, false);
+            for line in text.lines() {
+                let chars: Vec<char> = line.chars().collect();
+                let mut i = 0;
+                while i < chars.len() {
+                    let c = chars[i];
+                    if !in_str && c == '/' && chars.get(i + 1) == Some(&'/') {
+                        break;
+                    }
+                    if !in_str && c == '\'' {
+                        // A char literal ('"', '\'') or a lifetime: skip it.
+                        let close = chars[i + 1..].iter().take(4).position(|&x| x == '\'').map(|k| i + 1 + k);
+                        i = close.filter(|&k| k > i + 1).map_or(i + 1, |k| k + 1);
+                        continue;
+                    }
+                    if in_str && !escaped && !c.is_ascii() {
+                        used.entry(c).or_insert_with(|| f.file_name().unwrap().to_string_lossy().to_string());
+                    }
+                    if c == '"' && !escaped {
+                        in_str = !in_str;
+                    }
+                    escaped = in_str && c == '\\' && !escaped;
+                    i += 1;
+                }
+                escaped = false;
+            }
+        }
+        assert!(used.contains_key(&'▸'), "the scan finds the UI's symbols");
+        // Each font of the app's text, in order, read for its glyphs. (Not egui's
+        // `has_glyph`: it reports "no" for whatever the font that also draws the box
+        // supplies, here the emoji font, so every emoji would count as missing.)
+        let defs = layout::font_definitions();
+        let chain = &defs.families[&egui::FontFamily::Proportional];
+        let fonts: Vec<fontdue::Font> = chain
+            .iter()
+            .map(|name| {
+                let data = &defs.font_data[name];
+                let settings = fontdue::FontSettings { collection_index: data.index, ..Default::default() };
+                fontdue::Font::from_bytes(&data.font[..], settings).unwrap_or_else(|e| panic!("{name}: {e}"))
+            })
+            .collect();
+        let missing: Vec<String> = used
+            .iter()
+            .filter(|(c, _)| !fonts.iter().any(|f| f.lookup_glyph_index(**c) != 0))
+            .map(|(c, file)| format!("U+{:04X} {c} ({file})", *c as u32))
+            .collect();
+        assert!(missing.is_empty(), "no glyph for: {missing:?}");
+    }
+
+    /// On a laptop screen the header's groups don't overlap: the transport, centred, moves
+    /// right of Save rather than over it (at 1280 px it would cover it), and leaves the
+    /// master fader and the CPU meter their room. Narrower than its groups fit (900 px),
+    /// it stays centred, as before.
+    #[test]
+    fn the_header_fits_a_laptop_screen() {
+        for w in [1280.0, 1366.0, 1920.0] {
+            let mut app = App { settings: settings::Settings::default(), model: "M3".into(), ..Default::default() };
+            app.new_project();
+            let mut h = Harness::builder()
+                .with_size(egui::vec2(w, 720.0))
+                .with_step_dt(1.0 / 60.0)
+                .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+            layout::style(&h.ctx);
+            h.run_steps(3);
+            let at =
+                |name: &str| h.ctx.data(|d| d.get_temp::<egui::Rect>(layout::header_rect(name))).unwrap_or_else(|| panic!("{name} drawn"));
+            let (save, restart, keys, master, cpu) = (at("save"), at("restart"), at("keys"), at("master"), at("cpu"));
+            assert!(save.right() <= restart.left(), "{w}: Save clear of the transport: {save:?} vs {restart:?}");
+            assert!(keys.right() <= master.left(), "{w}: the transport clear of the master fader: {keys:?} vs {master:?}");
+            assert!(cpu.right() <= w, "{w}: the CPU meter on the screen: {cpu:?}");
+            if w >= 1920.0 {
+                let mid = (restart.left() + keys.right()) / 2.0;
+                assert!((mid - w / 2.0).abs() < 2.0, "{w}: still centred where there's room: {mid}");
+            }
+        }
+        let mut app = App { settings: settings::Settings::default(), model: "M3".into(), ..Default::default() };
+        app.new_project();
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(900.0, 720.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+        layout::style(&h.ctx);
+        h.run_steps(3);
+        let at = |name: &str| h.ctx.data(|d| d.get_temp::<egui::Rect>(layout::header_rect(name))).unwrap();
+        let mid = (at("restart").left() + at("keys").right()) / 2.0;
+        assert!((mid - 450.0).abs() < 2.0, "900: too narrow to fit between: centred, as before ({mid})");
+    }
+
     /// The MASCHINE menu: the undo history undoes several steps at once; Open Recent
     /// asks about unsaved changes first.
     #[test]
@@ -16149,7 +19614,7 @@ mod tests {
 
     /// Sampling: the strip button opens it on the focused sound's sample; dragging on
     /// the waveform selects; NORM. writes an edited copy and points the zone at it
-    /// (undoable); SLICE ▸ APPLY makes a zone per slice on keys from C1.
+    /// (undoable); SLICE ▸ APPLY makes a zone per slice on keys from C3.
     #[test]
     fn recordings_land_where_maschine_puts_them() {
         use layout::sampling::RecParam;
@@ -16674,6 +20139,57 @@ mod tests {
         assert_eq!(mode(&h), Some(deckard_model::AudioMode::Loop), "{}", h.state().status);
     }
 
+    /// ASIO wanted but the system's driver standing in (the computer just woke, say):
+    /// ASIO is tried again a few seconds apart, five times at most, never while the
+    /// song plays; opening the output afresh starts the count again.
+    #[test]
+    fn asio_is_tried_again_five_times_while_a_fallback_plays() {
+        use deckard_engine::devices::{ASIO_BUILT, AudioDriver};
+        let mut app = App { settings: settings::Settings::default(), ..App::default() };
+        app.settings.audio_driver = AudioDriver::Asio;
+        app.settings.asio_device = Some("DECKARD test: no such ASIO driver".into());
+        let fall_back = |app: &mut App| {
+            app.output = Some(Err("no output in tests".into()));
+            app.output_fallback = Some("the driver isn't ready".into());
+        };
+        fall_back(&mut app);
+        let tries = |app: &App| app.asio_retry.map(|(_, n)| n);
+        let due = |app: &mut App| {
+            if let Some((at, _)) = &mut app.asio_retry {
+                *at -= ASIO_RETRY_GAP * 2;
+            }
+        };
+        app.retry_asio();
+        if !ASIO_BUILT {
+            assert_eq!(tries(&app), None, "no ASIO to try");
+            return;
+        }
+        assert_eq!(tries(&app), Some(0), "not at once");
+        app.retry_asio();
+        assert_eq!(tries(&app), Some(0), "not before the gap");
+        app.playing = Some(Mode::Scene(0));
+        due(&mut app);
+        app.retry_asio();
+        assert_eq!(tries(&app), Some(0), "not while the song plays");
+        app.playing = None;
+        for n in 1..=ASIO_RETRIES {
+            due(&mut app);
+            app.retry_asio();
+            assert_eq!(tries(&app), Some(n));
+            assert_eq!(deckard_engine::devices::driver(), AudioDriver::System, "the stand-in's driver again");
+        }
+        due(&mut app);
+        app.retry_asio();
+        assert_eq!(tries(&app), Some(ASIO_RETRIES), "five tries at most");
+        app.close_output();
+        fall_back(&mut app);
+        app.retry_asio();
+        assert_eq!(tries(&app), Some(0), "opened afresh: counted again");
+        app.output_fallback = None;
+        app.retry_asio();
+        assert_eq!(tries(&app), None, "ASIO in use: nothing to try");
+    }
+
     #[test]
     fn a_detect_take_on_an_audio_sound_is_rounded_to_a_sixteenth() {
         let Some(mut h) = harness(false, true) else { return };
@@ -16942,6 +20458,43 @@ mod tests {
         assert_eq!(h.state().zone, 0);
     }
 
+    /// EDIT's MUNGE bar: the tool opens it, the eighths switch off and on, CANCEL closes
+    /// it; a New Sampler's zone bar (with TAIL and MOTION) is drawn over it.
+    #[test]
+    fn the_munge_bar_opens_and_its_eighths_switch() {
+        let Some(mut h) = harness(false, true) else { return };
+        (h.state_mut().group, h.state_mut().sound) = (0, 0);
+        h.run_steps(3);
+        let panel_top = 33.0 + 3.0 + 343.0 + 2.0 + 140.0 + 2.0;
+        click(&mut h, Pos2::new(3.0 + 16.0, panel_top + 7.0 + 4.0 * 28.0 + 12.0));
+        h.run_steps(3);
+        h.state_mut().convert_instrument(true);
+        // (Converted, it is in Original, which has no MUNGE: Advanced has.)
+        h.state_mut()
+            .arrange_act(layout::Act::Sampling(layout::sampling::SamplingAct::Sampler(deckard_model::new_sampler::SamplerMode::Advanced)));
+        h.state_mut().arrange_act(layout::Act::Sampling(layout::sampling::SamplingAct::Tab(1)));
+        h.run_steps(3);
+        let tool = |h: &Harness<'static, App>, id: &str| -> egui::Rect {
+            h.ctx.data(|d| d.get_temp(egui::Id::new(("deckard-tool", id.to_string())))).expect("tool drawn")
+        };
+        let r = tool(&h, "MUNGE");
+        click(&mut h, r.center());
+        h.run_steps(2);
+        assert!(h.state().sampling.munge.is_some(), "the bar is open");
+        let r = tool(&h, "munge-3");
+        click(&mut h, r.center());
+        h.run_steps(2);
+        assert_eq!(h.state().sampling.munge.unwrap().mutes, [false, false, true, false, false, false, false, false]);
+        let r = tool(&h, "munge-3");
+        click(&mut h, r.center());
+        h.run_steps(2);
+        assert!(!h.state().sampling.munge.unwrap().changes(), "and on again");
+        let r = tool(&h, "munge-cancel");
+        click(&mut h, r.center());
+        h.run_steps(2);
+        assert!(h.state().sampling.munge.is_none());
+    }
+
     /// The sample's zooming scroll bar, as the Pattern Editor's: up zooms in round where
     /// it was grabbed, along scrolls, an end moves with the other held, double-click shows
     /// it all.
@@ -17055,12 +20608,94 @@ mod tests {
         click(&mut h, r.center());
         let zones = project_of(&h).groups[0].sounds[0].sampler.clone().unwrap().zones;
         assert_eq!(zones.len(), 8);
-        assert_eq!(zones.iter().map(|z| z.root_key).collect::<Vec<_>>(), (36..44).collect::<Vec<_>>());
+        assert_eq!(zones.iter().map(|z| z.root_key).collect::<Vec<_>>(), (60..68).collect::<Vec<_>>());
         assert!(zones.windows(2).all(|w| w[0].play_range.1 + 1 == w[1].play_range.0), "contiguous slices");
         assert_eq!(h.state().sampling.tab, 3, "then the Zone tab");
         h.run_steps(3);
         let grid: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new("deckard-zone-grid"))).expect("zone map drawn");
         assert!(grid.width() > 100.0);
+        // Back on SLICE, from another slice's zone: the slices applied show, not a new split.
+        h.state_mut().zone = 5;
+        h.run_steps(3);
+        h.state_mut().arrange_act(layout::Act::Sampling(layout::sampling::SamplingAct::Tab(2)));
+        h.run_steps(3);
+        let starts: Vec<usize> = zones.iter().map(|z| z.play_range.0 as usize).collect();
+        assert_eq!(h.state().sampling.slices, starts, "the slices it was cut at");
+        assert_eq!(h.state().sampling.slice_mode, 3, "kept as set (Manual)");
+        // Another slice's pad: they stay.
+        h.state_mut().zone = 2;
+        h.run_steps(3);
+        assert_eq!(h.state().sampling.slices, starts);
+        // One taken out and applied again: seven zones, over the same frames.
+        h.state_mut().sampling.slices.remove(3);
+        let r = tool(&h, "apply");
+        click(&mut h, r.center());
+        let again = project_of(&h).groups[0].sounds[0].sampler.clone().unwrap().zones;
+        assert_eq!(again.len(), 7);
+        assert_eq!((again[0].play_range.0, again[6].play_range.1), (zones[0].play_range.0, zones[7].play_range.1));
+    }
+
+    /// SLICE in the software: CUE and Enter catch a slice where the sample plays, RE-ROLL
+    /// picks again, a right-click keeps a slice or key shifts it.
+    #[test]
+    fn slice_cue_reroll_and_the_slice_menu() {
+        use layout::sampling::SamplingAct as S;
+        let (app, _tmp) = crate::surface_sampling_tests::app();
+        let mut h = harness_of(app, false);
+        let act = |h: &mut Harness<'static, App>, a: S| {
+            h.state_mut().arrange_act(layout::Act::Sampling(a));
+            h.run_steps(3);
+        };
+        let tool = |h: &Harness<'static, App>, id: &str| -> Option<egui::Rect> {
+            h.ctx.data(|d| d.get_temp(egui::Id::new(("deckard-tool", id.to_string()))))
+        };
+        act(&mut h, S::Tab(2));
+        act(&mut h, S::SliceMode(3));
+        act(&mut h, S::ClearSlices);
+        // Nothing plays: CUE does nothing.
+        let cue = tool(&h, "cue").expect("CUE drawn");
+        click(&mut h, cue.center());
+        assert!(h.state().sampling.slices.is_empty());
+        // A slice's pad plays it from 20 000 on (held there: it starts in a while).
+        let soon = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        h.state_mut().prehear_from = Some((soon, 20_000, 44_100));
+        h.run_steps(2);
+        assert_eq!(h.state().sampling.playhead, Some(20_000));
+        click(&mut h, cue.center());
+        assert_eq!(h.state().sampling.slices, [0, 20_000]);
+        h.state_mut().prehear_from = Some((soon, 30_000, 44_100));
+        h.run_steps(2);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(2);
+        assert_eq!(h.state().sampling.slices, [0, 20_000, 30_000], "Enter catches one too");
+        h.state_mut().prehear_from = None;
+        h.run_steps(2);
+        // Random: RE-ROLL moves its picks on; Manual has no such button.
+        assert!(tool(&h, "reroll").is_none());
+        act(&mut h, S::SliceMode(5));
+        let reroll = tool(&h, "reroll").expect("RE-ROLL drawn");
+        click(&mut h, reroll.center());
+        assert_eq!(h.state().sampling.seed, 1);
+        // Right-click in a slice: kept, then not; and key shifted.
+        let wave: egui::Rect = h.ctx.data(|d| d.get_temp(egui::Id::new("deckard-sample-wave"))).expect("waveform drawn");
+        h.state_mut().sampling.slices = vec![0, 11_025, 22_050];
+        h.run_steps(2);
+        let in_second = egui::pos2(wave.left() + wave.width() * 0.4, wave.center().y);
+        right_click(&mut h, in_second);
+        h.get_by_label("Keep slice").click();
+        h.run_steps(3);
+        assert_eq!(h.state().sampling.kept, [11_025]);
+        right_click(&mut h, in_second);
+        h.get_by_label("Don't keep slice").click();
+        h.run_steps(3);
+        assert!(h.state().sampling.kept.is_empty());
+        right_click(&mut h, in_second);
+        h.get_by_label("Key Shift to new sound").click();
+        h.run_steps(3);
+        let p = project_of(&h);
+        let made = p.groups[h.state().group].sounds.iter().find(|x| x.name.ends_with(" keys")).expect("the slice on a new sound");
+        assert_eq!(made.sampler.as_ref().unwrap().zones[0].play_range, (11_025, 22_049));
+        assert_eq!(h.state().sampling.slices, [0, 11_025, 22_050], "a right-click adds no slice");
     }
 
     fn pedal_before(p: &deckard_model::Project, g: usize, pi: usize) -> usize {
@@ -17786,7 +21421,9 @@ mod tests {
         let omni_art = tmp.path().join("omnisphere");
         let omni_vendor = tmp.path().join("spectrasonics").join("omnisphere");
         let kontakt = tmp.path().join("kontakt");
-        for d in [&omni_art, &omni_vendor, &kontakt] {
+        let monark = tmp.path().join("monark");
+        let prism = tmp.path().join("prism");
+        for d in [&omni_art, &omni_vendor, &kontakt, &monark, &prism] {
             std::fs::create_dir_all(d).unwrap();
         }
         std::fs::write(omni_art.join("MST_artwork.png"), thumb_png).unwrap();
@@ -17794,6 +21431,10 @@ mod tests {
         std::fs::write(omni_vendor.join("MST_logo.png"), logo_png).unwrap();
         std::fs::write(kontakt.join("MST_artwork.png"), thumb_png).unwrap();
         std::fs::write(kontakt.join("MST_logo.png"), logo_png).unwrap();
+        std::fs::write(monark.join("MST_plugin.png"), thumb_png).unwrap();
+        std::fs::write(monark.join("MST_logo.png"), logo_png).unwrap();
+        std::fs::write(prism.join("MST_plugin.png"), thumb_png).unwrap();
+        std::fs::write(prism.join("MST_logo.png"), logo_png).unwrap();
 
         let prev = std::env::var_os("DECKARD_NI_IMAGE_DIR");
         // SAFETY: scoped to this unit test; `with_ni_pictures` rescans when the path changes.
@@ -17803,6 +21444,27 @@ mod tests {
         assert!(s.has_picture("omnisphere", true) && s.has_picture("omnisphere", false));
         assert_eq!(plugin_pictures::slot_key(&s, "Kontakt 7").as_deref(), Some("kontakt7"));
         assert!(s.has_picture("kontakt7", true) && s.has_picture("kontakt7", false));
+        assert_eq!(plugin_pictures::slot_key(&s, "Monark").as_deref(), Some("monark"));
+        assert!(s.has_picture("monark", true) && s.has_picture("monark", false));
+        assert_eq!(plugin_pictures::slot_key(&s, "Prism FX").as_deref(), Some("prismfx"));
+        assert!(s.has_picture("prismfx", true) && s.has_picture("prismfx", false));
+        let mut app = App::default();
+        app.new_project();
+        app.load_resolved_preset(
+            "Bass Sting",
+            (0, 0),
+            deckard_plugins::nks::Resolved {
+                id: "Native Instruments:VST3:INSTR:5653544E6952367265616B746F722036".into(),
+                name: "Monark".into(),
+                chunk: Vec::new(),
+                pages: Vec::new(),
+            },
+        )
+        .unwrap();
+        let doc = app.doc.as_ref().unwrap().borrow();
+        let slot = &doc.project().groups[0].sounds[0].slots[0];
+        assert_eq!(slot.name, "Monark");
+        assert_eq!(plugin_pictures::slot_key(&s, &slot.name).as_deref(), Some("monark"));
         plugin_pictures::ensure_browser_product(&s, "Omnisphere");
         assert!(s.has_picture("artwork:omnisphere", true) && s.has_picture("artwork:omnisphere", false));
         match prev {
@@ -18275,6 +21937,46 @@ fn decode(bytes: &[u8]) -> Option<(usize, usize, Vec<[u8; 4]>)> {
         assert_eq!(project_of(&h).scenes[scene].name, "Intro");
     }
 
+    #[test]
+    fn pattern_loop_tail_is_drawn_at_a_shifted_pattern_start() {
+        let mut h = blank_harness(true);
+        a_pattern(&mut h);
+        let start = PPQ / 2;
+        let length = 4 * PPQ;
+        let tail = PPQ / 2;
+        let note = Note {
+            position: start + length - PPQ,
+            length: PPQ + tail,
+            sound: 0,
+            pitch: 60,
+            velocity: 127,
+            probability: 100,
+            ratchet: Default::default(),
+            expr: None,
+        };
+        {
+            let mut doc = h.state().doc.as_ref().unwrap().borrow_mut();
+            doc.add_note(0, 0, note).unwrap();
+            doc.set_pattern_span(0, 0, start, length).unwrap();
+        }
+        for piano in [false, true] {
+            h.state_mut().piano_roll = piano;
+            h.run_steps(2);
+            let (grid, (shown_from, scale)): (egui::Rect, (f64, f32)) = h
+                .ctx
+                .data(|d| (d.get_temp(egui::Id::new("deckard-grid")).unwrap(), d.get_temp(egui::Id::new("deckard-grid-time")).unwrap()));
+            let x = |tick: i64| grid.left() + ((tick as f64 - shown_from) as f32) * scale;
+            let visible = h.output().shapes.iter().any(|s| {
+                matches!(&s.shape, egui::Shape::Rect(r) if r.fill.a() == 68
+                    && (r.rect.left() - x(start)).abs() < 0.01
+                    && (r.rect.right() - (x(start + tail) - 2.0)).abs() < 0.01
+                    && r.rect.intersects(grid))
+            });
+            assert!(visible, "continuation visible, piano roll = {piano}");
+            assert_eq!(notes_of(&h), [note]);
+        }
+    }
+
     /// Piano roll: the sound list stays (clicking a sound shows its notes), the note
     /// area has a keyboard and pitch rows, and drawing adds notes at the row's pitch.
     #[test]
@@ -18719,13 +22421,19 @@ fn controller_folder() -> std::io::Result<PathBuf> {
         }
         std::fs::write(to, text)?;
     }
+    for theme in deckard_surface::theme_file::stock() {
+        if let Some(text) = deckard_surface::theme_file::source(theme.id) {
+            std::fs::write(defaults.join(format!("themes/{}.lua", theme.id)), text)?;
+        }
+    }
     std::fs::write(
         dir.join("README.txt"),
         "DECKARD's controller scripts: one file per page (docs/controller-api.md in DECKARD's source).\n\n\
          defaults/ holds DECKARD's own scripts, refreshed each time this folder is opened.\n\
          To change one, copy it from defaults/ to the same place here (defaults/pages/control.lua\n\
          to pages/control.lua) and edit it: DECKARD loads it as you save. Delete it to go back.\n\
-         A new theme in themes/ shows in Preferences > Hardware > Controller theme.\n\
+         A new theme in themes/ shows in Preferences > Hardware > Hardware theme.\n\
+         Preferences > Hardware can also edit colours and import or export a theme file.\n\
          Files under devices/mk3/ apply to the MK3 only.\n",
     )?;
     Ok(dir)

@@ -38,6 +38,37 @@ pub struct Stats {
     /// Underruns the device reported ("A buffer underrun or overrun occurred"): also
     /// at start and restart, when the device itself takes a moment.
     pub device_errors: AtomicU64,
+    /// The last late block: how long it took and lasts (µs), how long of that went on
+    /// what other threads asked for (edits, notes), and how many of those there were.
+    pub late_busy_us: AtomicU64,
+    pub late_audio_us: AtomicU64,
+    pub late_apply_us: AtomicU64,
+    pub late_commands: AtomicU64,
+}
+
+/// The recorder's monitor (interleaved stereo) onto `buf`, its gain going from `from`
+/// to `to` over the block (a move of the master's level doesn't step).
+fn mix_monitor(buf: &mut [f32], monitor: impl Iterator<Item = f32>, from: f32, to: f32) {
+    let frames = (buf.len() / 2).max(1) as f32;
+    for (k, (o, v)) in buf.iter_mut().zip(monitor).enumerate() {
+        let g = from + (to - from) * ((k / 2 + 1) as f32 / frames);
+        *o = (*o + v * g).clamp(-4.0, 4.0);
+    }
+}
+
+#[cfg(test)]
+mod monitor_tests {
+    /// The monitor is as loud as the master lets it be, and gets there over the block.
+    #[test]
+    fn the_monitor_goes_through_the_master() {
+        let mut buf = [0.0f32; 8];
+        super::mix_monitor(&mut buf, [1.0f32; 8].into_iter(), 0.1, 0.1);
+        assert!(buf.iter().all(|v| (v - 0.1).abs() < 1e-6), "{buf:?}");
+        let mut buf = [0.0f32; 8];
+        super::mix_monitor(&mut buf, [1.0f32; 8].into_iter(), 1.0, 0.0);
+        assert!(buf[0] < 1.0 && buf[0] > buf[2] && buf[6] == 0.0, "{buf:?}");
+        assert_eq!(buf[0], buf[1], "both sides alike");
+    }
 }
 
 impl Stats {
@@ -76,6 +107,8 @@ pub enum Command {
     Seek(i64),
     /// Loop the timeline at its end (else stop there).
     Looping(bool),
+    /// Loop the timeline between ticks `start` and `end`.
+    LoopRange(i64, i64),
     /// Click on the beats (or not).
     Metronome(bool),
     /// Record live notes (REC) or stop.
@@ -127,11 +160,12 @@ pub struct Sender {
 pub const FLASH: Duration = Duration::from_millis(90);
 
 /// Live notes sent, so the UI can light the sounds they play: the pitches held per
-/// (group, sound), and when a note last started.
+/// (group, sound), when a note last started, and when each pitch last did.
 #[derive(Default)]
 struct Played {
     held: std::collections::HashMap<(usize, usize), Vec<i64>>,
     last: std::collections::HashMap<(usize, usize), Instant>,
+    started: std::collections::HashMap<(usize, usize, i64), Instant>,
 }
 
 impl Sender {
@@ -169,6 +203,7 @@ impl Sender {
         match *event {
             Live::NoteOn { group, sound, pitch, length, .. } => {
                 p.last.insert((group, sound), Instant::now());
+                p.started.insert((group, sound, pitch), Instant::now());
                 if length == i64::MAX {
                     p.held.entry((group, sound)).or_default().push(pitch);
                 }
@@ -176,6 +211,7 @@ impl Sender {
             Live::NoteIn { group, sound, pitch, velocity, .. } => {
                 p.last.insert((group, sound), Instant::now());
                 if velocity > 0 {
+                    p.started.insert((group, sound, pitch), Instant::now());
                     p.held.entry((group, sound)).or_default().push(pitch);
                 }
             }
@@ -192,7 +228,8 @@ impl Sender {
             | Live::RepeatPressure { .. }
             | Live::MidiInputOut { .. }
             | Live::ChokeAll
-            | Live::ChokeGroup { .. } => {}
+            | Live::ChokeGroup { .. }
+            | Live::ChokeSound { .. } => {}
         }
     }
 
@@ -202,6 +239,21 @@ impl Sender {
         let now = Instant::now();
         p.last.retain(|_, t| now.duration_since(*t) < FLASH);
         p.held.keys().chain(p.last.keys()).copied().collect()
+    }
+
+    /// The (group, sound, pitch)s of the live notes that started within [`FLASH`]: a
+    /// held note is here only as it starts, so its pad flashes once.
+    pub fn played_notes(&self) -> std::collections::HashSet<(usize, usize, i64)> {
+        let Ok(mut p) = self.played.lock() else { return Default::default() };
+        let now = Instant::now();
+        p.started.retain(|_, t| now.duration_since(*t) < FLASH);
+        p.started.keys().copied().collect()
+    }
+
+    /// Live note pitches currently held per `(group, sound)`.
+    pub fn held_pitches(&self) -> std::collections::HashMap<(usize, usize), Vec<i64>> {
+        let Ok(p) = self.played.lock() else { return Default::default() };
+        p.held.clone()
     }
 
     /// Whether an engine was sent to play.
@@ -303,10 +355,11 @@ pub struct Output {
     channels: usize,
     /// Effects' meters for their panels (the Compressor's).
     fx_meters: Arc<crate::meters::FxMeters>,
+    eq_spectrum: Arc<crate::eq_spectrum::EqSpectrum>,
     /// The routes' travels, for their knobs.
     route_travels: Arc<crate::meters::RouteTravels>,
     /// The MIDI input plug-ins by group, since the plug-ins are on the audio thread.
-    midi_inputs: Mutex<std::collections::BTreeMap<usize, crate::midi_input::Info>>,
+    midi_inputs: Mutex<std::collections::BTreeMap<usize, Arc<crate::midi_input::Info>>>,
     /// Plug-ins put in with no engine playing, for the next one played.
     midi_inputs_waiting: Mutex<std::collections::BTreeMap<usize, Box<dyn crate::midi_input::MidiInput>>>,
     _stream: Playing,
@@ -385,6 +438,12 @@ pub(crate) fn apply(
         Command::Looping(on) => {
             if let Some(e) = engine.as_mut() {
                 e.looping = on;
+            }
+            None
+        }
+        Command::LoopRange(start, end) => {
+            if let Some(e) = engine.as_mut() {
+                e.set_loop_range(start, end);
             }
             None
         }
@@ -599,8 +658,11 @@ impl Output {
             let mut ext = vec![vec![0f32; 16_384]; crate::OUTPUTS];
             let mut stereo = vec![0f32; 16_384];
             let mut engine: Option<Box<Engine>> = None;
+            let mut standalone_prehear = crate::prehear::Prehear::default();
             let mut clock: Option<Box<dyn crate::sync::Clock>> = None;
             let mut applied = 0u64;
+            // The master's level the monitor was last heard at.
+            let mut monitor_gain = 1.0f32;
             #[cfg(windows)]
             let mut promoted = false;
             move |out: &mut [f32], ahead: Duration| {
@@ -621,19 +683,28 @@ impl Output {
                 // What other threads asked for since the last block.
                 let period = Duration::from_secs_f64(frames as f64 / rate as f64);
                 let exact = exact.load(Ordering::Relaxed);
+                let mut asked = 0u64;
                 while let Some(cmd) = commands.pop() {
                     applied += 1;
+                    asked += 1;
                     let cmd = match cmd {
                         Command::Clock(c) => Command::Clock(std::mem::replace(&mut clock, c)),
                         cmd => cmd,
                     };
-                    if let Some(back) = apply(&mut engine, cmd, started, period, rate as f64, frames, exact)
+                    let result = match cmd {
+                        Command::Prehear(sample, gain) if engine.is_none() => {
+                            Some(Command::Prehear(standalone_prehear.set(sample, gain), 0.0))
+                        }
+                        cmd => apply(&mut engine, cmd, started, period, rate as f64, frames, exact),
+                    };
+                    if let Some(back) = result
                         && let Err(back) = garbage.push(back)
                     {
                         // Nobody is collecting: free it here rather than leak.
                         drop(back);
                     }
                 }
+                let apply_us = started.elapsed().as_micros() as u64;
                 let ext_len = (frames * 2).min(16_384);
                 for b in &mut ext {
                     b[..ext_len].fill(0.0);
@@ -655,12 +726,16 @@ impl Output {
                     }
                 }
                 scrolling.push(buf, frames, rate);
+                standalone_prehear.mix(buf, rate as f64);
                 // Never waits: if the UI is reading, the next block publishes
                 // (peaks keep adding up meanwhile).
                 if let Ok(mut t) = telemetry.try_lock() {
                     match engine.as_mut() {
                         Some(e) => e.publish(&mut t),
-                        None => t.finished = true,
+                        None => {
+                            t.finished = true;
+                            t.loop_playing.fill(0);
+                        }
                     }
                     t.has_engine = engine.is_some();
                     t.actions = applied;
@@ -668,10 +743,11 @@ impl Output {
                 if let Ok(mut m) = monitor.try_lock()
                     && !m.is_empty()
                 {
+                    // Heard through the master's level, as everything else is.
+                    let to = engine.as_ref().map_or(1.0, |e| e.master_gain());
                     let n = m.len().min(buf.len());
-                    for (o, v) in buf.iter_mut().zip(m.drain(..n)) {
-                        *o = (*o + v).clamp(-4.0, 4.0);
-                    }
+                    mix_monitor(&mut buf[..n], m.drain(..n), monitor_gain, to);
+                    monitor_gain = to;
                     // Don't let it fall behind (more than ~0.1 s).
                     if m.len() > 9_600 {
                         let extra = m.len() - 9_600;
@@ -702,6 +778,10 @@ impl Output {
                 stats.audio_us.fetch_add(audio, Ordering::Relaxed);
                 if busy > audio {
                     stats.late.fetch_add(1, Ordering::Relaxed);
+                    stats.late_busy_us.store(busy, Ordering::Relaxed);
+                    stats.late_audio_us.store(audio, Ordering::Relaxed);
+                    stats.late_apply_us.store(apply_us, Ordering::Relaxed);
+                    stats.late_commands.store(asked, Ordering::Relaxed);
                 }
                 if let Some(load) = (busy * 1000).checked_div(audio) {
                     stats.peak_load.fetch_max(load, Ordering::Relaxed);
@@ -745,7 +825,20 @@ impl Output {
                                     invalidated.store(true, Ordering::Relaxed);
                                 }
                             }
-                            eprintln!("audio error: {e} (after {} blocks)", err_stats.callbacks.load(Ordering::Relaxed));
+                            // (With how the engine has done: none late means the device or the
+                            // system was behind, not the engine.)
+                            let l = |a: &AtomicU64| a.load(Ordering::Relaxed);
+                            let ms = |a: &AtomicU64| l(a) as f64 / 1000.0;
+                            eprintln!(
+                                "audio error: {e} (after {} blocks; {} computed late, peak load {:.0} %; the last late one took {:.2} ms of {:.2}, {:.2} ms of it on {} edits or notes)",
+                                l(&err_stats.callbacks),
+                                l(&err_stats.late),
+                                l(&err_stats.peak_load) as f64 / 10.0,
+                                ms(&err_stats.late_busy_us),
+                                ms(&err_stats.late_audio_us),
+                                ms(&err_stats.late_apply_us),
+                                l(&err_stats.late_commands)
+                            );
                         },
                     )
                 };
@@ -801,6 +894,7 @@ impl Output {
             focus: std::sync::atomic::AtomicUsize::new(usize::MAX),
             plays: AtomicU64::new(0),
             fx_meters: Arc::default(),
+            eq_spectrum: Arc::default(),
             route_travels: Arc::default(),
             midi_inputs: Mutex::default(),
             midi_inputs_waiting: Mutex::default(),
@@ -865,6 +959,7 @@ impl Output {
         engine.set_clock_out(self.clock_out.lock().unwrap().clone());
         engine.pool = self.pool.clone();
         engine.set_fx_meters(&self.fx_meters);
+        engine.set_fx_spectrum(&self.eq_spectrum);
         engine.set_route_travels(&self.route_travels);
         for (group, plugin) in std::mem::take(&mut *self.midi_inputs_waiting.lock().unwrap()) {
             engine.set_midi_input(group, Some(plugin));
@@ -889,6 +984,11 @@ impl Output {
     /// call: (input level, gain reduction in dB, output level).
     pub fn fx_meters(&self, g: usize, s: usize, slot: usize) -> (f32, f32, f32) {
         self.fx_meters.take(g, s, slot)
+    }
+
+    /// The monitor for the focused internal EQ.
+    pub fn eq_spectrum(&self) -> &Arc<crate::eq_spectrum::EqSpectrum> {
+        &self.eq_spectrum
     }
 
     /// Where route `k` of sound (`g`, `s`) has its knob now (0..1), as the playing
@@ -925,6 +1025,7 @@ impl Output {
     pub fn adopt(&self, fresh: Engine, project: &deckard_model::Project) {
         let mut fresh = fresh;
         fresh.set_fx_meters(&self.fx_meters);
+        fresh.set_fx_spectrum(&self.eq_spectrum);
         fresh.set_route_travels(&self.route_travels);
         let (mode, queued) = self.telemetry(|t| (t.mode, t.queued));
         // `fresh` already holds the timeline for `fresh.mode` when timelines changed.
@@ -955,6 +1056,11 @@ impl Output {
         self.sender.send(Command::Looping(on));
     }
 
+    /// Set the loop range in ticks without rebuilding the playing engine.
+    pub fn set_loop_range(&self, start: i64, end: i64) {
+        self.sender.send(Command::LoopRange(start, end));
+    }
+
     /// Note Repeat / the Arp on (with its settings) or off.
     pub fn set_repeat(&self, r: Option<(deckard_model::Arp, crate::repeat::RepeatMode)>) {
         self.sender.send(Command::Repeat(r));
@@ -966,7 +1072,7 @@ impl Output {
         if group < crate::midi_input::SLOTS {
             let mut table = self.midi_inputs.lock().unwrap();
             match plugin.as_deref() {
-                Some(p) => table.insert(group, crate::midi_input::Info::of(p)),
+                Some(p) => table.insert(group, Arc::new(crate::midi_input::Info::of(p))),
                 None => table.remove(&group),
             };
         }
@@ -1000,7 +1106,7 @@ impl Output {
         swap(&mut self.midi_inputs_waiting.lock().unwrap(), a, b);
     }
 
-    pub fn midi_input(&self, group: usize) -> Option<crate::midi_input::Info> {
+    pub fn midi_input(&self, group: usize) -> Option<Arc<crate::midi_input::Info>> {
         self.midi_inputs.lock().unwrap().get(&group).cloned()
     }
 
@@ -1009,7 +1115,8 @@ impl Output {
     pub fn set_midi_input_param(&self, group: usize, id: u32, value: f64) -> Option<f64> {
         let value = {
             let mut table = self.midi_inputs.lock().unwrap();
-            let param = table.get_mut(&group)?.params.iter_mut().find(|p| p.desc.id == id)?;
+            let info = Arc::make_mut(table.get_mut(&group)?);
+            let param = info.params.iter_mut().find(|p| p.desc.id == id)?;
             param.value = param.desc.fit(value);
             param.value
         };
@@ -1080,6 +1187,16 @@ impl Output {
     /// See [`Sender::played_sounds`].
     pub fn played_sounds(&self) -> std::collections::HashSet<(usize, usize)> {
         self.sender.played_sounds()
+    }
+
+    /// See [`Sender::played_notes`].
+    pub fn played_notes(&self) -> std::collections::HashSet<(usize, usize, i64)> {
+        self.sender.played_notes()
+    }
+
+    /// See [`Sender::held_pitches`].
+    pub fn held_pitches(&self) -> std::collections::HashMap<(usize, usize), Vec<i64>> {
+        self.sender.held_pitches()
     }
 
     /// Copy audio from inside the engine to `tap` (or stop, with `None`).
@@ -1201,6 +1318,12 @@ impl Output {
         self.telemetry(|t| std::mem::take(&mut t.cue_peak))
     }
 
+    /// Per-group bitmask (`1 << sound`, up to 64 sounds) of unmuted sounds actively
+    /// playing a loop (`SamplerRt::loop_playing`).
+    pub fn loop_playing(&self) -> Vec<u64> {
+        self.telemetry(|t| t.loop_playing.clone())
+    }
+
     /// Where zone `zone` of a sound plays, as last published; it is watched from now
     /// on (the last few zones asked about are).
     pub fn zone_position(&self, group: usize, sound: usize, zone: usize) -> Option<usize> {
@@ -1215,6 +1338,20 @@ impl Output {
                 t.watch.push(key);
                 // Sized here, so the audio thread doesn't allocate.
                 t.zones.resize(t.watch.len(), None);
+                None
+            }
+        })
+    }
+
+    /// Where the morph of a sound's layers is, as last published; it is watched from
+    /// now on.
+    pub fn morph_position(&self, group: usize, sound: usize) -> Option<f32> {
+        self.telemetry(|t| {
+            if t.morph_watch == Some((group, sound)) {
+                t.morph
+            } else {
+                t.morph_watch = Some((group, sound));
+                t.morph = None;
                 None
             }
         })

@@ -350,24 +350,36 @@ pub fn find_loop(s: &Sample, (a, b): (usize, usize)) -> Option<(usize, usize)> {
     (score > 0.9).then_some((start, end))
 }
 
+/// A file's name without its extension and without an edited copy's " - N": a sample
+/// and its edited copies ([`edited_path`]) share it.
+pub fn edited_base(file_name: &str) -> String {
+    let stem = Path::new(file_name).file_stem().map_or_else(|| file_name.to_string(), |s| s.to_string_lossy().into_owned());
+    match stem.rsplit_once(" - ") {
+        Some((b, n)) if n.chars().all(|c| c.is_ascii_digit()) && !n.is_empty() => b.to_string(),
+        _ => stem,
+    }
+}
+
 /// Where an edited copy of `original` goes: `<dir>/<name> - N.wav` with the first free
 /// N (an existing " - N" suffix is replaced), as Maschine names them.
 pub fn edited_path(dir: &Path, original: &Path) -> PathBuf {
-    let stem = original.file_stem().map_or("Sample".to_string(), |s| s.to_string_lossy().into_owned());
-    let base = match stem.rsplit_once(" - ") {
-        Some((b, n)) if n.chars().all(|c| c.is_ascii_digit()) && !n.is_empty() => b.to_string(),
-        _ => stem,
-    };
-    let ext =
-        original.extension().and_then(|e| e.to_str()).filter(|e| ["wav", "aif", "aiff", "aifc"].contains(&e.to_ascii_lowercase().as_str()));
-    // We always write WAV.
-    let _ = ext;
+    let base = original.file_name().map_or("Sample".to_string(), |s| edited_base(&s.to_string_lossy()));
+    // We always write WAV, whatever the original was.
     (2..).map(|n| dir.join(format!("{base} - {n}.wav"))).find(|p| !p.exists()).unwrap()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edited_base_drops_the_number() {
+        for (name, base) in
+            [("take - 2.wav", "take"), ("take.wav", "take"), ("take - 13.aif", "take"), ("a - b.wav", "a - b"), ("x - .wav", "x - ")]
+        {
+            assert_eq!(edited_base(name), base, "{name}");
+        }
+    }
 
     #[test]
     fn trims_silence_and_finds_a_loop() {

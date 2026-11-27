@@ -306,7 +306,7 @@ fn curves(
     let tip = if app.draw_mode() {
         "Drag across notes to draw"
     } else {
-        "Click: add a point. Drag a point or a segment; ⌥-drag a segment to bend it; double-click a point to remove it"
+        "Click: add a point. Drag a point or a segment; Alt-drag a segment to bend it; double-click a point to remove it"
     };
     let resp = ui.interact(a.lane, ui.id().with(("expr-lane", d.name())), Sense::click_and_drag()).on_hover_text(tip);
     let pointer = resp.interact_pointer_pos();

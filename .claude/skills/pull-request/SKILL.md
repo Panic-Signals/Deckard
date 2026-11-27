@@ -27,6 +27,10 @@ Tick exactly one box:
 | Documentation | Only docs: README, DEVELOPMENT.md, `docs/`, the manual, comments | `documentation` |
 | Other | Build, CI, tests, refactoring, dependencies: nothing a user would notice | `internal` |
 
+A pull request that only moves code between files (DEVELOPMENT.md, "Where code goes") is
+**Other**. Say "move-only" in the summary and give the number of tests before and after,
+so a maintainer can add the `move-only` label, which lifts the Patch coverage check's 70%.
+
 If a change both fixes a bug and adds a feature, pick the one a user would notice
 more, and mention the other in the summary. If the change mixes unrelated work,
 split it into separate pull requests.
@@ -241,6 +245,38 @@ it to be merged once the DECKARD pull request is merged. Open the manual pull re
 2. Once the DECKARD pull request exists, add its link to the manual pull request:
    `gh pr edit <n> --repo Panic-Signals/panic-signals-site --body-file <file>`.
 
+## Tests in their own files
+
+Before opening the pull request, make sure it adds no test inline in `main.rs` or a
+crate's `lib.rs`, and that it doesn't push a file over its size limit (DEVELOPMENT.md,
+"Where code goes"). Do this before pushing, so CI's Lint step doesn't fail on it:
+
+1. Run `mise run lint`. Its last step, `scripts/check-file-sizes.sh`, names each file
+   that is over its limit and each inline test in a file that must not have any.
+2. List the tests this branch adds to a `main.rs` or `lib.rs`, whether or not the check
+   covers that file yet:
+
+   ```sh
+   git diff origin/main...HEAD -- '*/main.rs' '*/lib.rs' | grep -nE '^\+\s*#\[([a-z_]+::)*test\]'
+   ```
+
+   No output means there is nothing to move.
+
+3. Move each one into the test file for its topic: an existing `src/<topic>_tests.rs`
+   beside the code if one fits (`apps/viewer/src/chop_tests.rs`, for one), otherwise a
+   new `src/<topic>_tests.rs` declared with `#[cfg(test)] mod <topic>_tests;`. Not the
+   crate's top-level `tests/` folder: that is for Cargo's integration tests, which can't
+   see private items. The test's body
+   doesn't change; give the file the `use` lines it needs (the neighbouring test files
+   show which).
+4. If a file is over its limit because of this branch's own additions, move the code
+   the branch added into the feature's file as its own `impl` block. Don't raise the
+   limit, and don't move code the branch didn't add.
+5. Run `mise run lint` and the moved tests again, and commit.
+
+Only move tests and code that this branch added. Emptying the large files of what is
+already there is done separately, one topic at a time.
+
 ## Before opening it
 
 - [ ] `cargo build` and `cargo test --workspace` pass.
@@ -249,6 +285,8 @@ it to be merged once the DECKARD pull request is merged. Open the manual pull re
       to check locally). Lines covered only by tests that need a Maschine install don't
       count on CI, so give new code a test that runs without one.
 - [ ] `cargo fmt` has been run.
+- [ ] `mise run lint` passes, including the file size check, and the branch adds no
+      test inline in `main.rs` or a `lib.rs` ("Tests in their own files", above).
 - [ ] Every section of the template is filled in, or says "None".
 - [ ] If the change needs the manual (section 5), the manual pull request is open and
       linked under **Manual**, or the user chose "Later" and it says what's to do.

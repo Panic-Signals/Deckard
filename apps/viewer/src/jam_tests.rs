@@ -32,6 +32,191 @@ fn press(app: &mut crate::App, name: &'static str) {
     run(app, vec![Event::Button(name, false)]);
 }
 
+/// The viewer renders the surface script's published OSO page: a Jam event that
+/// changes the focused page changes the rendered rows. No NI install in the loop.
+#[test]
+fn the_strip_renders_the_published_page() {
+    let mut app = app();
+    // The pad-layout settings the script reads, as the Settings page shows them.
+    for (key, value) in
+        [("jam_keyboard_layout", "Isomorph"), ("jam_iso_layout", "Sequential"), ("jam_iso_type", "In Key"), ("jam_iso_dir", "Vertical")]
+    {
+        app.surface_settings.values.insert(key.into(), value.into());
+    }
+    assert!(app.jam_strip().is_none(), "no page yet: the strip is empty");
+    // Keyboard view: SHIFT + PAD MODE, as on the hardware.
+    run(&mut app, vec![Event::Button("SHIFT", true)]);
+    press(&mut app, "PAD_MODE");
+    run(&mut app, vec![Event::Button("SHIFT", false)]);
+    // The keyboard view opens its scales: the Scale OSO, on the view switch (2026-11-21 — it used
+    // to take an encoder touch).
+    let (switched, _, _) = app.jam_strip().expect("the keyboard view publishes the Scale OSO");
+    assert_eq!(switched, "Scale 1/2");
+    // The encoder's touch finds it already open and changes nothing.
+    run(&mut app, vec![Event::Button("ENCODER_TOUCH", true)]);
+    let (title, slots, rows) = app.jam_strip().expect("the Scale OSO publishes");
+    assert_eq!(title, "Scale 1/2", "the counter comes from the published page");
+    assert_eq!(slots, 8, "the first page holds eight of the nine");
+    assert_eq!(rows.len(), 7, "chords off in a fresh project: the chord-type slot is a hole");
+    let groups: Vec<Option<&str>> = rows.iter().map(|r| r.header.as_deref()).collect();
+    assert_eq!(
+        groups,
+        [Some("SCALE"), Some("SCALE"), Some("SCALE"), Some("CHORD"), Some("PAD LAYOUT"), Some("PAD LAYOUT"), Some("PAD LAYOUT")]
+    );
+    assert_eq!(rows.iter().map(|r| r.slot).collect::<Vec<_>>(), [0, 1, 2, 3, 5, 6, 7], "holes keep their columns");
+    assert_eq!((rows[0].value.as_str(), rows[0].sub.as_deref()), ("C3", Some("Root Note")));
+    assert_eq!(rows.iter().filter(|r| r.focused).count(), 1, "exactly one focus");
+    assert!(rows[0].focused, "the focus starts at the first slot");
+    assert!(rows.iter().all(|r| !r.editing), "not editing on show");
+    // The ninth slot is the second page, and the cursor crossing there shows it.
+    run(&mut app, vec![Event::Encoder(8)]);
+    let (title, slots, rows) = app.jam_strip().expect("Scale 2/2 publishes");
+    assert_eq!(title, "Scale 2/2", "the counter follows the cursor onto the page");
+    assert_eq!(slots, 1);
+    assert_eq!(rows.len(), 1, "page 2 holds the layout's direction");
+    assert_eq!((rows[0].value.as_str(), rows[0].sub.as_deref()), ("Vertical", Some("Direction")));
+    assert!(rows[0].focused);
+    assert!(!rows[0].editing);
+}
+
+/// The strip is a window of its own: its size is the page's plus its bar, and it exists
+/// exactly while a page is published. That last clause is the docked strip's lifetime rule,
+/// unchanged — a window is one more way the published page is drawn, not a mode of the app.
+#[test]
+fn the_strip_is_a_window_of_its_own() {
+    let app = scale_view();
+    let (page, rows) = app.jam_shown().expect("the Scale OSO publishes");
+    let width = crate::jam_strip::width_for(1500.0);
+    let window = crate::jam_window::window_size(width);
+    assert_eq!((window.x, window.y), (width, crate::jam_strip::BODY_H + crate::jam_window::BAR_H), "the bar plus its rows");
+    assert_eq!(rows.len(), 7);
+    assert_eq!(crate::jam_strip::name(&page), "Scale", "the bar names the page");
+    assert_eq!(crate::jam_strip::counter(&page).as_deref(), Some("1/2"), "the isomorphic layout is the second page");
+    // Nothing published, no window.
+    let mut fresh = crate::App::default();
+    fresh.new_project();
+    assert!(fresh.jam_shown().is_none(), "no page, no window");
+}
+
+/// The Scale OSO showing (the keyboard view, then the encoder touched), with the pad-layout
+/// settings the script reads.
+fn scale_view() -> crate::App {
+    let mut app = app();
+    for (key, value) in
+        [("jam_keyboard_layout", "Isomorph"), ("jam_iso_layout", "Sequential"), ("jam_iso_type", "In Key"), ("jam_iso_dir", "Vertical")]
+    {
+        app.surface_settings.values.insert(key.into(), value.into());
+    }
+    run(&mut app, vec![Event::Button("SHIFT", true)]);
+    press(&mut app, "PAD_MODE");
+    run(&mut app, vec![Event::Button("SHIFT", false)]);
+    run(&mut app, vec![Event::Button("ENCODER_TOUCH", true)]);
+    app
+}
+
+/// The desktop browser wins over the strip: it hides while open, and the page
+/// comes back when it closes.
+#[test]
+fn the_desktop_browser_hides_the_strip() {
+    let mut app = scale_view();
+    assert!(app.jam_strip().is_some(), "the Scale OSO publishes a page");
+    app.browser.open = true;
+    assert!(app.jam_strip().is_none(), "the desktop browser wins over the strip");
+    app.browser.open = false;
+    let (title, _, rows) = app.jam_strip().expect("the page comes back when it closes");
+    assert_eq!(title, "Scale 1/2");
+    assert!(rows.iter().any(|r| r.focused), "the focus survived the hiding");
+}
+
+/// The ENCODER press is the script's: the bracket that appears is its editing mark,
+/// drawn from what it published, and pressing again leaves the bracket behind.
+#[test]
+fn the_press_is_the_scripts_on_the_scale_page() {
+    let mut app = scale_view();
+    let (title, _, rows) = app.jam_strip().expect("the Scale OSO publishes");
+    assert_eq!(title, "Scale 1/2", "the page carries its counter");
+    assert!(rows.iter().any(|r| r.focused), "the page marks the script's cursor");
+    press(&mut app, "ENCODER");
+    let rows = app.jam_strip().expect("still showing").2;
+    assert_eq!(rows.iter().filter(|r| r.editing).count(), 1, "the press is the script's: it edits where it runs");
+    assert!(rows.iter().find(|r| r.focused).expect("a focus").editing, "the bracket is the cursor's slot");
+    press(&mut app, "ENCODER");
+    let rows = app.jam_strip().expect("still showing").2;
+    assert!(rows.iter().all(|r| !r.editing), "pressing again leaves the bracket");
+}
+
+/// Finding 1 through the viewer: the script's cursor moves, the rendered underline
+/// follows it. Before the fix the underline sat on slot 0 while the encoder moved
+/// the script's cursor.
+#[test]
+fn menu_cursor_moves_the_rendered_underline() {
+    let mut app = scale_view();
+    run(&mut app, vec![Event::Button("ENCODER_TOUCH", true)]);
+    let rows = app.jam_strip().expect("the SCALE menu publishes").2;
+    assert!(rows[0].focused, "browsing starts on the first slot");
+    // The encoder steps the script's cursor (menu pages never route to the tab
+    // edit path): the underline follows it.
+    run(&mut app, vec![Event::Encoder(1)]);
+    let rows = app.jam_strip().expect("still showing").2;
+    assert!(rows[1].focused, "the underline follows menu.at, not slot 0");
+    assert!(rows.iter().all(|r| !r.editing), "browsing marks no slot");
+}
+
+/// Finding 2, menu direction: while the script edits, the bracket sits on the
+/// cursor's slot and the encoder turn edits that slot's value.
+#[test]
+fn menu_edit_brackets_and_turns_the_focused_slot() {
+    let mut app = scale_view();
+    run(&mut app, vec![Event::Button("ENCODER_TOUCH", true)]);
+    press(&mut app, "ENCODER");
+    let rows = app.jam_strip().expect("the SCALE menu publishes").2;
+    assert!(rows[0].focused && rows[0].editing, "the bracket is the script's editing slot");
+    assert_eq!(rows[0].value, "C3");
+    run(&mut app, vec![Event::Encoder(1)]);
+    // (No extra frame: the host republishes after applying what the turn asked for, so the
+    // page already says what the host holds. Waiting a frame here would hide a regression.)
+    let rows = app.jam_strip().expect("still showing").2;
+    assert_eq!(rows[0].value, "C#3", "the turn edits the bracketed slot through the menu's path");
+    assert!(rows[0].editing, "still editing after the turn");
+}
+
+/// Finding 7: the isomorphic gate reads the display string. `main.lua`'s
+/// `oso_is_isomorphic` compares the `jam_keyboard_layout` value against a literal, and
+/// `settings_view` mints that literal in `surface_settings.rs`. Relabelling one side
+/// without the other silently collapses KEYBOARD page 2 — and the suites stay green
+/// because every other test hardcodes the same word. This test derives both sides
+/// instead of naming the word, then drives the gate with the derived label.
+#[test]
+fn the_isomorphic_label_matches_the_scripts_gate() {
+    // The settings side: what the app publishes for the isomorphic layout index.
+    let mut probe = app();
+    probe.settings.jam_keyboard_layout = 1;
+    let label = probe.settings_view().values.get("jam_keyboard_layout").cloned().unwrap_or_default();
+    assert!(!label.is_empty(), "the settings publish a label for the isomorphic layout");
+    // The script side: the literal `oso_is_isomorphic` compares against.
+    let main = deckard_surface::SHIPPED
+        .iter()
+        .find(|(p, _)| p.ends_with("devices/maschine_jam/main.lua"))
+        .map(|(_, t)| *t)
+        .expect("the shipped maschine_jam script");
+    let gate = main.lines().find(|l| l.contains("oso_layout_value(s, \"mode\") ==")).expect("the isomorphic gate in main.lua");
+    let literal = gate.rsplit('"').nth(1).expect("a quoted literal in the gate");
+    assert_eq!(label, literal, "relabel one side without the other and KEYBOARD 2/2 silently collapses");
+    // The semantic link, driven with the derived label: two pages iff isomorphic.
+    let mut rig = app();
+    for (key, value) in
+        [("jam_keyboard_layout", label.as_str()), ("jam_iso_layout", "Sequential"), ("jam_iso_type", "In Key"), ("jam_iso_dir", "Vertical")]
+    {
+        rig.surface_settings.values.insert(key.into(), value.into());
+    }
+    run(&mut rig, vec![Event::Button("SHIFT", true)]);
+    press(&mut rig, "PAD_MODE");
+    run(&mut rig, vec![Event::Button("SHIFT", false)]);
+    run(&mut rig, vec![Event::Button("ENCODER_TOUCH", true)]);
+    run(&mut rig, vec![Event::Encoder(8)]);
+    let (title, _, _) = rig.jam_strip().expect("the derived label opens the Scale's second page");
+    assert_eq!(title, "Scale 2/2", "the gate answers the settings label, not a hardcoded word");
+}
 /// Pad at column and row, from 1.
 fn pad(app: &mut crate::App, col: u8, row: u8) {
     run(app, vec![Event::Pad { column: col - 1, row: row - 1, down: true }]);
@@ -244,6 +429,27 @@ fn the_perform_effect_is_chosen_and_added_if_there_is_none() {
     assert_eq!(app.surface_view().groups[0].perform_mode, Some((7, "Scratcher".to_string())));
 }
 
+/// A turn the script handles lands on the host *after* the script published its page, so
+/// the page it drew was one frame behind: PERFORM FX showed the mode from before the
+/// turn. The host ticks the script again over what it now holds, so the frame's page and
+/// the host's state agree.
+#[test]
+fn a_turn_republishes_the_page_it_changed() {
+    let mut app = app();
+    app.surface_act(A::PerformMode { group: 0, mode: 2 });
+    press(&mut app, "SONG");
+    run(&mut app, vec![Event::Button("SHIFT", true), Event::Button("PERFORM", true)]);
+    run(&mut app, vec![Event::Button("PERFORM", false), Event::Button("SHIFT", false)]);
+    let shown = |app: &crate::App| {
+        app.jam_device.as_ref().and_then(|d| d.oso()).and_then(|p| p.slots.iter().flatten().next().map(|s| s.value.clone()))
+    };
+    assert_eq!(shown(&app).as_deref(), Some("Burst Echo"), "the page opens on the FX's mode");
+    run(&mut app, vec![Event::Encoder(1)]);
+    let host = app.surface_view().groups[0].perform_mode.clone().expect("an FX with a mode");
+    assert_eq!(host.0, 3, "the turn moved the mode");
+    assert_eq!(shown(&app).as_deref(), Some(host.1.as_str()), "and the page it drew already says so");
+}
+
 /// A Perform FX's knobs have defaults; a double tap on a Control strip goes back to them.
 #[test]
 fn a_knob_goes_back_to_its_default() {
@@ -343,4 +549,26 @@ fn every_control_runs() {
     }
     assert_eq!(app.jam_error, None);
     let _ = project(&app);
+}
+
+/// SHIFT + GROUP_E's Variation page turns its Mode through Humanize, Random and Euclid,
+/// and the page must follow the mode the turn wrote (work-item 35). It reads the mode
+/// back out of `deckard.state()`, whose table the perf work patches in place between
+/// frames: a field left out of that patch is a page that never leaves its first mode.
+#[test]
+fn the_variation_page_follows_its_mode() {
+    let mode = |app: &crate::App| app.doc.as_ref().map(|d| d.borrow().variation(app.group, app.sound).mode);
+    let page = |app: &crate::App| app.jam_strip().map(|(t, n, _)| (t, n));
+    let mut app = app();
+    run(&mut app, vec![Event::Button("SHIFT", true)]);
+    press(&mut app, "GROUP_E");
+    run(&mut app, vec![Event::Button("SHIFT", false)]);
+    assert_eq!(page(&app), Some(("Variation".to_string(), 5)), "Humanize's five settings");
+    press(&mut app, "ENCODER");
+    run(&mut app, vec![Event::Encoder(1)]);
+    assert_eq!(mode(&app), Some(1), "the turn reached the app");
+    assert_eq!(page(&app), Some(("Variation".to_string(), 8)), "and the page is Random's eight, not still Humanize's five");
+    run(&mut app, vec![Event::Encoder(1)]);
+    assert_eq!(mode(&app), Some(2), "and on to Euclid, which Humanize's page used to hide behind a frozen mode");
+    assert_eq!(page(&app), Some(("Euclid".to_string(), 6)), "whose page is its own six");
 }

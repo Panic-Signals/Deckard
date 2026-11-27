@@ -27,6 +27,7 @@ pub const SHIPPED: &[(&str, &str)] = &[
     ("pages/scene.lua", include_str!("../lua/pages/scene.lua")),
     ("pages/grid.lua", include_str!("../lua/pages/grid.lua")),
     ("pages/file.lua", include_str!("../lua/pages/file.lua")),
+    ("pages/ask.lua", include_str!("../lua/pages/ask.lua")),
     ("pages/save.lua", include_str!("../lua/pages/save.lua")),
     ("pages/sampling.lua", include_str!("../lua/pages/sampling.lua")),
     ("pages/settings.lua", include_str!("../lua/pages/settings.lua")),
@@ -52,17 +53,26 @@ pub const SHIPPED: &[(&str, &str)] = &[
     ("lib/notes.lua", include_str!("../lua/lib/notes.lua")),
     ("lib/strip.lua", include_str!("../lua/lib/strip.lua")),
     ("lib/wheel.lua", include_str!("../lua/lib/wheel.lua")),
+    ("lib/touch.lua", include_str!("../lua/lib/touch.lua")),
     ("lib/widgets.lua", include_str!("../lua/lib/widgets.lua")),
     ("devices/launchpad_pro_mk3/device.lua", include_str!("../lua/devices/launchpad_pro_mk3/device.lua")),
     ("devices/launchpad_pro_mk3/main.lua", include_str!("../lua/devices/launchpad_pro_mk3/main.lua")),
     ("devices/launchpad_pro_mk3/lib/print.lua", include_str!("../lua/devices/launchpad_pro_mk3/lib/print.lua")),
     ("devices/maschine_jam/device.lua", include_str!("../lua/devices/maschine_jam/device.lua")),
     ("devices/maschine_jam/main.lua", include_str!("../lua/devices/maschine_jam/main.lua")),
+    ("themes/deep.lua", include_str!("../lua/themes/deep.lua")),
     ("themes/lcd.lua", include_str!("../lua/themes/lcd.lua")),
     ("themes/maschine.lua", include_str!("../lua/themes/maschine.lua")),
     ("themes/palenight.lua", include_str!("../lua/themes/palenight.lua")),
     ("themes/palenight_blue_green.lua", include_str!("../lua/themes/palenight_blue_green.lua")),
     ("themes/solarized_dark.lua", include_str!("../lua/themes/solarized_dark.lua")),
+    ("mappings/arturia/pigments.lua", include_str!("../lua/mappings/arturia/pigments.lua")),
+    ("mappings/native-instruments/massive-x.lua", include_str!("../lua/mappings/native-instruments/massive-x.lua")),
+    ("mappings/builtin/eq.lua", include_str!("../lua/mappings/builtin/eq.lua")),
+    ("mappings/tokyo-dawn-labs/tdr-nova.lua", include_str!("../lua/mappings/tokyo-dawn-labs/tdr-nova.lua")),
+    ("mappings/native-instruments/monark.lua", include_str!("../lua/mappings/native-instruments/monark.lua")),
+    ("mappings/plugin-alliance/bx-oberhausen.lua", include_str!("../lua/mappings/plugin-alliance/bx-oberhausen.lua")),
+    ("mappings/vital-audio/vital.lua", include_str!("../lua/mappings/vital-audio/vital.lua")),
 ];
 
 /// A user file as last seen: its path, when it was last written and its size.
@@ -107,7 +117,11 @@ impl Sources {
                 }
             }
         }
-        paths.iter().find_map(|p| SHIPPED.iter().find(|(s, _)| s == p)).map(|(p, text)| (format!("@{p}"), text.to_string()))
+        paths.iter().find_map(|p| SHIPPED.iter().find(|(s, _)| s == p).map(|(p, text)| (format!("@{p}"), text.to_string()))).or_else(|| {
+            // A stock palette has no file of its own; the editor's form is generated.
+            let id = paths.iter().find_map(|p| p.strip_prefix("themes/")?.strip_suffix(".lua"))?;
+            crate::theme_file::source(id).map(|text| (format!("@themes/{id}.lua"), text))
+        })
     }
 
     /// The names of the scripts in folder `dir` (`themes`): DECKARD's and the user's,
@@ -121,8 +135,40 @@ impl Sources {
         {
             out.extend(entries.flatten().filter_map(|e| e.file_name().to_str()?.strip_suffix(".lua").map(str::to_string)));
         }
+        if dir == "themes" {
+            out.extend(crate::theme_file::stock().iter().map(|t| t.id.to_string()));
+        }
         out.sort();
         out.dedup();
+        out
+    }
+
+    /// The plug-in mappings (`mappings/<vendor>/<plugin>.lua`, two folders deep at
+    /// most): their paths, and whether each is the user's (which replaces DECKARD's of
+    /// the same path).
+    pub fn mapping_files(&self) -> Vec<(String, bool)> {
+        let mut out: Vec<(String, bool)> =
+            SHIPPED.iter().filter(|(p, _)| p.starts_with("mappings/")).map(|(p, _)| (p.to_string(), false)).collect();
+        if let Some(user) = &self.user {
+            let root = user.join("mappings");
+            let mut dirs = vec![(root.clone(), 0)];
+            while let Some((dir, depth)) = dirs.pop() {
+                let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+                for e in entries.flatten() {
+                    let path = e.path();
+                    if path.is_dir() && depth < 2 {
+                        dirs.push((path, depth + 1));
+                    } else if path.extension().is_some_and(|x| x == "lua")
+                        && let Ok(rel) = path.strip_prefix(user)
+                    {
+                        let rel = rel.to_string_lossy().replace('\\', "/");
+                        out.retain(|(p, _)| *p != rel);
+                        out.push((rel, true));
+                    }
+                }
+            }
+        }
+        out.sort();
         out
     }
 

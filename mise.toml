@@ -6,11 +6,12 @@
 #   mise run install:demucs           # just the model (Demucs htdemucs, 84 MB)
 #   mise run build                    # debug build
 #   mise run test                     # the workspace's tests
+#   mise run release:run              # build optimized and run it
 #   mise run release:macos [version]  # dist/DECKARD-<version>-macos-universal.zip
 #   mise run release:linux [version]  # dist/deckard-<version>-linux-<arch>.tar.gz, .deb, .rpm
 #   mise run release:windows [version]# dist/DECKARD-<version>-windows-x64.zip, -setup.exe
 #   mise run check-platforms          # type-check Linux and Windows from a Mac
-#   mise run lint                     # rustfmt, the workflows and the scripts
+#   mise run lint                     # rustfmt, the workflows, the scripts and file sizes
 #
 # mise sets RUSTUP_TOOLCHAIN, so cargo and rustc in these tasks are this Rust, whatever
 # else is on PATH. CI installs the same versions (jdx/mise-action).
@@ -55,6 +56,10 @@ run = "cargo build --workspace"
 description = "Run the workspace's tests"
 run = "cargo test --workspace"
 
+[tasks."release:run"]
+description = "Run the current release on your OS"
+run = "cargo run -p deckard --release"
+
 [tasks."release:macos"]
 description = "Universal DECKARD.app for macOS, zipped into dist/ (optional arg: version)"
 run = "scripts/build-macos.sh"
@@ -74,10 +79,12 @@ tools = { zig = "0.17.0" }
 run = "scripts/check-platforms.sh"
 
 [tasks.lint]
-description = "rustfmt, the GitHub workflows and the shell scripts"
+description = "rustfmt, the GitHub workflows, the shell scripts and file sizes"
 tools = { actionlint = "latest", shellcheck = "latest" }
 run = [
     "cargo fmt --all --check",
     "actionlint .github/workflows/*.yml",
     "shellcheck scripts/*.sh",
+    "scripts/check-file-sizes.test.sh",
+    "scripts/check-file-sizes.sh",
 ]

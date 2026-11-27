@@ -625,7 +625,7 @@ impl Document {
         {
             ev.fields.push((AUDIO_OFFSET.into(), v));
         }
-        items.retain(|it| !self.event_obj(&it.event, &paths).is_some_and(|e| e.type_name == AUDIO_EVENT));
+        items.retain(|it| self.event_obj(&it.event, &paths).is_none_or(|e| e.type_name != AUDIO_EVENT));
         if before == items.len() && item.is_none() {
             return Ok(Vec::new());
         }
@@ -752,6 +752,7 @@ impl Document {
         if upgrade_notes(&mut self.tree) == 0 {
             return false;
         }
+        self.classes = None;
         for step in self.undo.iter_mut().chain(self.redo.iter_mut()) {
             for op in step.undo.iter_mut().chain(step.redo.iter_mut()) {
                 if let Op::Set { value, .. } | Op::Append { value, .. } | Op::SetField { value: Some(value), .. } = op {

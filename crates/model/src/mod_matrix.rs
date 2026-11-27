@@ -16,13 +16,15 @@ pub enum ModSource {
     Slide,
     /// The latest held note's pitch bend (semitones).
     Pitch,
+    /// The sound's mod wheel (MIDI CC 1 as it last came in; 0..1).
+    ModWheel,
     /// The project's LFO on this pad (1–16; 0..1).
     Lfo(u8),
 }
 
 impl ModSource {
-    /// The three that come from a sound's notes.
-    pub const ALL: [ModSource; 3] = [ModSource::Pressure, ModSource::Slide, ModSource::Pitch];
+    /// Those that come from playing a sound: its notes' three, and its mod wheel.
+    pub const ALL: [ModSource; 4] = [ModSource::Pressure, ModSource::Slide, ModSource::Pitch, ModSource::ModWheel];
 
     /// Its name as DECKARD shows it.
     pub fn name(self) -> String {
@@ -30,6 +32,7 @@ impl ModSource {
             ModSource::Pressure => "Pressure".into(),
             ModSource::Slide => "Slide".into(),
             ModSource::Pitch => "Pitch".into(),
+            ModSource::ModWheel => "Mod Wheel".into(),
             ModSource::Lfo(n) => format!("LFO {n}"),
         }
     }
@@ -37,6 +40,8 @@ impl ModSource {
     fn key(self) -> String {
         match self {
             ModSource::Lfo(n) => format!("lfo{n}"),
+            // (One word: the routes' text is split at spaces.)
+            ModSource::ModWheel => "modwheel".into(),
             _ => self.name().to_lowercase(),
         }
     }
@@ -119,7 +124,9 @@ impl ModRoute {
         }
         let curve = f64::from(self.curve.min(100)) / 100.0;
         match self.source {
-            ModSource::Pressure | ModSource::Slide | ModSource::Lfo(_) => pad_touch::shape(f64::from(x.unwrap_or(0.0)), curve) as f32,
+            ModSource::Pressure | ModSource::Slide | ModSource::ModWheel | ModSource::Lfo(_) => {
+                pad_touch::shape(f64::from(x.unwrap_or(0.0)), curve) as f32
+            }
             ModSource::Pitch => {
                 let t = f64::from(x.unwrap_or(0.0)) / f64::from(self.range.max(1));
                 let t = t.clamp(-1.0, 1.0);
@@ -417,9 +424,24 @@ mod tests {
     #[test]
     fn choices_list_existing_lfos() {
         let c = choices(&[Lfo::new(2), Lfo::new(7)]);
-        assert_eq!(c.len(), 5);
-        assert_eq!(c[3..], [ModSource::Lfo(2), ModSource::Lfo(7)]);
-        assert_eq!(c[..3], ModSource::ALL);
+        assert_eq!(c.len(), 6);
+        assert_eq!(c[4..], [ModSource::Lfo(2), ModSource::Lfo(7)]);
+        assert_eq!(c[..4], ModSource::ALL);
+    }
+
+    /// The mod wheel (MIDI CC 1) is a source: named, kept in the routes' text, and
+    /// travelling from Low at rest to High at the top, as Pressure does.
+    #[test]
+    fn the_mod_wheel_is_a_source() {
+        assert_eq!(ModSource::ModWheel.name(), "Mod Wheel");
+        assert!(ModSource::ALL.contains(&ModSource::ModWheel));
+        let r = ModRoute { low: 0.2, high: 0.8, ..ModRoute::new(ModSource::ModWheel, 0, "Sampler", ModParam::Field("morph".into())) };
+        let text = to_text(std::slice::from_ref(&r));
+        assert!(text.starts_with("modwheel 0 f:morph "), "{text}");
+        assert_eq!(from_text(&text), vec![r.clone()]);
+        assert!((r.travel(None) - 0.2).abs() < 1e-6, "never moved: Low");
+        assert!((r.travel(Some(1.0)) - 0.8).abs() < 1e-6);
+        assert!((r.travel(Some(0.5)) - 0.5).abs() < 1e-6);
     }
 
     #[test]

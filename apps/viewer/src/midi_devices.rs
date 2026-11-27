@@ -71,6 +71,14 @@ impl MidiDevices {
         self.repaint = Some(ctx.clone());
     }
 
+    /// Whether device `id`'s ports are all among `ins` and `outs`: it's plugged in,
+    /// open yet or not.
+    pub fn present(&self, id: &str, ins: &[String], outs: &[String]) -> bool {
+        self.manifests
+            .iter()
+            .any(|m| m.id == id && !m.ports.is_empty() && m.ports.iter().all(|(_, f)| find(ins, f).is_some() && find(outs, f).is_some()))
+    }
+
     /// Whether a device is open.
     pub fn active(&self) -> bool {
         !self.open.is_empty()
@@ -232,6 +240,20 @@ mod tests {
     use super::*;
     use midir::os::unix::{VirtualInput, VirtualOutput};
     use std::sync::{Arc, Mutex};
+
+    /// The splash's Launchpad line: it's there when its DAW port is, in and out, under
+    /// macOS's name or Windows's.
+    #[test]
+    fn a_device_is_present_when_its_ports_are() {
+        let d = MidiDevices::only(None, &["launchpad_pro_mk3"]);
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let mac = names(&["IAC Bus 1", "LPProMK3 MIDI", "LPProMK3 DAW"]);
+        assert!(d.present("launchpad_pro_mk3", &mac, &mac));
+        assert!(d.present("launchpad_pro_mk3", &names(&["MIDIIN3 (LPProMK3 MIDI)"]), &names(&["MIDIOUT3 (LPProMK3 MIDI)"])));
+        assert!(!d.present("launchpad_pro_mk3", &names(&["IAC Bus 1", "LPProMK3 MIDI"]), &mac), "no DAW input");
+        assert!(!d.present("launchpad_pro_mk3", &[], &[]));
+        assert!(!d.present("another", &mac, &mac));
+    }
 
     /// A user folder with device `test` on ports named `port`; its script answers a
     /// note with a `FocusScene` and a byte back, and says hello on opening. The guard

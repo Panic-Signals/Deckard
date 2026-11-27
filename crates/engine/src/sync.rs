@@ -89,11 +89,29 @@ impl Engine {
     }
 
     /// Play at `bpm` from here, the song's tempo as it is (a scene's own tempo).
+    /// The tempo goes from `was` to `now`: the notes sounding end where they're written
+    /// (their ends are kept in frames, which were the old tempo's).
+    pub(crate) fn retime_offs(&mut self, was: f64, now: f64) {
+        if was == now || !(was > 0.0 && now > 0.0 && was.is_finite() && now.is_finite()) {
+            return;
+        }
+        let time = self.time;
+        let moved = |at: u64| time + (at.saturating_sub(time) as f64 * was / now).round() as u64;
+        for o in &mut self.note_offs {
+            o.0 = moved(o.0);
+        }
+        // (A held MIDI note has no end yet.)
+        for n in self.midi_offs.iter_mut().filter(|n| n.at != u64::MAX) {
+            n.at = moved(n.at);
+        }
+    }
+
     pub(crate) fn play_at(&mut self, bpm: f64) {
         if bpm == self.tempo {
             return;
         }
         let ticks = self.position();
+        self.retime_offs(self.tempo, bpm);
         self.tempo = bpm;
         self.frame = (ticks * self.samples_per_tick()).round().max(0.0) as u64;
         for u in self.fx.iter_mut().flatten().flatten().flat_map(|c| c.units.iter_mut()) {
@@ -124,8 +142,11 @@ impl Engine {
         self.set_tempo(f.tempo);
         let spt = self.samples_per_tick();
         let q = self.quantum() * PPQ as f64;
-        let len = self.timeline.length as f64;
-        let wrap = |t: f64| if self.looping && len > 0.0 { t.rem_euclid(len) } else { t.max(0.0) };
+        let (loop_start, loop_end) = self.loop_range();
+        let len = (loop_end - loop_start) as f64;
+        let wrap = |t: f64| {
+            if self.looping && len > 0.0 { loop_start as f64 + (t - loop_start as f64).rem_euclid(len) } else { t.max(0.0) }
+        };
         let clock = f.beat * PPQ as f64;
         if std::mem::take(&mut self.sync.pending_start) {
             if f.absolute {

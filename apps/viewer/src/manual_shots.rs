@@ -62,11 +62,12 @@ fn window(h: &mut Harness<'static, App>, name: &str, crop: Option<(u32, u32, u32
     eprintln!("{}", path.display());
 }
 
-/// Both of the MK3's screens, after a few frames, in the Maschine theme.
+/// Both of the MK3's screens, after a few frames, in the Maschine theme (or
+/// `$DECKARD_SHOT_THEME`).
 fn mk3(h: &mut Harness<'static, App>, name: &str) {
     h.run_steps(4);
     let app = h.state_mut();
-    app.surface.set_theme("maschine");
+    app.surface.set_theme(&std::env::var("DECKARD_SHOT_THEME").unwrap_or("maschine".into()));
     let px = app.surface.picture(&app.surface_view());
     let path = dir().join(name);
     let f = std::fs::File::create(&path).unwrap();
@@ -284,6 +285,113 @@ fn manual_shots() {
     window(&mut h, "tuner.png", Some(CONTROL));
 }
 
+/// The New Sampler's EDIT page: a 4-bar 120 BPM loop, analysed, in Sync (roadmap 1d).
+#[test]
+#[ignore]
+fn new_sampler_shots() {
+    let dir = tempfile::tempdir().unwrap();
+    let rate = 44_100u32;
+    let beat = rate as usize / 2;
+    let frames: Vec<[f32; 2]> = (0..beat * 16)
+        .map(|i| {
+            let k = i % beat;
+            let hit = if k < 3000 { (1.0 - k as f32 / 3000.0) * ((k as f32 * 0.05).sin()) } else { 0.0 };
+            let tone = (i as f32 * 110.0 * std::f32::consts::TAU / rate as f32).sin() * 0.2;
+            [hit * 0.8 + tone, hit * 0.7 + tone]
+        })
+        .collect();
+    let file = dir.path().join("Bass Loop 120bpm A1.wav");
+    deckard_engine::edit::write_wav_channels(&file, &deckard_engine::sample::Sample { rate, frames }, 2).unwrap();
+    let mut doc = deckard_doc::Document::new_project().unwrap();
+    if doc.project().groups[0].sounds[0].slots.is_empty() {
+        doc.add_slot(0, 0, 0, &deckard_doc::NewModule::Sampler).unwrap();
+    }
+    let spec = deckard_doc::ZoneSpec { from: deckard_doc::ZoneFrom::Template, file: Some(file.clone()), set: Vec::new() };
+    doc.set_zones(0, 0, &[spec], "Load").unwrap();
+    doc.set_new_sampler(0, 0, Some(&Default::default())).unwrap();
+    let path = doc.project().groups[0].sounds[0].sampler.as_ref().unwrap().zones[0].sample.path.clone();
+    let meta = deckard_model::new_sampler::ZoneMeta {
+        file: path,
+        mode: deckard_model::new_sampler::PlayMode::Sync,
+        bpm: Some(120.0),
+        bpm_source: deckard_model::new_sampler::BpmSource::Name,
+        beats: Some(16.0),
+        root: Some(45),
+        cents: -12.0,
+        ..Default::default()
+    };
+    doc.note_zone_meta(0, 0, 0, &meta).unwrap();
+    let mut app = App::default();
+    app.doc = Some(std::rc::Rc::new(std::cell::RefCell::new(doc)));
+    app.sampling_open = true;
+    let mut h = harness(app);
+    h.run_steps(10);
+    window(&mut h, "new-sampler-edit.png", None);
+    // The MK3: SAMPLE, EDIT, its TEMPO / PITCH page; then SHIFT.
+    use deckard_mk3::Event;
+    let press = |h: &mut Harness<'static, App>, name: &'static str, down: bool| {
+        let app = h.state_mut();
+        let v = app.surface_view();
+        for a in app.surface.event(&Event::Button(name, down), &v, Instant::now()) {
+            app.surface_act(a);
+        }
+        h.run_steps(2);
+    };
+    for name in ["BUTTON_SAMPLE", "BUTTON_SCREEN_2", "BUTTON_RIGHT", "BUTTON_RIGHT"] {
+        press(&mut h, name, true);
+        press(&mut h, name, false);
+    }
+    mk3(&mut h, "mk3-new-sampler-tempo.png");
+    press(&mut h, "BUTTON_SHIFT", true);
+    mk3(&mut h, "mk3-new-sampler-shift.png");
+    press(&mut h, "BUTTON_SHIFT", false);
+    // Warp markers on its hits, the third pulled a little late.
+    h.state_mut().warp_act(crate::layout::sampling::WarpAct::Detect);
+    h.state_mut().warp_act(crate::layout::sampling::WarpAct::Move(2, 0.75));
+    h.run_steps(4);
+    window(&mut h, "new-sampler-warp.png", Some((200, 560, 1740, 240)));
+    // Stem lanes: the separation's result put on the zone, the drums muted, the bass down.
+    h.state_mut().warp_act(crate::layout::sampling::WarpAct::Clear);
+    h.state_mut().path = Some(dir.path().join("x.mxprj"));
+    let n = beat * 16;
+    let stems = deckard_stems::Kind::ALL
+        .iter()
+        .enumerate()
+        .map(|(k, &kind)| deckard_stems::Stem {
+            kind,
+            frames: (0..n)
+                .map(|i| {
+                    let j = i % (beat * (k + 1) / 2).max(1);
+                    let hit = if j < 4000 { 1.0 - j as f32 / 4000.0 } else { 0.0 };
+                    [hit * (i as f32 * 0.02 * (k + 1) as f32).sin() * 0.7; 2]
+                })
+                .collect(),
+        })
+        .collect();
+    h.state_mut().finish_stem_lanes("Bass Loop 120bpm A1", rate, stems, (0, 0, 0));
+    h.state_mut().lane_act(0, crate::layout::sampling::LaneAct::Mute);
+    h.state_mut().lane_act(2, crate::layout::sampling::LaneAct::Gain(0.5));
+    h.run_steps(6);
+    window(&mut h, "new-sampler-lanes.png", Some((200, 560, 1740, 240)));
+    // The MK3: on to the PLAYBACK knob page, then STEMS (after TEMPO / PITCH and SYNC).
+    press(&mut h, "BUTTON_RIGHT", true);
+    press(&mut h, "BUTTON_RIGHT", false);
+    mk3(&mut h, "mk3-new-sampler-playback.png");
+    for name in ["BUTTON_RIGHT", "BUTTON_RIGHT"] {
+        press(&mut h, name, true);
+        press(&mut h, name, false);
+    }
+    mk3(&mut h, "mk3-new-sampler-stems.png");
+    // A slice of it: what it doesn't play shows dim, the ground behind it barely.
+    let doc = h.state().doc.clone().unwrap();
+    let (g, snd, z) = (h.state().group, h.state().sound, h.state().zone);
+    doc.borrow_mut()
+        .set("Start", deckard_doc::Target::Zone(g, snd, z), "play_range/low", mxprj::decode::Value::Float((n / 3) as f64))
+        .unwrap();
+    h.state_mut().sampling.selection = Some((n / 3, n));
+    mk3(&mut h, "mk3-new-sampler-slice.png");
+}
+
 /// Ratcheted notes in the pattern editor, with the Ratchet lane and then the Velocity
 /// lane under them; and the MK3's Step page, its second knob page.
 #[test]
@@ -328,6 +436,131 @@ fn ratchet_shots() {
         }
     }
     mk3(&mut h, "mk3-ratchet.png");
+}
+
+/// The Session Recorder window (manual: "Session recording"), mid-set: a running set
+/// timer, the scrolling waveform and the L/R meters, in the default Maschine theme. The
+/// window reads `session.view`, so no audio engine is needed — the state is set directly.
+#[test]
+#[ignore]
+fn session_recorder_shots() {
+    use crate::session_record::{SessionPhase, SessionView, bytes_per_second};
+    use std::collections::VecDeque;
+
+    let mut app = App { settings: crate::settings::Settings::default(), ..App::default() };
+    quiet(&mut app);
+    app.new_project();
+    let mut h = harness(app);
+
+    // A believable mid-set stereo waveform: per-bucket (left peak, right peak), the two
+    // channels pulsing a little differently.
+    let rate = 48_000u32;
+    let mut wave: VecDeque<(f32, f32)> = VecDeque::new();
+    for i in 0..180u32 {
+        let t = i as f32 / 180.0;
+        let env = 0.30 + 0.55 * (t * std::f32::consts::TAU * 3.0).sin().abs() * (0.6 + 0.4 * (t * 37.0).sin().abs());
+        let l = (env * (0.7 + 0.3 * (t * 101.0).sin()).abs()).min(0.97);
+        let r = (env * (0.7 + 0.3 * (t * 61.0).cos()).abs()).min(0.97);
+        wave.push_back((l, r));
+    }
+
+    let app = h.state_mut();
+    app.session_window_open = true;
+    app.session.view = SessionView {
+        phase: SessionPhase::Recording,
+        elapsed: 2537.0, // 00:42:17
+        started_label: "22:14".into(),
+        meter: (0.62, 0.48),
+        peak: (0.86, 0.74),
+        bytes: 2537 * bytes_per_second(rate),
+        free: 212_000_000_000,
+        reserve: 1_000_000_000,
+        rate,
+        path: Some(std::path::PathBuf::from("session-night-run-2026-11-17-2214.wav")),
+        wave,
+        error: None,
+        stopped: None,
+    };
+    // Cropped to the Recorder window, which egui lays out at the top-left.
+    window(&mut h, "session-recorder.png", Some((6, 14, 406, 383)));
+}
+
+/// A frame sequence of the play/pause flow (arm → record → pause → resume), one PNG per
+/// frame (`flow-000.png` …) in `$DECKARD_SHOTS`, for assembling into a demo GIF with
+/// ffmpeg. The clock advances a second per recording frame and holds while paused; the
+/// stereo waveform scrolls while recording and freezes while paused.
+#[test]
+#[ignore]
+fn session_recorder_flow_frames() {
+    use crate::session_record::{SessionPhase, SessionView, bytes_per_second};
+    use std::collections::VecDeque;
+
+    let mut app = App { settings: crate::settings::Settings::default(), ..App::default() };
+    quiet(&mut app);
+    app.new_project();
+    let mut h = harness(app);
+    let rate = 48_000u32;
+
+    const CAP: usize = 180;
+    // A continuous stereo signal: global bucket index `g` -> (left peak, right peak).
+    let sig = |g: f32, amp: f32| -> (f32, f32) {
+        let env = amp * (0.35 + 0.5 * (g * 0.11).sin().abs() * (0.6 + 0.4 * (g * 0.027).sin().abs()));
+        let l = (env * (0.7 + 0.3 * (g * 0.9).sin()).abs()).min(0.97);
+        let r = (env * (0.7 + 0.3 * (g * 0.5).cos()).abs()).min(0.97);
+        (l, r)
+    };
+
+    h.state_mut().session_window_open = true;
+
+    let mut g = 0.0f32;
+    let mut elapsed = 0.0f64;
+    let mut wave: VecDeque<(f32, f32)> = (0..CAP).map(|_| (0.012, 0.012)).collect();
+    let mut frame = 0u32;
+
+    // (phase, frames to hold, is the transport running, waveform amplitude).
+    let beats = [
+        (SessionPhase::Armed, 3u32, false, 0.0f32),
+        (SessionPhase::Recording, 9, true, 0.95),
+        (SessionPhase::Paused, 4, false, 0.0),
+        (SessionPhase::Recording, 9, true, 0.95),
+    ];
+    for (phase, frames, running, amp) in beats {
+        for _ in 0..frames {
+            if running {
+                for _ in 0..22 {
+                    wave.push_back(sig(g, amp));
+                    g += 1.0;
+                    if wave.len() > CAP {
+                        wave.pop_front();
+                    }
+                }
+                elapsed += 1.0;
+            }
+            let (meter, peak) = if running {
+                let p = 0.45 + 0.25 * (g * 0.3).sin().abs();
+                ((p * 0.8, p * 0.66), (p.min(0.97), (p * 0.85).min(0.97)))
+            } else {
+                ((0.015, 0.015), (0.0, 0.0))
+            };
+            h.state_mut().session.view = SessionView {
+                phase,
+                elapsed,
+                started_label: "22:14".into(),
+                meter,
+                peak,
+                bytes: (elapsed as u64) * bytes_per_second(rate),
+                free: 212_000_000_000,
+                reserve: 1_000_000_000,
+                rate,
+                path: Some(std::path::PathBuf::from("session-night-run-2026-11-19-2214.wav")),
+                wave: wave.clone(),
+                error: None,
+                stopped: None,
+            };
+            window(&mut h, &format!("flow-{frame:03}.png"), Some((6, 14, 406, 383)));
+            frame += 1;
+        }
+    }
 }
 
 /// The whole window in the desktop theme `$DECKARD_SHOT_DESKTOP` (LCD: `$DECKARD_SHOT_LCD`):

@@ -137,12 +137,18 @@ impl RenderPool {
                             shared.helped.fetch_add(n as u64, Ordering::Relaxed);
                             continue;
                         }
-                        // Linger for the next batch, then sleep until woken.
+                        // Linger for the next batch, then sleep until woken. Check the clock
+                        // every 64 spins so seven workers don't hammer QueryPerformanceCounter.
                         let start = std::time::Instant::now();
                         let mut woke = false;
-                        while start.elapsed() < LINGER {
+                        let mut spins = 0u32;
+                        loop {
                             if unpack(shared.state.load(Ordering::Acquire)).0 != seen || shared.quit.load(Ordering::Acquire) {
                                 woke = true;
+                                break;
+                            }
+                            spins = spins.wrapping_add(1);
+                            if spins & 63 == 0 && start.elapsed() >= LINGER {
                                 break;
                             }
                             std::hint::spin_loop();
@@ -156,7 +162,7 @@ impl RenderPool {
                             shared.asleep[w].store(false, Ordering::Release);
                         }
                     }
-                    drop(joined);
+                    let _ = joined;
                 })
                 .expect("render thread");
             handles.push(h);

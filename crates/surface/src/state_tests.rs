@@ -82,6 +82,30 @@ fn one_table_until_the_view_changes() {
     assert_eq!((old.as_str(), old_sound.as_str(), new.as_str(), fresh), ("Drums", "Sound 1", "Changed", true));
 }
 
+/// What changes every frame (play position, meters, which notes just started) is patched
+/// into the table the scripts already have, not made again; every such value reaches them.
+#[test]
+fn a_frames_changes_reach_the_kept_table() {
+    let s = Surface::new();
+    let mut v = view();
+    let before: usize = eval(&s, &v, "kept = deckard.state() return #kept.groups[1].sounds[1].hits");
+    assert_eq!(before, 0);
+    v.position = Some(96);
+    v.groups[0].playing = true;
+    v.groups[0].sounds[0].playing = true;
+    v.groups[0].sounds[0].hits = vec![36, 38];
+    v.groups[0].sounds[0].mix.meter = (0.5, 0.25);
+    let (same, hits, playing): (bool, Vec<i64>, bool) = eval(
+        &s,
+        &v,
+        "local s = deckard.state() local snd = s.groups[1].sounds[1]
+         return s == kept and s.position == kept.position, snd.hits, snd.playing and s.groups[1].playing",
+    );
+    assert!(same, "patched, not made again");
+    assert_eq!(hits, [36, 38], "a pad's flash follows its notes");
+    assert!(playing);
+}
+
 #[test]
 fn a_device_sees_the_view_its_pads_are_asked_with() {
     let tmp = tempfile::tempdir().unwrap();
