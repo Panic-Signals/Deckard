@@ -217,3 +217,21 @@ fn hosted_lock_refreshes_every_visible_plugin_panel() {
         assert_eq!(view.page, usize::MAX, "LOCK refreshes each strip, including the unfocused slot");
     }
 }
+
+/// Steady-state `follow_plugin_chunk` must not lock the audio mutex once the document
+/// revision has been synced.
+#[test]
+fn follow_plugin_chunk_skips_locking_when_revision_is_unchanged() {
+    let mut app = App::default();
+    app.new_project();
+    let class = &deckard_plugins::tuner::CLASS;
+    let id = deckard_plugins::state::PluginId::parse(&class.plugin_id(), class.name).unwrap();
+    let shared = deckard_plugins::Plugin::native(class, id, class.name, 48_000.0).shared();
+    let rev = app.doc.as_ref().unwrap().borrow().revision();
+    let _audio = shared.lock().unwrap();
+    assert_eq!(
+        app.follow_plugin_chunk((Chain::Master, 0), &shared, rev),
+        Some(rev),
+        "unchanged revision returns immediately without locking the plug-in"
+    );
+}

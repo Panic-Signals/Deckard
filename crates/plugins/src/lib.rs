@@ -261,6 +261,13 @@ impl Plugin {
         }
     }
 
+    pub(crate) fn faulted_flag(&self) -> Option<Arc<AtomicBool>> {
+        match &self.kind {
+            Kind::Vst3(p) => Some(p.faulted.clone()),
+            _ => None,
+        }
+    }
+
     /// An instance of one of DECKARD's own plug-ins, at its default settings.
     pub fn native(class: &'static native::Class, id: PluginId, name: &str, sample_rate: f64) -> Plugin {
         Plugin {
@@ -1375,8 +1382,10 @@ impl Drop for Vst3 {
 
 /// A plug-in's parameters, reached without holding the instance: a VST3's through its
 /// controller (see [`Plugin::params`]).
+#[derive(Clone)]
 pub struct Params(ParamsOf);
 
+#[derive(Clone)]
 enum ParamsOf {
     Vst3 {
         controller: ComPtr<IEditController>,
@@ -1388,6 +1397,24 @@ enum ParamsOf {
 }
 
 impl Params {
+    /// The VST3 edit controller, when this handle is for a VST3.
+    pub fn controller(&self) -> Option<ComPtr<IEditController>> {
+        match &self.0 {
+            ParamsOf::Vst3 { controller, .. } => Some(controller.clone()),
+            #[cfg(target_os = "macos")]
+            ParamsOf::AudioUnit(_) => None,
+        }
+    }
+
+    /// Whether a VST3's state was marked dirty since `take_dirty`, without locking the
+    /// audio instance (`None` for Audio Units, whose dirty flag lives on the instance).
+    pub fn is_dirty(&self) -> Option<bool> {
+        match &self.0 {
+            ParamsOf::Vst3 { edits, .. } => Some(edits.lock().is_ok_and(|e| e.dirty)),
+            #[cfg(target_os = "macos")]
+            ParamsOf::AudioUnit(_) => None,
+        }
+    }
     /// A parameter's value (normalized 0..1).
     pub fn value(&self, id: u32) -> f64 {
         match &self.0 {
