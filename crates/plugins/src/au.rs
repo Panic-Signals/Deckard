@@ -18,7 +18,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 type Unit = *mut c_void;
 type Cfref = *const c_void;
@@ -319,6 +319,8 @@ impl Meta {
     }
 }
 
+const NO_TOUCH: u32 = u32::MAX;
+
 /// What an instance shares with its window and with the UI's handles on its parameters.
 /// The unit lives until the last of them lets go. `AudioUnitGetParameter` and
 /// `AudioUnitSetParameter` are made to be called alongside rendering.
@@ -330,6 +332,8 @@ pub struct Shared {
     params: Vec<Meta>,
     index: HashMap<u32, usize>,
     dirty: AtomicBool,
+    /// The last parameter changed in the plug-in's editor (`NO_TOUCH`: none).
+    touched: AtomicU32,
     /// Its window has been open: not every plug-in reports its window's edits, so the
     /// saved state is compared from then on.
     window_seen: AtomicBool,
@@ -411,6 +415,12 @@ impl Shared {
         self.dirty.store(true, Ordering::Release);
     }
 
+    /// The last parameter touched in the plug-in's own editor since last asked.
+    pub fn take_touched(&self) -> Option<u32> {
+        let id = self.touched.swap(NO_TOUCH, Ordering::AcqRel);
+        (id != NO_TOUCH).then_some(id)
+    }
+
     /// The window and anything else listening should read every parameter again.
     fn notify_all(&self) {
         let target = self.target(ANY_PARAMETER);
@@ -419,9 +429,15 @@ impl Shared {
 }
 
 /// The plug-in reported an edit (on the main run loop).
-unsafe extern "C" fn edited(user: *mut c_void, _object: *mut c_void, _event: *const AuEvent, _time: u64, _value: f32) {
+unsafe extern "C" fn edited(user: *mut c_void, _object: *mut c_void, event: *const AuEvent, _time: u64, _value: f32) {
     let shared = unsafe { &*(user as *const Shared) };
     shared.dirty.store(true, Ordering::Release);
+    if !event.is_null() {
+        let ev = unsafe { &*event };
+        if ev.kind == EVENT_PARAMETER_CHANGED && ev.target.id != ANY_PARAMETER {
+            shared.touched.store(ev.target.id, Ordering::Release);
+        }
+    }
 }
 
 /// What the callbacks into the host read during a render.
@@ -824,6 +840,7 @@ impl AudioUnit {
             params,
             index,
             dirty: AtomicBool::new(false),
+            touched: AtomicU32::new(NO_TOUCH),
             window_seen: AtomicBool::new(false),
             listener: AtomicPtr::new(std::ptr::null_mut()),
         });
@@ -977,6 +994,7 @@ impl AudioUnit {
             }
         }
         self.shared.notify_all();
+        self.shared.touched.store(NO_TOUCH, Ordering::Release);
         if r == 0 { Ok(()) } else { Err(format!("restoring the plug-in's state failed ({r})")) }
     }
 
@@ -1079,6 +1097,10 @@ impl AudioUnit {
     pub fn take_dirty(&self) -> bool {
         self.shared.dirty.swap(false, Ordering::AcqRel)
             || (self.shared.window_seen.load(Ordering::Acquire) && !self.unread_chunk && self.save_chunk() != self.chunk)
+    }
+
+    pub fn take_touched(&self) -> Option<u32> {
+        self.shared.take_touched()
     }
 
     pub fn modulate(&mut self, id: u32, v: f64) {

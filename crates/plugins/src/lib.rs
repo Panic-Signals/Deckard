@@ -439,6 +439,11 @@ impl Plugin {
         each!(self, p => p.take_dirty())
     }
 
+    /// The last parameter touched in the plug-in's own editor since last asked (for Learn).
+    pub fn take_touched(&self) -> Option<u32> {
+        each!(self, p => p.take_touched())
+    }
+
     /// Modulation (the audio thread): parameter `id` plays at `v` (normalized) from
     /// the next `process`, leaving the knob (the controller, the saved state) as it is.
     pub fn modulate(&mut self, id: u32, v: f64) {
@@ -885,6 +890,7 @@ impl Vst3 {
         // call `restartComponent` or `performEdit` inside `setComponentState`/`setState`).
         if let Ok(mut e) = self.edits.lock() {
             e.dirty = false;
+            e.touched = None;
         }
         result
     }
@@ -1051,6 +1057,11 @@ impl Vst3 {
     /// Something was edited in the plug-in since `take_dirty` was last called.
     pub fn take_dirty(&self) -> bool {
         self.edits.lock().map(|mut e| std::mem::take(&mut e.dirty)).unwrap_or(false)
+    }
+
+    /// The last parameter touched in the plug-in's own editor since last asked.
+    pub fn take_touched(&self) -> Option<u32> {
+        self.edits.lock().ok().and_then(|mut e| e.touched.take())
     }
 
     fn event(&self, r#type: Event_::EventTypes, data: Event__type0) {
@@ -1428,6 +1439,15 @@ impl Params {
             }
             #[cfg(target_os = "macos")]
             ParamsOf::AudioUnit(a) => a.set(id, v),
+        }
+    }
+
+    /// The last parameter touched in the plug-in's own editor since last asked.
+    pub fn take_touched(&self) -> Option<u32> {
+        match &self.0 {
+            ParamsOf::Vst3 { edits, .. } => edits.lock().ok().and_then(|mut e| e.touched.take()),
+            #[cfg(target_os = "macos")]
+            ParamsOf::AudioUnit(a) => a.take_touched(),
         }
     }
 }

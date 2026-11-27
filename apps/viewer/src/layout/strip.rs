@@ -662,7 +662,8 @@ fn panel(
                             .knobs
                             .iter()
                             .enumerate()
-                            .map(|(k, (info, label, _))| {
+                            .map(|(k, slot)| {
+                                let (info, label, _) = slot.as_ref()?;
                                 let (value, text) = v.values.get(k).cloned().unwrap_or((info.default, String::new()));
                                 Some((
                                     Cow::Owned(label.to_uppercase()),
@@ -674,7 +675,7 @@ fn panel(
                             .collect();
                         grid(ui, painter, inner, &knobs, id.with(("plugin", page)), color, acts);
                         // (What each panel shows, for tests.)
-                        let labels = pg.knobs.iter().map(|(_, l, _)| l.to_uppercase()).collect();
+                        let labels = pg.knobs.iter().flatten().map(|(_, l, _)| l.to_uppercase()).collect();
                         ui.data_mut(|d| {
                             d.get_temp_mut_or_default::<Vec<PluginShown>>(egui::Id::new(STRIP_PLUGINS)).push((i, page, labels))
                         });

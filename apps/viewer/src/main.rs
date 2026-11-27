@@ -162,6 +162,9 @@ mod panic_log;
 #[cfg(test)]
 mod parity_tests;
 mod plugin_macros;
+mod plugin_pages;
+#[cfg(test)]
+mod plugin_pages_tests;
 #[cfg(test)]
 mod plugin_panel_tests;
 mod plugin_pictures;
@@ -487,13 +490,20 @@ pub struct PluginView {
     /// When it was last drawn (or focused): views not seen for [`VIEW_KEEP`] go.
     pub(crate) seen: std::time::Instant,
     /// The slot's plug-in (its id in the project) when made: another there drops it.
-    plugin_id: String,
+    pub(crate) plugin_id: String,
+    /// The document revision and saved pages this view was built for (a page edit, undo
+    /// or redo rebuilds the view automatically).
+    pub(crate) pages_rev: u64,
+    pub(crate) saved_pages: Vec<deckard_model::PluginPage>,
     /// The instance it reads (another in the slot rebuilds the view).
     instance: std::sync::Weak<deckard_plugins::SharedPlugin>,
     pub error: Option<String>,
     /// Values DECKARD sent (parameter, value, when) the plug-in may not report yet.
     pub sent: Vec<(u32, f64, std::time::Instant)>,
 }
+
+/// One populated slot of a [`ViewPage`]: (parameter info, display label, section heading).
+pub type ViewKnob = (deckard_plugins::ParamInfo, String, String);
 
 /// How often a view's values are read again, and the longest one waits when many are due.
 pub(crate) const VIEW_REFRESH: std::time::Duration = std::time::Duration::from_millis(100);
@@ -512,7 +522,7 @@ const SENT_HOLD: std::time::Duration = std::time::Duration::from_millis(500);
 /// sent ones it reports, or too old, forgotten.
 fn hold_sent(
     read: &mut [(f64, String)],
-    ids: &[u32],
+    ids: &[Option<u32>],
     sent: &mut Vec<(u32, f64, std::time::Instant)>,
     now: std::time::Instant,
     text: impl Fn(u32, f64) -> String,
@@ -521,7 +531,7 @@ fn hold_sent(
         if now.duration_since(at) >= SENT_HOLD {
             return false;
         }
-        let Some(k) = ids.iter().position(|&i| i == id) else { return true };
+        let Some(k) = ids.iter().position(|&i| i == Some(id)) else { return true };
         let Some(r) = read.get_mut(k) else { return true };
         if (r.0 - v).abs() < 1e-6 {
             return false;
@@ -531,25 +541,26 @@ fn hold_sent(
     });
 }
 
-/// One page: its name (may be empty) and knobs (the parameter, its label, a section
-/// heading starting there).
+/// One page: its name (may be empty) and up to eight knob slots (`None`: empty slot).
 pub struct ViewPage {
     pub name: String,
-    pub knobs: Vec<(deckard_plugins::ParamInfo, String, String)>,
-    /// Per knob: the names of its values when it is a choice (shown as a selector),
+    pub knobs: Vec<Option<ViewKnob>>,
+    /// Per knob slot: the names of its values when it is a choice (shown as a selector),
     /// else empty.
     pub choices: Vec<Vec<String>>,
     /// The plug-in's own page: its labels follow the plug-in (Plaits' engines).
-    own: bool,
+    pub(crate) own: bool,
 }
 
 impl ViewPage {
-    fn new(p: &deckard_plugins::Plugin, name: String, knobs: Vec<(deckard_plugins::ParamInfo, String, String)>) -> ViewPage {
+    fn new(p: &deckard_plugins::Plugin, name: String, knobs: Vec<Option<ViewKnob>>) -> ViewPage {
         // DECKARD's own plug-ins show their choices as selectors, as Maschine's modules.
         let choices = knobs
             .iter()
-            .map(|(i, ..)| match i.steps {
-                n @ 1..=32 if p.is_native() => (0..=n).map(|k| p.param_text(i.id, k as f64 / n as f64)).collect(),
+            .map(|k| match k {
+                Some((i, ..)) if (1..=32).contains(&i.steps) && p.is_native() => {
+                    (0..=i.steps).map(|n| p.param_text(i.id, n as f64 / i.steps as f64)).collect()
+                }
                 _ => Vec::new(),
             })
             .collect();
@@ -591,81 +602,83 @@ fn view_pages(
                     .into_iter()
                     .filter_map(|(id, section)| {
                         let info = all.iter().find(|i| i.id == id)?.clone();
-                        Some((info.clone(), info.short.clone(), section))
+                        Some(Some((info.clone(), info.short.clone(), section)))
                     })
                     .collect();
                 ViewPage { own: true, ..ViewPage::new(p, name, knobs) }
             })
             .collect();
     }
-    let mut pages: Vec<ViewPage> = if saved.iter().any(|pg| !pg.params.is_empty()) {
-        let all = p.parameter_list(false);
-        saved
-            .iter()
-            .map(|pg| {
-                let knobs = pg
-                    .params
+    let mut pages: Vec<ViewPage> =
+        if !saved.is_empty() {
+            let all = p.parameter_list(false);
+            saved
+                .iter()
+                .map(|pg| {
+                    let mut knobs: Vec<Option<ViewKnob>> = pg
+                        .params
+                        .iter()
+                        .take(8)
+                        .map(|k| {
+                            if k.id == u32::MAX {
+                                return None;
+                            }
+                            let info = all.iter().find(|i| i.id == k.id).or_else(|| all.get(k.id as usize))?.clone();
+                            let label = if k.name.is_empty() { info.title.clone() } else { k.name.clone() };
+                            Some((info, label, k.section.clone()))
+                        })
+                        .collect();
+                    knobs.resize(8, None);
+                    ViewPage::new(p, saved_page_name(pg), knobs)
+                })
+                .collect()
+        } else {
+            let mut params = p.parameters();
+            // The mapping's pages first, in its order (each knob found by id, title or name);
+            // the parameters they leave follow, eight a page.
+            let mut pages = Vec::new();
+            for pg in mapped.unwrap_or_default() {
+                let knobs: Vec<Option<ViewKnob>> = pg
+                    .knobs
                     .iter()
-                    .filter_map(|k| {
-                        let info = all
-                            .iter()
-                            .find(|i| i.id == k.id)
-                            .or_else(|| (k.id != u32::MAX).then(|| all.get(k.id as usize)).flatten())?
-                            .clone();
-                        let label = if k.name.is_empty() { info.title.clone() } else { k.name.clone() };
-                        Some((info, label, k.section.clone()))
+                    .take(8)
+                    .map(|slot| {
+                        let r = slot.as_ref()?;
+                        let found =
+                            r.id.and_then(|id| params.iter().position(|i| i.id == id))
+                                .or_else(|| r.title.as_ref().and_then(|t| params.iter().position(|i| i.title.eq_ignore_ascii_case(t))))
+                                .or_else(|| params.iter().position(|i| r.knob.iter().any(|n| n.eq_ignore_ascii_case(&i.title))))?;
+                        let info = params.remove(found);
+                        Some((info.clone(), info.title.clone(), pg.name.clone()))
                     })
                     .collect();
-                ViewPage::new(p, saved_page_name(pg), knobs)
-            })
-            .filter(|pg| !pg.knobs.is_empty())
-            .collect()
-    } else {
-        let mut params = p.parameters();
-        // The mapping's pages first, in its order (each knob found by id, title or name);
-        // the parameters they leave follow, eight a page.
-        let mut pages = Vec::new();
-        for pg in mapped.unwrap_or_default() {
-            let knobs: Vec<_> = pg
-                .knobs
-                .iter()
-                .flatten()
-                .filter_map(|r| {
-                    let found =
-                        r.id.and_then(|id| params.iter().position(|i| i.id == id))
-                            .or_else(|| r.title.as_ref().and_then(|t| params.iter().position(|i| i.title.eq_ignore_ascii_case(t))))
-                            .or_else(|| params.iter().position(|i| r.knob.iter().any(|n| n.eq_ignore_ascii_case(&i.title))))?;
-                    let info = params.remove(found);
-                    Some((info.clone(), info.title.clone(), pg.name.clone()))
-                })
-                .collect();
-            if !knobs.is_empty() {
-                pages.push(ViewPage::new(p, pg.name.clone(), knobs));
+                if knobs.iter().any(Option::is_some) {
+                    pages.push(ViewPage::new(p, pg.name.clone(), knobs));
+                }
             }
-        }
-        let rest = 128usize.saturating_sub(pages.len() * 8);
-        pages.extend(
-            params
-                .into_iter()
-                .take(rest)
-                .collect::<Vec<_>>()
-                .chunks(8)
-                .map(|c| ViewPage::new(p, String::new(), c.iter().map(|i| (i.clone(), i.title.clone(), String::new())).collect())),
-        );
-        pages
-    };
+            let rest = 128usize.saturating_sub(pages.len() * 8);
+            pages.extend(
+                params.into_iter().take(rest).collect::<Vec<_>>().chunks(8).map(|c| {
+                    ViewPage::new(p, String::new(), c.iter().map(|i| Some((i.clone(), i.title.clone(), String::new()))).collect())
+                }),
+            );
+            pages
+        };
     name_unnamed_pages(&mut pages);
     pages
 }
 
 /// Give pages that have no explicit section headings (`autoname` NKS presets, or
 /// automatic parameter pages) section headings and page names derived from their knob
-/// labels.
+/// labels. Empty pages keep an empty name so they show as "Page N" / "N".
 fn name_unnamed_pages(pages: &mut [ViewPage]) {
     let mut prev: Option<(String, usize)> = None;
     for pg in pages.iter_mut() {
         if !pg.name.is_empty() {
             prev = Some((pg.name.clone(), 1));
+            continue;
+        }
+        if pg.knobs.iter().all(Option::is_none) {
             continue;
         }
         let derived = infer_knob_sections(&mut pg.knobs);
@@ -675,7 +688,7 @@ fn name_unnamed_pages(pages: &mut [ViewPage]) {
         } else if let Some((base, n)) = &mut prev {
             *n += 1;
             pg.name = format!("{base} {n}");
-        } else if let Some((_, first, sec)) = pg.knobs.first_mut() {
+        } else if let Some((_, first, sec)) = pg.knobs.iter_mut().flatten().next() {
             let fallback = first.split_whitespace().next().unwrap_or(first.as_str()).trim().to_string();
             let name = if fallback.is_empty() { "Main".to_string() } else { fallback };
             if sec.is_empty() {
@@ -689,11 +702,11 @@ fn name_unnamed_pages(pages: &mut [ViewPage]) {
 
 /// Infer section headings from knob labels when a page has none, and return the page
 /// name (up to two sections joined by `" / "`).
-fn infer_knob_sections(knobs: &mut [(deckard_plugins::ParamInfo, String, String)]) -> String {
-    if knobs.is_empty() || knobs.iter().any(|(_, _, s)| !s.trim().is_empty()) {
+fn infer_knob_sections(knobs: &mut [Option<ViewKnob>]) -> String {
+    if knobs.iter().all(Option::is_none) || knobs.iter().flatten().any(|(_, _, s)| !s.trim().is_empty()) {
         return String::new();
     }
-    let labels: Vec<String> = knobs.iter().map(|(_, l, _)| l.trim().to_string()).collect();
+    let labels: Vec<String> = knobs.iter().map(|k| k.as_ref().map_or(String::new(), |(_, l, _)| l.trim().to_string())).collect();
     let two_word = |s: &str| -> Option<String> {
         let mut w = s.split_whitespace();
         let (a, b, _) = (w.next()?, w.next()?, w.next()?);
@@ -702,6 +715,10 @@ fn infer_knob_sections(knobs: &mut [(deckard_plugins::ParamInfo, String, String)
     };
     let mut cands: Vec<Option<String>> = Vec::with_capacity(labels.len());
     for (i, l) in labels.iter().enumerate() {
+        if l.is_empty() {
+            cands.push(None);
+            continue;
+        }
         if let Some((sec, _)) = l.split_once(" - ").or_else(|| l.split_once(": ")).or_else(|| l.split_once(" / ")) {
             let sec = sec.trim();
             if !sec.is_empty() {
@@ -744,13 +761,13 @@ fn infer_knob_sections(knobs: &mut [(deckard_plugins::ParamInfo, String, String)
     let mut sections: Vec<String> = Vec::new();
     let mut last = String::new();
     for (k, sec) in cands.into_iter().enumerate() {
-        if let Some(sec) = sec {
-            if !sec.eq_ignore_ascii_case(&last) {
-                knobs[k].2 = sec.clone();
-                last = sec.clone();
-                if !sections.iter().any(|s| s.eq_ignore_ascii_case(&sec)) {
-                    sections.push(sec);
-                }
+        if let (Some(sec), Some(knob)) = (sec, knobs[k].as_mut())
+            && !sec.eq_ignore_ascii_case(&last)
+        {
+            knob.2 = sec.clone();
+            last = sec.clone();
+            if !sections.iter().any(|s| s.eq_ignore_ascii_case(&sec)) {
+                sections.push(sec);
             }
         }
     }
@@ -5403,7 +5420,7 @@ impl App {
             return Some(g.knob_value(id));
         }
         let v = self.plugin_views.get(&(c, slot))?;
-        let k = v.pages.get(v.page)?.knobs.iter().position(|(info, ..)| info.id == id)?;
+        let k = v.pages.get(v.page)?.knobs.iter().position(|s| s.as_ref().is_some_and(|(info, ..)| info.id == id))?;
         v.values.get(k).map(|(val, _)| *val)
     }
 
@@ -5431,11 +5448,11 @@ impl App {
         let stepped = |chain: deckard_doc::Chain, slot: usize, id: u32| -> Option<Vec<String>> {
             let v = self.plugin_views.get(&(chain, slot))?;
             let page = v.pages.get(v.page)?;
-            let i = page.knobs.iter().position(|(info, ..)| info.id == id)?;
+            let i = page.knobs.iter().position(|s| s.as_ref().is_some_and(|(info, ..)| info.id == id))?;
             if let Some(names) = page.choices.get(i).filter(|c| !c.is_empty()) {
                 return Some(names.clone());
             }
-            let steps = page.knobs[i].0.steps;
+            let steps = page.knobs[i].as_ref()?.0.steps;
             if !(1..MAX as i32).contains(&steps) {
                 return None;
             }
@@ -5466,7 +5483,7 @@ impl App {
             let units = self
                 .plugin_views
                 .get(&(c, i))
-                .and_then(|v| v.pages.get(v.page)?.knobs.iter().find(|(info, ..)| info.id == id))
+                .and_then(|v| v.pages.get(v.page)?.knobs.iter().flatten().find(|(info, ..)| info.id == id))
                 .map(|(info, ..)| info.units.clone())
                 .unwrap_or_default();
             return Some(if units.is_empty() || text.ends_with(&units) { text } else { format!("{text} {units}") });
@@ -11654,13 +11671,36 @@ impl App {
             section: if i == 0 && section.is_empty() { page.to_string() } else { section.to_string() },
         };
         match self.plugin_views.get(&(chain, k)) {
-            Some(v) => {
-                v.pages.iter().map(|pg| pg.knobs.iter().enumerate().map(|(i, (p, l, s))| knob(i, p.id, l, s, &pg.name)).collect()).collect()
-            }
+            Some(v) => v
+                .pages
+                .iter()
+                .map(|pg| {
+                    pg.knobs
+                        .iter()
+                        .enumerate()
+                        .map(|(i, slot)| match slot {
+                            Some((p, l, s)) => knob(i, p.id, l, s, &pg.name),
+                            None => Knob { id: None, name: String::new(), section: String::new() },
+                        })
+                        .collect()
+                })
+                .collect(),
             None => plugin
                 .pages
                 .iter()
-                .map(|pg| pg.params.iter().enumerate().map(|(i, p)| knob(i, p.id, &p.name, &p.section, &pg.name)).collect())
+                .map(|pg| {
+                    pg.params
+                        .iter()
+                        .enumerate()
+                        .map(|(i, p)| {
+                            if p.id == u32::MAX {
+                                Knob { id: None, name: String::new(), section: String::new() }
+                            } else {
+                                knob(i, p.id, &p.name, &p.section, &pg.name)
+                            }
+                        })
+                        .collect()
+                })
                 .collect(),
         }
     }
@@ -12280,6 +12320,7 @@ impl App {
         let pages: Vec<deckard_doc::PluginPageSpec> = plugin
             .pages
             .iter()
+            .filter(|pg| pg.iter().any(|k| k.id.is_some()))
             .map(|pg| deckard_doc::PluginPageSpec {
                 name: String::new(),
                 knobs: pg.iter().map(|k| (k.id.unwrap_or(u32::MAX), k.section.clone())).collect(),
@@ -12674,10 +12715,12 @@ impl App {
         // plug-ins); the others go once not seen for a while.
         let drawn = std::mem::take(&mut *self.plugin_drawn.borrow_mut());
         let mut wanted = Vec::new();
+        let mut kept_shown: std::collections::HashMap<(deckard_doc::Chain, usize), usize> = std::collections::HashMap::new();
         {
             let d = doc.borrow();
-            let id = |k: &(deckard_doc::Chain, usize)| Some(d.chain_slots(k.0)?.get(k.1)?.plugin.as_ref()?.id.as_str());
-            let holds = |k: &(deckard_doc::Chain, usize)| id(k).is_some();
+            let rev = d.revision();
+            let plugin_of = |k: &(deckard_doc::Chain, usize)| d.chain_slots(k.0)?.get(k.1)?.plugin.as_ref();
+            let holds = |k: &(deckard_doc::Chain, usize)| plugin_of(k).is_some();
             for k in focused.into_iter().chain(drawn) {
                 if !wanted.contains(&k) && holds(&k) {
                     wanted.push(k);
@@ -12688,8 +12731,22 @@ impl App {
                     v.seen = now;
                 }
             }
-            // (Another plug-in in the slot, an undo's say: its own view, made again.)
-            self.plugin_views.retain(|k, v| id(k) == Some(v.plugin_id.as_str()) && now.duration_since(v.seen) < VIEW_KEEP);
+            // Drop views whose plug-in changed, timed out, or whose saved parameter pages
+            // changed (edit, undo, redo); remember the page shown when rebuilding for page edits.
+            self.plugin_views.retain(|k, v| {
+                let Some(pr) = plugin_of(k) else { return false };
+                if pr.id != v.plugin_id || now.duration_since(v.seen) >= VIEW_KEEP {
+                    return false;
+                }
+                if v.pages_rev != rev {
+                    if pr.pages != v.saved_pages {
+                        kept_shown.insert(*k, v.shown);
+                        return false;
+                    }
+                    v.pages_rev = rev;
+                }
+                true
+            });
         }
         // New ones: the focused slot's at once (as the controller wants it), the others
         // a few at a time.
@@ -12698,7 +12755,10 @@ impl App {
             if self.plugin_views.contains_key(&k) || (Some(k) != focused && built >= VIEW_READS) {
                 continue;
             }
-            if let Some(v) = self.build_view(k, Some(k) == focused, now) {
+            if let Some(mut v) = self.build_view(k, Some(k) == focused, now) {
+                if let Some(s) = kept_shown.get(&k) {
+                    v.shown = (*s).min(v.pages.len().saturating_sub(1));
+                }
                 self.plugin_views.insert(k, v);
                 built += 1;
             }
@@ -12892,7 +12952,10 @@ impl App {
     /// it; else only an instance already running, and none while the audio thread holds
     /// it (again next time): drawing a panel never loads a plug-in.
     fn build_view(&mut self, key: (deckard_doc::Chain, usize), focused: bool, now: std::time::Instant) -> Option<PluginView> {
-        let pr = self.doc.as_ref()?.borrow().chain_slots(key.0)?.get(key.1)?.plugin.clone()?;
+        let (pr, pages_rev) = {
+            let d = self.doc.as_ref()?.borrow();
+            (d.chain_slots(key.0)?.get(key.1)?.plugin.clone()?, d.revision())
+        };
         // No pages saved: a hosted plug-in's default NKS preset's.
         let default_nks = if pr.pages.is_empty() && !pr.id.starts_with(deckard_plugins::native::VENDOR) {
             self.default_nks_preset(&pr.name)
@@ -12903,6 +12966,7 @@ impl App {
             Some(nks) => nks
                 .pages
                 .iter()
+                .filter(|pg| pg.iter().any(|k| k.id.is_some()))
                 .map(|pg| deckard_model::PluginPage {
                     name: String::new(),
                     params: pg
@@ -12919,6 +12983,7 @@ impl App {
         };
         // (The master's plug-ins take no side-chain.)
         let sidechain = |g: &deckard_plugins::Plugin| !matches!(key.0, deckard_doc::Chain::Master) && g.has_sidechain();
+        let saved_pages = pr.pages.clone();
         let view = |pages, sidechain, instance, error| PluginView {
             key,
             pages,
@@ -12929,6 +12994,8 @@ impl App {
             refreshed: now,
             seen: now,
             plugin_id: pr.id.clone(),
+            pages_rev,
+            saved_pages: saved_pages.clone(),
             instance,
             error,
             sent: Vec::new(),
@@ -13005,27 +13072,40 @@ impl App {
         }
         let v = self.plugin_views.get_mut(&key).unwrap();
         let page = v.shown;
-        let ids: Vec<u32> = v.pages.get(page).map_or(Vec::new(), |pg| pg.knobs.iter().map(|(i, ..)| i.id).collect());
+        let ids: Vec<Option<u32>> =
+            v.pages.get(page).map_or(Vec::new(), |pg| pg.knobs.iter().map(|k| k.as_ref().map(|(i, ..)| i.id)).collect());
         // A VST3's values come from its controller without holding the instance
         // (the audio thread would wait); DECKARD's own read instantly under it.
         let sent = &mut v.sent;
         let values = p.try_lock().ok().map(|g| match g.params() {
             Some(h) => {
                 drop(g);
-                let mut values: Vec<_> = ids.iter().map(|&id| (h.value(id), h.text(id, h.value(id)))).collect();
+                let mut values: Vec<_> = ids
+                    .iter()
+                    .map(|id| match id {
+                        Some(id) => (h.value(*id), h.text(*id, h.value(*id))),
+                        None => (0.0, String::new()),
+                    })
+                    .collect();
                 hold_sent(&mut values, &ids, sent, now, |id, v| h.text(id, v));
                 (values, Vec::new())
             }
             None => {
-                let mut values: Vec<_> = ids.iter().map(|&id| (g.param_value(id), g.param_text(id, g.param_value(id)))).collect();
+                let mut values: Vec<_> = ids
+                    .iter()
+                    .map(|id| match id {
+                        Some(id) => (g.param_value(*id), g.param_text(*id, g.param_value(*id))),
+                        None => (0.0, String::new()),
+                    })
+                    .collect();
                 hold_sent(&mut values, &ids, sent, now, |id, v| g.param_text(id, v));
-                (values, ids.iter().map(|&id| g.param_label(id)).collect())
+                (values, ids.iter().map(|id| id.and_then(|id| g.param_label(id))).collect())
             }
         });
         let Some((values, labels)) = values else { return false };
         if let Some(pg) = v.pages.get_mut(page).filter(|pg| pg.own) {
-            for ((_, label, _), new) in pg.knobs.iter_mut().zip(labels) {
-                if let Some(new) = new {
+            for (slot, new) in pg.knobs.iter_mut().zip(labels) {
+                if let (Some((_, label, _)), Some(new)) = (slot, new) {
                     *label = new;
                 }
             }
@@ -13301,7 +13381,10 @@ impl App {
         if !ctx.egui_wants_keyboard_input() && self.renaming.is_none() && self.remote_keys(ctx) {
             return;
         }
-        if ctx.egui_wants_keyboard_input() || self.renaming.is_some() || matches!(self.key_focus, KeyFocus::Events | KeyFocus::Macros) {
+        if ctx.egui_wants_keyboard_input()
+            || self.renaming.is_some()
+            || matches!(self.key_focus, KeyFocus::Events | KeyFocus::Macros | KeyFocus::PluginPages)
+        {
             return;
         }
         let (g, s) = (self.group, self.sound);
@@ -14739,6 +14822,7 @@ impl App {
             // On Linux the editors' timers run from these ticks: keep them coming.
             ctx.request_repaint_after(std::time::Duration::from_millis(if cfg!(target_os = "linux") { 16 } else { 250 }));
         }
+        self.poll_plugin_param_learn(ctx);
         self.follow_edits();
         self.keep_session_soon();
         if self.session_due.is_some() {
@@ -15103,19 +15187,19 @@ mod tests {
         let text = |id: u32, v: f64| format!("{id}:{v:.1}");
         let mut sent = vec![(7, 0.9, t0)];
         let mut read = vec![(0.5, "old".to_string()), (0.2, "other".to_string())];
-        hold_sent(&mut read, &[7, 8], &mut sent, t0, text);
+        hold_sent(&mut read, &[Some(7), Some(8)], &mut sent, t0, text);
         assert_eq!(read[0], (0.9, "7:0.9".to_string()), "the stale read gives way");
         assert_eq!(read[1].1, "other");
         assert_eq!(sent.len(), 1);
         // The plug-in has it: the hold ends.
         let mut read = vec![(0.9, "new".to_string()), (0.2, "other".to_string())];
-        hold_sent(&mut read, &[7, 8], &mut sent, t0, text);
+        hold_sent(&mut read, &[Some(7), Some(8)], &mut sent, t0, text);
         assert_eq!(read[0].1, "new");
         assert!(sent.is_empty());
         // One it never takes shows what it says after the hold.
         let mut sent = vec![(7, 0.9, t0)];
         let mut read = vec![(0.5, "old".to_string())];
-        hold_sent(&mut read, &[7], &mut sent, t0 + SENT_HOLD * 2, text);
+        hold_sent(&mut read, &[Some(7)], &mut sent, t0 + SENT_HOLD * 2, text);
         assert_eq!(read[0].1, "old");
         assert!(sent.is_empty());
     }
@@ -19282,7 +19366,7 @@ mod tests {
 
     fn view_cutoff(h: &Harness<'static, App>) -> u32 {
         let view = h.state().plugin_view().unwrap();
-        view.pages[1].knobs.iter().find(|(i, ..)| i.short == "CUTOFF").unwrap().0.id
+        view.pages[1].knobs.iter().flatten().find(|(i, ..)| i.short == "CUTOFF").unwrap().0.id
     }
 
     /// BUGS #24: each slot starts with an instrument or effect icon; a click on it

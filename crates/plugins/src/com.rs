@@ -460,6 +460,9 @@ pub struct Edits {
     pub pending: Vec<(ParamID, ParamValue)>,
     /// Something changed since the state was last saved.
     pub dirty: bool,
+    /// The last parameter touched in the plug-in's own editor (`beginEdit` / `performEdit`),
+    /// for parameter Learn.
+    pub touched: Option<ParamID>,
 }
 
 pub struct ComponentHandler {
@@ -471,7 +474,10 @@ impl Class for ComponentHandler {
 }
 
 impl IComponentHandlerTrait for ComponentHandler {
-    unsafe fn beginEdit(&self, _id: ParamID) -> tresult {
+    unsafe fn beginEdit(&self, id: ParamID) -> tresult {
+        if let Ok(mut e) = self.edits.lock() {
+            e.touched = Some(id);
+        }
         kResultOk
     }
 
@@ -479,6 +485,7 @@ impl IComponentHandlerTrait for ComponentHandler {
         if let Ok(mut e) = self.edits.lock() {
             e.pending.push((id, value));
             e.dirty = true;
+            e.touched = Some(id);
         }
         kResultOk
     }
@@ -531,5 +538,25 @@ mod param_tests {
         assert!(q[0].points.borrow().is_empty());
         drop(q);
         assert_eq!(c.take_and_clear(999), None);
+    }
+
+    /// Moving a knob in a VST3 editor (`beginEdit` / `performEdit`) records its id for Learn.
+    #[test]
+    fn component_handler_records_touched_parameter() {
+        let edits = Arc::new(Mutex::new(Edits::default()));
+        let handler = ComponentHandler { edits: edits.clone() };
+        assert_eq!(edits.lock().unwrap().touched, None);
+        unsafe {
+            assert_eq!(handler.beginEdit(17), kResultOk);
+        }
+        assert_eq!(edits.lock().unwrap().touched.take(), Some(17));
+        unsafe {
+            assert_eq!(handler.performEdit(42, 0.75), kResultOk);
+            assert_eq!(handler.endEdit(42), kResultOk);
+        }
+        let mut e = edits.lock().unwrap();
+        assert_eq!(e.touched.take(), Some(42));
+        assert!(e.dirty);
+        assert_eq!(e.pending, vec![(42, 0.75)]);
     }
 }

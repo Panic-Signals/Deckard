@@ -433,6 +433,10 @@ impl Instance {
         self.engine.take_changed() || knob
     }
 
+    pub(crate) fn take_touched(&self) -> Option<u32> {
+        None
+    }
+
     pub(crate) fn note_on(&mut self, pitch: i64, velocity: i64) {
         let p = pitch.clamp(0, 127) as usize;
         if self.held[p] || self.sustained[p] {

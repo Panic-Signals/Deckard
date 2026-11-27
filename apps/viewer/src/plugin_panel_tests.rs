@@ -47,7 +47,7 @@ fn shown(h: &Harness<'static, App>) -> Vec<(usize, usize, Vec<String>)> {
 /// The labels of page `page` of slot `slot`'s view, as the strip draws them.
 fn labels(h: &Harness<'static, App>, slot: usize, page: usize) -> Vec<String> {
     let v = h.state().plugin_views.get(&(CHAIN, slot)).expect("a view of the slot");
-    v.pages[page].knobs.iter().map(|(_, l, _)| l.to_uppercase()).collect()
+    v.pages[page].knobs.iter().flatten().map(|(_, l, _)| l.to_uppercase()).collect()
 }
 
 #[test]
@@ -173,7 +173,7 @@ fn undo_reloads_the_focused_plugins_state_before_any_engine() {
     let inst = h.state().samples.plugins.existing(key).expect("the focused plug-in runs");
     let (id, before) = {
         let v = h.state().plugin_views.get(&(CHAIN, 0)).unwrap();
-        let id = v.pages[0].knobs.iter().find(|(i, ..)| i.steps == 0).expect("a continuous knob").0.id;
+        let id = v.pages[0].knobs.iter().flatten().find(|(i, ..)| i.steps == 0).expect("a continuous knob").0.id;
         (id, inst.lock().unwrap().param_value(id))
     };
     let to = if before > 0.5 { 0.1 } else { 0.9 };
@@ -190,7 +190,7 @@ fn undo_reloads_the_focused_plugins_state_before_any_engine() {
     h.run_steps(2);
     assert!((inst.lock().unwrap().param_value(id) - before).abs() < 1e-6, "the instance took the undone state");
     let v = h.state().plugin_views.get(&(CHAIN, 0)).unwrap();
-    let k = v.pages[0].knobs.iter().position(|(i, ..)| i.id == id).unwrap();
+    let k = v.pages[0].knobs.iter().position(|s| s.as_ref().is_some_and(|(i, ..)| i.id == id)).unwrap();
     assert!((v.values[k].0 - before).abs() < 1e-6, "and its panel shows it");
 }
 
@@ -204,7 +204,7 @@ fn hosted_lock_refreshes_every_visible_plugin_panel() {
     a.lock_plugins.slots.insert(id, snapshots);
     for slot in 0..2 {
         let v = &a.plugin_views[&(CHAIN, slot)];
-        let id = v.pages[0].knobs[0].0.id;
+        let id = v.pages[0].knobs[0].as_ref().unwrap().0.id;
         let instance = a.samples.plugins.existing(a.plugin_slot_key(CHAIN, slot)).unwrap();
         let mut plugin = instance.lock().unwrap();
         let base = plugin.knob_value(id);
