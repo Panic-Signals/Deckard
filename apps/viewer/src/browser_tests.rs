@@ -273,6 +273,46 @@ fn quick_browse_recalls_the_search_that_loaded_the_sample() {
 }
 
 #[test]
+fn quick_browse_locates_an_audio_loop_instead_of_user_sounds() {
+    use deckard_surface::{Action, Browse};
+    let (_tmp, dir) = temp();
+    let Some(mut h) = open_browser(&dir) else { return };
+    let lp = dir.join("Maschine 3/Samples/Handrum[125] Stompola 1.wav");
+    std::fs::create_dir_all(lp.parent().unwrap()).unwrap();
+    wav(&lp, 88_200);
+    let snd_bytes = h.state().doc.as_ref().unwrap().borrow().file_bytes(deckard_doc::FileItem::Sound(0, 0), &Default::default()).unwrap();
+    let user_snd = dir.join("Maschine 3/Sounds/OtherSound.mxsnd");
+    std::fs::create_dir_all(user_snd.parent().unwrap()).unwrap();
+    std::fs::write(&user_snd, snd_bytes).unwrap();
+    h.state_mut().browser.add_saved(&lp);
+    h.state_mut().browser.add_saved(&user_snd);
+    act(&mut h, BrowseAct::User(true));
+    act(&mut h, BrowseAct::Kind(Kind::Loop));
+    let found = h.state().browser.query.clone();
+    let i = names(&h).iter().position(|n| n == "Handrum[125] Stompola 1").expect("user loop listed");
+    let (g, s) = empty_sound(&h);
+    h.state_mut().group = g;
+    h.state_mut().sound = s;
+    act(&mut h, BrowseAct::Load(i, None));
+    assert!(h.state().doc.as_ref().unwrap().borrow().project().groups[g].sounds[s].audio.is_some());
+    // Elsewhere (User Sounds), Quick Browse returns to the User Loops list focused on the loop.
+    act(&mut h, BrowseAct::Kind(Kind::Sound));
+    assert_eq!(names(&h), ["OtherSound"]);
+    h.state_mut().surface_act(Action::Browse(Browse::Quick(true)));
+    h.state_mut().browser.wait();
+    assert!(h.state().surface_view().control.quick_browse);
+    assert_eq!(h.state().browser.query, found);
+    assert_eq!(h.state().browser.selected_item().map(|x| x.name.as_str()), Some("Handrum[125] Stompola 1"));
+    // Without a remembered search (e.g. a reopened project), it still finds the loop, not User Sounds.
+    h.state_mut().browser.searches = crate::browser::Searches::default();
+    act(&mut h, BrowseAct::Kind(Kind::Sound));
+    h.state_mut().surface_act(Action::Browse(Browse::Quick(true)));
+    h.state_mut().browser.wait();
+    assert_eq!((h.state().browser.query.kind, h.state().browser.query.user), (Kind::Loop, true));
+    assert_eq!(h.state().browser.selected_item().map(|x| x.name.as_str()), Some("Handrum[125] Stompola 1"));
+}
+
+#[test]
 fn dragging_a_loop_onto_an_empty_sound_makes_an_audio_plugin() {
     let (_tmp, dir) = temp();
     let Some(mut h) = open_browser(&dir) else { return };

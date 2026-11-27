@@ -536,29 +536,52 @@ fn query_from_json(v: &serde_json::Value) -> Option<Query> {
 }
 
 /// What the magnifier looks for in the library for `snd`: the sample of its Sampler's
-/// zone `zone` (a loop when its path says so, else a one-shot), by file name without the
-/// extension; else the sound's preset, by the sound's name, when it has a plug-in. `None`
-/// when it has neither.
+/// zone `zone` (a loop when its path or name says so, else a one-shot), or of its Audio
+/// plug-in's focused take (a loop), by file name without the extension; else the sound's
+/// preset, by the sound's name, when it has a plug-in. `None` when it has neither.
 pub fn locate_target(snd: &deckard_model::Sound, zone: usize) -> Option<(deckard_library::Kind, String)> {
     use deckard_library::Kind;
-    let sample = snd.sampler.as_ref().and_then(|x| x.zones.get(zone.min(x.zones.len().saturating_sub(1)))).map(|z| z.sample.path.as_str());
-    let (kind, name) = match sample.filter(|p| !p.is_empty()) {
-        Some(path) => {
-            let kind = if path.to_lowercase().contains("loop") { Kind::Loop } else { Kind::OneShot };
-            let file = path.rsplit(['/', '\\']).next().unwrap_or(path);
-            (kind, file.rsplit_once('.').map_or(file, |(stem, _)| stem).to_string())
-        }
-        None if !snd.instrument.is_empty() => (Kind::Sound, snd.name.clone()),
-        None => return None,
+    let stem = |path: &str| {
+        let file = path.rsplit(['/', '\\']).next().unwrap_or(path);
+        file.rsplit_once('.').map_or(file, |(s, _)| s).to_string()
+    };
+    let sampler = snd
+        .sampler
+        .as_ref()
+        .and_then(|x| x.zones.get(zone.min(x.zones.len().saturating_sub(1))))
+        .map(|z| z.sample.path.as_str())
+        .filter(|p| !p.is_empty());
+    let audio = snd
+        .audio
+        .as_ref()
+        .and_then(|a| a.takes.get(a.focused.min(a.takes.len().saturating_sub(1))))
+        .map(|t| t.sample.path.as_str())
+        .filter(|p| !p.is_empty());
+    let (kind, name) = if let Some(path) = sampler {
+        let name = stem(path);
+        let kind = if path.to_lowercase().contains("loop") || deckard_library::names::tempo_in_name(&name).is_some() {
+            Kind::Loop
+        } else {
+            Kind::OneShot
+        };
+        (kind, name)
+    } else if let Some(path) = audio {
+        (Kind::Loop, stem(path))
+    } else if !snd.instrument.is_empty() {
+        (Kind::Sound, snd.name.clone())
+    } else {
+        return None;
     };
     (!name.is_empty()).then_some((kind, name))
 }
 
 /// The query that shows `find`'s item, its kind's top-level types, and its results: the
-/// recalled search when it still lists the item; else its kind (`base.kind`) with the
-/// item's own user or factory side, product and top-level type, the item looked for
-/// whatever `base` filters, in the user's content and the factory's.
+/// recalled search when it still lists the item; else its kind (`base.kind`, or its
+/// companion kind: Loop/OneShot, Sound/Instrument) with the item's own user or factory
+/// side, product and top-level type, the item looked for whatever `base` filters, in the
+/// user's content and the factory's.
 fn locate(lib: &mut Library, base: &Query, find: &Find) -> (Query, Vec<String>, Results) {
+    use deckard_library::Kind;
     let name = find.name.as_str();
     let wanted = name.to_lowercase();
     let is = |i: &Item| i.name.to_lowercase() == wanted || i.path.file_stem().is_some_and(|s| s.to_string_lossy().to_lowercase() == wanted);
@@ -569,12 +592,22 @@ fn locate(lib: &mut Library, base: &Query, find: &Find) -> (Query, Vec<String>, 
             return (q.clone(), top.into_iter().map(|t| t.0).collect(), r);
         }
     }
-    let found = [base.user, !base.user].into_iter().find_map(|user| {
-        let q = Query { kind: base.kind, user, text: name.to_string(), ..Query::default() };
-        lib.query(&q).items.into_iter().find(|i| is(i))
+    let alt = match base.kind {
+        Kind::Loop => Some(Kind::OneShot),
+        Kind::OneShot => Some(Kind::Loop),
+        Kind::Sound => Some(Kind::Instrument),
+        Kind::Instrument => Some(Kind::Sound),
+        _ => None,
+    };
+    let found = std::iter::once(base.kind).chain(alt).find_map(|kind| {
+        [base.user, !base.user].into_iter().find_map(|user| {
+            let q = Query { kind, user, text: name.to_string(), ..Query::default() };
+            lib.query(&q).items.into_iter().find(|i| is(i))
+        })
     });
     let mut q = Query { kind: base.kind, user: base.user, ..Query::default() };
     if let Some(item) = &found {
+        q.kind = item.kind;
         q.user = item.user;
         q.product = item.product.clone();
     }
@@ -1163,5 +1196,72 @@ mod locate_tests {
         assert_eq!((b.query.favorites, b.query.text.as_str(), b.query.types.len()), (false, "", 0));
         assert_eq!(b.results.items.len(), 3);
         assert!(b.locate.is_none());
+    }
+
+    #[test]
+    fn the_magnifier_looks_for_an_audio_loops_focused_take() {
+        use deckard_model::{AudioLoop, SampleRef, Sampler, Sound, Take, Zone};
+        let take = |path: &str| Take { sample: SampleRef { path: path.into(), ..SampleRef::default() }, ..Take::default() };
+        let snd = Sound {
+            name: "OtherSound".into(),
+            instrument: "AudioModule".into(),
+            audio: Some(AudioLoop {
+                takes: vec![take(r"Global Shake Samples\Handrum[125] Stompola 1.wav"), take("Samples/Break Beat.wav")],
+                focused: 0,
+                ..AudioLoop::default()
+            }),
+            ..Sound::default()
+        };
+        assert_eq!(locate_target(&snd, 0), Some((Kind::Loop, "Handrum[125] Stompola 1".into())));
+        let mut second = snd.clone();
+        second.audio.as_mut().unwrap().focused = 1;
+        assert_eq!(locate_target(&second, 0), Some((Kind::Loop, "Break Beat".into())));
+        let mut past = snd.clone();
+        past.audio.as_mut().unwrap().focused = 9;
+        assert_eq!(locate_target(&past, 0), Some((Kind::Loop, "Break Beat".into())), "past the last: the last");
+        // Empty takes: falls back to the sound's preset name.
+        let empty_audio =
+            Sound { name: "OtherSound".into(), instrument: "AudioModule".into(), audio: Some(AudioLoop::default()), ..Sound::default() };
+        assert_eq!(locate_target(&empty_audio, 0), Some((Kind::Sound, "OtherSound".into())));
+        // A Sampler zone whose filename carries a tempo (without "loop" in the path) is a Loop.
+        let sampler = Sound {
+            name: "Sound 1".into(),
+            instrument: "Sampler".into(),
+            sampler: Some(Sampler {
+                zones: vec![Zone {
+                    sample: SampleRef { path: r"Global Shake Samples\Handrum[125] Stompola 1.wav".into(), ..SampleRef::default() },
+                    ..Zone::default()
+                }],
+                ..Sampler::default()
+            }),
+            ..Sound::default()
+        };
+        assert_eq!(locate_target(&sampler, 0), Some((Kind::Loop, "Handrum[125] Stompola 1".into())));
+    }
+
+    #[test]
+    fn locating_finds_user_loops_and_companion_kinds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        let mut b = browser(d);
+        let loop_a = d.join("Samples/Handrum[125] Stompola 1.wav");
+        let loop_b = d.join("Samples/Metal[100] Bowls 7.wav");
+        let untempo = d.join("Samples/Break Beat.wav");
+        let user_snd = d.join("Sounds/OtherSound.mxsnd");
+        for p in [&loop_a, &loop_b, &untempo, &user_snd] {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"").unwrap();
+            b.add_saved(p);
+        }
+        b.wait();
+        b.locate_item(Kind::Loop, "Handrum[125] Stompola 1".into());
+        b.wait();
+        assert_eq!((b.query.kind, b.query.user), (Kind::Loop, true));
+        assert_eq!(b.selected_item().map(|i| i.name.as_str()), Some("Handrum[125] Stompola 1"));
+        // An Audio loop whose filename has no tempo (indexed as OneShot) is still found.
+        b.locate_item(Kind::Loop, "Break Beat".into());
+        b.wait();
+        assert_eq!((b.query.kind, b.query.user), (Kind::OneShot, true));
+        assert_eq!(b.selected_item().map(|i| i.name.as_str()), Some("Break Beat"));
     }
 }
