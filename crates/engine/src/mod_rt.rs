@@ -111,6 +111,24 @@ impl Engine {
         }
     }
 
+    /// Sound (`group`, `sound`)'s mod wheel (0..1) where it last came in; `None` if it
+    /// never has.
+    pub fn mod_wheel(&self, group: usize, sound: usize) -> Option<f32> {
+        self.mod_wheels.iter().find(|w| (w.0, w.1) == (group, sound)).map(|w| w.2)
+    }
+
+    /// A controller came in for sound (`group`, `sound`): its mod wheel (CC 1) is kept
+    /// for the routes it drives. Without allocating (the audio thread).
+    pub(crate) fn control_seen(&mut self, group: usize, sound: usize, kind: deckard_model::MidiKind) {
+        let deckard_model::MidiKind::Controller { number: 1, value } = kind else { return };
+        let x = f32::from(value.min(127)) / 127.0;
+        if let Some(at) = self.mod_wheels.iter().position(|w| (w.0, w.1) == (group, sound)) {
+            self.mod_wheels[at].2 = x;
+        } else if self.mod_wheels.len() < self.mod_wheels.capacity() {
+            self.mod_wheels.push((group, sound, x));
+        }
+    }
+
     /// Sound (`group`, `sound`)'s sources now, by [`Dim::ALL`] (pitch in semitones,
     /// slide, pressure): `None` where no held key or sounding note has that dimension.
     pub fn sources(&self, group: usize, sound: usize) -> [Option<f32>; 3] {
@@ -268,6 +286,7 @@ impl Engine {
                     ModSource::Pitch => self.sources(g, s)[0],
                     ModSource::Slide => self.sources(g, s)[1],
                     ModSource::Pressure => self.sources(g, s)[2],
+                    ModSource::ModWheel => self.mod_wheel(g, s),
                     ModSource::Lfo(n) => match self.lfo_value(n) {
                         Some(v) => Some(v),
                         None => continue,

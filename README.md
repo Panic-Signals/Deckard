@@ -264,7 +264,7 @@ under the pattern offers Pitch, Slide, Pressure and Release:
   - DECKARD can send the synth its MPE setup for you (**Send MPE setup to synths**, on
     by default).
 - **To DECKARD's own sounds:** use Pressure, Slide and Pitch as sources in the mod
-  matrix (below).
+  matrix (below), and Mod Wheel (MIDI CC 1 coming in to the sound).
   - These routes drive the whole sound, not each voice: Pressure follows the
     hardest-pressed note, Pitch the latest one.
   - Expression isn't passed to hosted plug-ins yet.

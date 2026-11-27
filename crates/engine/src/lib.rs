@@ -2488,6 +2488,9 @@ pub struct Engine {
     /// Sounding notes' expression, for the modulation sources ([`mod_rt`]).
     touch: Vec<mod_rt::ExprVoice>,
     held_keys: Vec<mod_rt::HeldKey>,
+    /// Each sound's mod wheel (group, sound, 0..1) once it has come in, for the mod
+    /// matrix.
+    mod_wheels: Vec<(usize, usize, f32)>,
     touch_order: u64,
     /// The sounds' modulation routes ([`mod_rt`]).
     mod_routes: Vec<mod_rt::TargetRt>,
@@ -3734,6 +3737,7 @@ impl Engine {
             batching: false,
             touch: Vec::with_capacity(mod_rt::VOICES),
             held_keys: Vec::with_capacity(mod_rt::KEYS),
+            mod_wheels: Vec::with_capacity(256),
             touch_order: 0,
             mod_routes,
             modded_plugins: Vec::with_capacity(mod_rt::UNROUTED),
@@ -6722,8 +6726,9 @@ impl Engine {
         } else if e.midi == Some(pads::CHOKE) {
             self.lfo_release(e.group, e.sound, None);
         }
-        if e.midi.is_none() {
-            self.touch_start(e.group, e.sound, e.pitch, frames, tps, e.expr, e.expr_at);
+        match e.midi {
+            None => self.touch_start(e.group, e.sound, e.pitch, frames, tps, e.expr, e.expr_at),
+            Some(kind) => self.control_seen(e.group, e.sound, kind),
         }
         if midi_out && let Some(route) = self.midi_routes.get(e.group).and_then(|r| r.get(e.sound)).cloned().flatten() {
             match route {
@@ -11118,6 +11123,41 @@ mod tests {
         drop(e.adopt(fresh, &plain));
         blocks(&mut e, 1);
         assert!((f64::from(cutoff(&e)) - knob).abs() < 1e-4, "{} vs {knob}", cutoff(&e));
+    }
+
+    /// The mod wheel (CC 1 coming in to the sound) moves the Sampler's cutoff, and stays
+    /// where it was left; another sound's wheel doesn't count.
+    #[test]
+    fn the_mod_wheel_moves_the_samplers_cutoff() {
+        use deckard_model::mod_matrix::ModSource;
+        let (_tmp, mut p) = eight_project();
+        let mut r = route(ModSource::ModWheel, 0, "Sampler", field("cutoff"));
+        (r.low, r.high) = (0.2, 0.8);
+        p.groups[0].sounds[1].mod_routes = vec![r];
+        let mut cache = SampleCache::default();
+        let (mut e, _) = Engine::new(&p, None, 48_000, Mode::Arrangement, &mut cache);
+        let cutoff = |e: &Engine| e.sounds[0][1].as_ref().unwrap().settings_cutoff();
+        let wheel = |e: &mut Engine, sound, value| {
+            let kind = MidiKind::Controller { number: 1, value };
+            e.schedule(0, Live::ControlIn { group: 0, sound, kind, thru: false, record: false });
+            blocks(e, 2);
+        };
+        blocks(&mut e, 2);
+        assert!((cutoff(&e) - 0.2).abs() < 1e-4, "at rest: Low ({})", cutoff(&e));
+        wheel(&mut e, 1, 127);
+        assert!((cutoff(&e) - 0.8).abs() < 1e-4, "{}", cutoff(&e));
+        blocks(&mut e, 20);
+        assert!((cutoff(&e) - 0.8).abs() < 1e-4, "it stays: {}", cutoff(&e));
+        wheel(&mut e, 0, 0);
+        assert!((cutoff(&e) - 0.8).abs() < 1e-4, "another sound's wheel: {}", cutoff(&e));
+        wheel(&mut e, 1, 0);
+        assert!((cutoff(&e) - 0.2).abs() < 1e-4, "{}", cutoff(&e));
+        // A rebuilt engine (an edit) keeps the wheel where it is.
+        wheel(&mut e, 1, 127);
+        let (fresh, _) = Engine::new_after(&p, Some((&p, &[])), None, 48_000, Mode::Arrangement, &mut cache);
+        drop(e.adopt(fresh, &p));
+        blocks(&mut e, 2);
+        assert!((cutoff(&e) - 0.8).abs() < 1e-4, "after an edit: {}", cutoff(&e));
     }
 
     /// Pressure moves a drum synth's parameter.
