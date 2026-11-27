@@ -301,7 +301,7 @@ and `positions`.
 | `deckard.show_plugins(on)` | Show the plug-ins, or the channel properties. |
 | `deckard.page_group(i)` | Show channel-property page group `i`. |
 | `deckard.show_page(name)` | Show `pages/name.lua`. |
-| `deckard.sound_setting(name, value)` | The focused sound's `choke_group` or `link_group` (0 none, 1–8), `choke_mode` or `link_mode` (0 Send, 1 Receive). |
+| `deckard.sound_setting(name, value)` | The focused sound's `choke_group` or `link_group` (0 none, 1–8), `choke_mode` or `link_mode` (0 Send, 1 Receive), or `base_key` (0–127: the note its pad plays in Pad mode, C3 = 60). |
 | `deckard.set_level(g, s, db)`, `deckard.set_pan(g, s, pan)` | Group `g`'s level (dB, up to +10) or pan (-1–1); its sound `s`'s when `s` isn't `nil`. |
 | `deckard.focus_scene(n)` | Focus scene `n`; while a scene plays, it plays next. |
 | `deckard.pick_pattern(n)` | The focused group plays its pattern `n` in the focused scene, focused. |

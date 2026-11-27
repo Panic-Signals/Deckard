@@ -7,8 +7,6 @@ local pads = {
   -- Keyboard mode's lowest pad, the scale's root: C3 (MIDI 60), moved by octaves and
   -- semitones.
   base = 60,
-  -- Pad mode's base key per sound ("group:sound"), C3 unless moved.
-  base_keys = {},
   -- The Chords page: its mode (1 Harmonizer, 2 Chord Set, 3 User Chord), the chord
   -- type kept for each kind of list (`pads.chord_list`), and the position (10: Root,
   -- in `deckard.scales.positions`). As a new project starts: Harmonizer, Major / 1-3-5.
@@ -195,14 +193,18 @@ function pads.chord_list()
   return sc.chords_scale, sc.chords_scale, "scale"
 end
 
--- The focused sound's base key, and moving it (0..127).
+-- A sound's base key (the note its pad plays in Pad mode; 0..127, C3 unless moved),
+-- and moving the focused sound's.
 function pads.base_key(group, sound)
-  return pads.base_keys[group .. ":" .. sound] or 60
+  local g = deckard.state().groups[group]
+  local snd = g and g.sounds[sound]
+  return snd and snd.base_key or 60
 end
 
 function pads.move_base_key(group, sound, semitones)
-  local k = group .. ":" .. sound
-  pads.base_keys[k] = math.max(0, math.min(127, pads.base_key(group, sound) + semitones))
+  local was = pads.base_key(group, sound)
+  local to = math.max(0, math.min(127, was + semitones))
+  if to ~= was then deckard.sound_setting("base_key", to) end
 end
 
 -- Whether the pads play notes of the focused sound (Keyboard, Chords).
