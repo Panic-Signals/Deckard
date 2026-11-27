@@ -113,9 +113,8 @@ end
 -- instrument's).
 local SIZES = { Sampler = { 160, 42 }, EQ = { 90, 40 }, Compressor = { 62, 40 } }
 
--- A slot's kind, as a small icon: keys for an instrument, FX for an effect. Bypassed,
--- crossed out.
-local function kind_icon(screen, x, y, instrument, fx, keys, bypassed)
+-- A slot's kind, as a small icon: keys for an instrument, FX for an effect.
+local function kind_icon(screen, x, y, instrument, fx, keys)
   if instrument then
     for k = 0, 2 do
       screen:rect(x + k * 4, y, 2, 7, keys or "text")
@@ -125,13 +124,29 @@ local function kind_icon(screen, x, y, instrument, fx, keys, bypassed)
     screen:frame(x, y, 12, 12, fx, 0.5)
     screen:label(x, y + 1, 12, 11, "FX", { size = 8, color = fx })
   end
-  if bypassed then
-    -- (Edged in the background, so it stands out from the icon under it.)
-    for _, ink in ipairs({ { 3.6, "background" }, { 1.6, "text" } }) do
-      screen:line(x - 1, y - 1, x + 13, y + 13, ink[1], ink[2])
-      screen:line(x + 13, y - 1, x - 1, y + 13, ink[1], ink[2])
+end
+
+-- A bypassed slot's mark over its kind's icon at `x, y`: the icon faded, and the signal's
+-- path in front of it stepping down past it and back up, to an arrow. It's wider than
+-- the icon: the slot's name moves `MARK_W` further right.
+local MARK_W = 6
+local function bypass_mark(screen, theme, x, y)
+  local bg = theme.colors.background or { 0, 0, 0 }
+  screen:rect(x - 1, y - 1, 14, 14, { bg[1], bg[2], bg[3], 190 })
+  local path = { { x - 3, y + 3 }, { x + 1, y + 3 }, { x + 1, y + 11 }, { x + 11, y + 11 }, { x + 11, y + 3 }, { x + 15, y + 3 } }
+  -- (Edged in the background, so it stands out from the icon under it.)
+  for _, ink in ipairs({ { 3.4, "background" }, { 1.4, "text" } }) do
+    for i = 2, #path do
+      local a, b = path[i - 1], path[i]
+      screen:line(a[1], a[2], b[1], b[2], ink[1], ink[2])
     end
   end
+  screen:triangle(x + 15, y, 4, 7, "right", "text")
+end
+
+-- How far a slot's name moves right for its bypass mark.
+local function mark_w(slot)
+  return slot.active == false and MARK_W or 0
 end
 
 -- How wide the "+" for a new slot is, and the left screen.
@@ -141,7 +156,7 @@ local NEW_W, SCREEN_W = 58, 480
 local function slot_size(screen, slot)
   local size = SIZES[slot.name] or (slot.instrument and { 160, 42 } or { 90, 40 })
   local name_w = math.max(54, screen:text_width(slot.name, "default"))
-  return size, name_w, 4 + math.max(size[1] + 16 + 3, 28 + name_w) + 3
+  return size, name_w, 4 + math.max(size[1] + 16 + 3, 28 + mark_w(slot) + name_w) + 3
 end
 
 -- The chain at full size along the left screen (while the picture band is free): each
@@ -175,9 +190,10 @@ local function draw_large(screen, theme, c)
     local size, name_w, w = slot_size(screen, slot)
     if x + w > SCREEN_W then overflow(i - 1); return end
     local focused = i == c.slot_index
-    kind_icon(screen, x + 13, 72, slot.instrument, paint(theme, "chain_fx", { 0xaa, 0xaa, 0xaa }), nil, slot.active == false)
+    kind_icon(screen, x + 13, 72, slot.instrument, paint(theme, "chain_fx", { 0xaa, 0xaa, 0xaa }))
+    if slot.active == false then bypass_mark(screen, theme, x + 13, 72) end
     local colour = focused and "text" or paint(theme, "chain_idle", { 0xb1, 0xb1, 0xb1 })
-    screen:label(x + 29, 71, name_w, 17, slot.name, { color = colour }, "left", "center")
+    screen:label(x + 29 + mark_w(slot), 71, name_w, 17, slot.name, { color = colour }, "left", "center")
     if focused then
       screen:frame(x + 9, 91, size[1] + 6, size[2] + 6, "text", 0.76)
       screen:frame(x + 10, 92, size[1] + 4, size[2] + 4, "text")
@@ -217,7 +233,7 @@ local STRIP_NEW_W, LEFT, RIGHT, RANGE_W = 34, 12, 468, 48
 -- room before the next.
 local function strip_size(screen, slot)
   local name_w = screen:text_width(slot.name, NAME_STYLE)
-  return name_w, 20 + name_w + 14
+  return name_w, 20 + mark_w(slot) + name_w + 14
 end
 
 -- The slots from the focused one back as far as fit in `room`, and then on.
@@ -278,12 +294,14 @@ local function draw_strip(screen, theme, c, right)
     -- lit with its name.)
     local dim = theme.colors.chain_idle and not focused
     local icon = focused and theme.colors.chain_idle and "text" or paint(theme, "chain_fx", { 0xaa, 0xaa, 0xaa })
-    kind_icon(screen, x + 4, NAME_Y + 1, slot.instrument, icon, dim and theme.colors.chain_idle or nil, slot.active == false)
+    kind_icon(screen, x + 4, NAME_Y + 1, slot.instrument, icon, dim and theme.colors.chain_idle or nil)
+    if slot.active == false then bypass_mark(screen, theme, x + 4, NAME_Y + 1) end
     local colour = focused and "text" or paint(theme, "chain_idle", { 0xb1, 0xb1, 0xb1 })
-    screen:label(x + 20, NAME_Y, name_w, 14, slot.name, { size = 11, color = colour }, "left", "center")
+    local m = mark_w(slot)
+    screen:label(x + 20 + m, NAME_Y, name_w, 14, slot.name, { size = 11, color = colour }, "left", "center")
     if focused then
-      screen:frame(x, NAME_Y - 3, name_w + 26, 20, "text", 0.76)
-      screen:frame(x + 1, NAME_Y - 2, name_w + 24, 18, "text")
+      screen:frame(x, NAME_Y - 3, name_w + 26 + m, 20, "text", 0.76)
+      screen:frame(x + 1, NAME_Y - 2, name_w + 24 + m, 18, "text")
     end
     x = x + w
   end
