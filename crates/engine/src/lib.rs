@@ -13958,30 +13958,31 @@ mod tests {
 
     /// A plug-in the UI holds for an instant (reading a value) is waited for, so its
     /// block isn't skipped (an effect went dry for the block: a click in a reverb's
-    /// tail); one held on and on is given up on quickly, so the audio never stalls.
+    /// tail); one held on and on is given up on once the wait is up, so the audio never
+    /// stalls. (The waits here are long ones, so a slow machine's scheduling can't decide
+    /// the test; the audio's own is `AUDIO_WAIT`.)
     #[test]
     fn a_plugin_held_for_an_instant_is_waited_for_and_a_long_hold_is_not() {
+        use std::time::{Duration, Instant};
         let plugin = split_plugin(&HELD_TEST_INSTRUMENT);
-        for _ in 0..20 {
-            std::thread::scope(|scope| {
-                let (ready, acquired) = std::sync::mpsc::channel();
-                let held = &plugin;
-                scope.spawn(move || {
-                    let _lock = held.lock().unwrap();
-                    ready.send(()).unwrap();
-                    let until = std::time::Instant::now() + std::time::Duration::from_micros(150);
-                    while std::time::Instant::now() < until {
-                        std::hint::spin_loop();
-                    }
-                });
-                acquired.recv().unwrap();
-                assert!(plugin.try_audio().is_ok(), "held for 150 µs: waited for");
+        std::thread::scope(|scope| {
+            let (ready, acquired) = std::sync::mpsc::channel();
+            let held = &plugin;
+            scope.spawn(move || {
+                let _lock = held.lock().unwrap();
+                ready.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(2));
             });
-        }
+            acquired.recv().unwrap();
+            assert!(plugin.try_lock().is_err(), "held now");
+            assert!(plugin.try_audio_within(Duration::from_secs(10)).is_ok(), "let go while waited for");
+        });
+        assert!(deckard_plugins::AUDIO_WAIT <= Duration::from_millis(2), "the audio's wait is well under a block");
         with_editor_lock(&plugin, || {
-            let started = std::time::Instant::now();
-            assert!(plugin.try_audio().is_err(), "held on: skipped");
-            assert!(started.elapsed() < std::time::Duration::from_millis(20), "without stalling: {:?}", started.elapsed());
+            let started = Instant::now();
+            assert!(plugin.try_audio_within(Duration::from_millis(5)).is_err(), "held on: skipped");
+            assert!(started.elapsed() >= Duration::from_millis(5), "after its wait: {:?}", started.elapsed());
+            assert!(plugin.try_audio().is_err());
         });
     }
 

@@ -51,9 +51,14 @@ impl SharedPlugin {
     /// leaves an effect dry for that block, which clicks (a reverb's tail cut and back).
     /// One held longer (its editor opening) is given up on, so the audio never stalls.
     pub fn try_audio(&self) -> TryLockResult<MutexGuard<'_, Plugin>> {
+        self.try_audio_within(AUDIO_WAIT)
+    }
+
+    /// [`SharedPlugin::try_audio`], waiting `wait` at most for an instance held elsewhere.
+    pub fn try_audio_within(&self, wait: std::time::Duration) -> TryLockResult<MutexGuard<'_, Plugin>> {
         let mut p = match self.try_lock() {
             Ok(p) => p,
-            Err(std::sync::TryLockError::WouldBlock) => self.wait_for_audio()?,
+            Err(std::sync::TryLockError::WouldBlock) => self.wait_for_audio(wait)?,
             Err(e) => return Err(e),
         };
         if !self.pending.load(Ordering::Acquire) || !self.pending.swap(false, Ordering::AcqRel) {
@@ -80,10 +85,10 @@ impl SharedPlugin {
         Ok(p)
     }
 
-    /// Keep trying a held instance until [`AUDIO_WAIT`] is up. Spinning, not sleeping:
-    /// the wait is far shorter than a scheduler's turn.
-    fn wait_for_audio(&self) -> TryLockResult<MutexGuard<'_, Plugin>> {
-        let until = std::time::Instant::now() + AUDIO_WAIT;
+    /// Keep trying a held instance until `wait` is up. Spinning, not sleeping: the wait
+    /// is far shorter than a scheduler's turn.
+    fn wait_for_audio(&self, wait: std::time::Duration) -> TryLockResult<MutexGuard<'_, Plugin>> {
+        let until = std::time::Instant::now() + wait;
         loop {
             for _ in 0..64 {
                 std::hint::spin_loop();

@@ -31,7 +31,7 @@ mod shared;
 pub mod state;
 pub mod tap;
 pub use seh::set_fault_logger;
-pub use shared::{Shared, SharedPlugin};
+pub use shared::{AUDIO_WAIT, Shared, SharedPlugin};
 
 use com::{ComponentHandler, Edits, EventList, HostApp, ParameterChanges, Stream};
 use module::Module;
