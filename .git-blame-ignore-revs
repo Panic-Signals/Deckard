@@ -1,0 +1,7 @@
+# Commits that only move code between files, so that `git blame` looks past them:
+#
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# A move is squash-merged, so its commit is known only once it is on main. The next
+# pull request that moves code adds the previous one's commit here, with a comment
+# naming it (DEVELOPMENT.md, "Where code goes").

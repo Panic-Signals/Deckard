@@ -11,7 +11,7 @@
 #   mise run release:linux [version]  # dist/deckard-<version>-linux-<arch>.tar.gz, .deb, .rpm
 #   mise run release:windows [version]# dist/DECKARD-<version>-windows-x64.zip, -setup.exe
 #   mise run check-platforms          # type-check Linux and Windows from a Mac
-#   mise run lint                     # rustfmt, the workflows and the scripts
+#   mise run lint                     # rustfmt, the workflows, the scripts and file sizes
 #
 # mise sets RUSTUP_TOOLCHAIN, so cargo and rustc in these tasks are this Rust, whatever
 # else is on PATH. CI installs the same versions (jdx/mise-action).
@@ -79,10 +79,12 @@ tools = { zig = "0.17.0" }
 run = "scripts/check-platforms.sh"
 
 [tasks.lint]
-description = "rustfmt, the GitHub workflows and the shell scripts"
+description = "rustfmt, the GitHub workflows, the shell scripts and file sizes"
 tools = { actionlint = "latest", shellcheck = "latest" }
 run = [
     "cargo fmt --all --check",
     "actionlint .github/workflows/*.yml",
     "shellcheck scripts/*.sh",
+    "scripts/check-file-sizes.test.sh",
+    "scripts/check-file-sizes.sh",
 ]
