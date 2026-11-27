@@ -387,6 +387,60 @@ fn knobs_turn_the_control_page() {
     assert_eq!(press(&mut s, &v, "BUTTON_PLUGIN"), [Action::ModulesVisible(true)]);
 }
 
+/// The magnifier is Quick Browse: its list on the Control page, the jog wheel through it.
+#[test]
+fn the_magnifier_quick_browses_on_the_control_page() {
+    let (mut s, v) = (Surface::new(), view());
+    for theme in s.themes() {
+        s.set_theme(&theme);
+        assert!(s.screens(&v).is_some());
+        assert_eq!(s.error(), None, "the magnifier draws in {theme}");
+    }
+    // A focused plug-in and the empty "+" alike; on the press, not the release.
+    for slot_index in [Some(0), None] {
+        let (mut s, mut v) = (Surface::new(), view());
+        v.control.slot_index = slot_index;
+        assert!(hold(&mut s, &v, "BUTTON_SCREEN_8", false).is_empty(), "release alone");
+        assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::Browse(Browse::Quick(true))], "{slot_index:?}");
+        assert_eq!(s.page(), "control", "the list shows on the Control page");
+    }
+    // Its list showing: drawn in every theme; the wheel moves through it, a sample
+    // preheard; pressed, it loads; the magnifier again closes it.
+    let (mut s, mut v) = (Surface::new(), view());
+    v.control.quick_browse = true;
+    v.browser =
+        BrowserView { kind: 6, results: (1..=12).map(|i| (format!("Kick {i}"), false)).collect(), focus: 4, ..BrowserView::default() };
+    for theme in s.themes() {
+        s.set_theme(&theme);
+        assert!(s.screens(&v).is_some());
+        assert_eq!(s.error(), None, "the list draws in {theme}");
+    }
+    assert_eq!(s.event(&Event::Wheel(2), &v, Instant::now()), [Action::Browse(Browse::Focus(2)), Action::Browse(Browse::Prehear)]);
+    assert_eq!(press(&mut s, &v, "BUTTON_WHEEL"), [Action::Browse(Browse::Load)]);
+    assert_eq!(s.page(), "control", "the wheel's press loads, not the plug-in browser");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_8"), [Action::Browse(Browse::Quick(false))]);
+    // A preset's list: no prehear; the ends stop the wheel.
+    v.browser.kind = 2;
+    assert_eq!(s.event(&Event::Wheel(-1), &v, Instant::now()), [Action::Browse(Browse::Focus(-1))]);
+    v.browser.focus = 11;
+    assert!(s.event(&Event::Wheel(1), &v, Instant::now()).is_empty());
+    // CHANNEL has no magnifier.
+    let (mut s, mut v) = (Surface::new(), view());
+    v.control.modules_visible = false;
+    v.control.page_groups = 4;
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_8").is_empty());
+    assert_eq!(s.page(), "control");
+}
+
+/// LOCATE on the Browse page is Quick Browse too.
+#[test]
+fn browse_locate_recalls_the_sounds_search() {
+    let (mut s, mut v) = (Surface::new(), view());
+    library(&mut v);
+    press(&mut s, &v, "BUTTON_BROWSE");
+    assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_3"), [Action::Browse(Browse::Locate)]);
+}
+
 #[test]
 fn display_buttons_by_mode() {
     let (mut s, mut v) = (Surface::new(), view());
@@ -396,7 +450,6 @@ fn display_buttons_by_mode() {
     assert!(press(&mut s, &v, "BUTTON_SCREEN_5").is_empty(), "the first slot");
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_6"), [Action::Slot(1)], "on to the +");
     assert_eq!(press(&mut s, &v, "BUTTON_WHEEL_RIGHT"), [Action::Slot(1)]);
-    assert!(press(&mut s, &v, "BUTTON_SCREEN_8").is_empty());
     // CHANNEL: display 5 / 6 and the jog wheel's left / right the page groups.
     v.control.modules_visible = false;
     v.control.page_groups = 4;
@@ -2688,6 +2741,9 @@ fn holding_a_step_modulates_it() {
     );
     // The Control page's buttons: the next slot.
     assert_eq!(press(&mut s, &v, "BUTTON_SCREEN_6"), [Action::Slot(1)]);
+    // Not the magnifier: Step Mod hides it.
+    assert!(press(&mut s, &v, "BUTTON_SCREEN_8").is_empty());
+    assert_eq!(s.page(), "step_mod");
     // Let go: no step taken, and back to the Step page with the last.
     assert_eq!(s.event(&Event::PadOff(6), &v, at(900)), [Action::StepModAt(Some((480, 240)))]);
     assert_eq!(s.event(&Event::PadOff(3), &v, at(900)), [Action::StepModAt(None)]);

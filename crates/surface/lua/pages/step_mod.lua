@@ -21,8 +21,8 @@ function page.button(name, down)
     if down then deckard.show_plugins(name == "PLUGIN") end
     return true
   end
-  -- (Not the Control page's plug-in browser, nor its SHIFT edits.)
-  if name == "WHEEL" or (deckard.held("SHIFT") and name:match("^SCREEN_%d$")) then return true end
+  -- (Not the Control page's plug-in browser or magnifier, nor its SHIFT edits.)
+  if name == "WHEEL" or name == "SCREEN_8" or (deckard.held("SHIFT") and name:match("^SCREEN_%d$")) then return true end
   return control.button(name, down)
 end
 

@@ -3,7 +3,8 @@
 -- bottom. See docs/controller-browse-page.md.
 --
 --   display 1 / 2     the previous / next content kind (Projects … One-shots)
---   display 3         LOCATE
+--   display 3         LOCATE (Quick Browse): the search that found the focused sound's sample
+--                     or preset, recalled, and that result focused
 --   display 4         user content, or factory
 --   display 5 / 6     the previous / next result, preheard (samples) or loaded
 --   display 7         favourites only; SHIFT: the focused result a favourite (or not)
@@ -207,12 +208,13 @@ function browse.button(name, down)
       step_and_load(b, -1)
     elseif n == 6 and not spec[6].disabled then
       step_and_load(b, 1)
+    elseif n == 3 then
+      deckard.browse_locate()
     elseif n == 7 then
       deckard.browse_favorites()
     elseif n == 8 and #b.results > 0 then
       deckard.browse_load()
     end
-    -- (LOCATE: DECKARD can't yet find what made the focused sound.)
     return true
   end
   if name == "WHEEL" then
