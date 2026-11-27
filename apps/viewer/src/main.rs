@@ -6243,6 +6243,18 @@ impl App {
             }
             t
         };
+        // The group's sounds' base keys: the note each pad plays in Pad mode.
+        let base_keys = |app: &App, group: usize| {
+            let mut k = [60; 16];
+            if let Some(d) = &app.doc
+                && let Some(g) = d.borrow().project().groups.get(group)
+            {
+                for (k, s) in k.iter_mut().zip(&g.sounds) {
+                    *k = s.channel.base_key.clamp(0, 127);
+                }
+            }
+            k
+        };
         let mut mixer_on = None;
         let out = if let Some(Ok(c)) = &mut self.controller {
             for e in events {
@@ -6288,7 +6300,17 @@ impl App {
             }
             let scaling = self.settings.velocity_scaling;
             let pin_changed = c.sync_pins(&mut self.settings.pinned_pages);
-            let route = mk3_io::PadRoute { play, group, keys, chords, velocity, scaling, fixed, touches: touches(self, group) };
+            let route = mk3_io::PadRoute {
+                play,
+                group,
+                keys,
+                chords,
+                velocity,
+                scaling,
+                fixed,
+                touches: touches(self, group),
+                base_keys: base_keys(self, group),
+            };
             if pin_changed {
                 #[cfg(not(test))]
                 self.settings.save();
@@ -6354,6 +6376,7 @@ impl App {
                 scaling: self.settings.velocity_scaling,
                 fixed: fixed.clamp(0, 127),
                 touches: touches(self, self.group),
+                base_keys: base_keys(self, self.group),
             };
             self.frame_surface_view = Some((self.surface_view_stamp(), view));
             Mk3Out { route, leds, screens: screens.map(|(n, p)| (n, mk3_io::ScreenFrame::Picture(std::sync::Arc::new(p)))) }
@@ -7458,6 +7481,7 @@ impl App {
                     "choke_group" => "Choke Group",
                     "choke_mode" => "Choke Mode",
                     "link_group" => "Link Group",
+                    "base_key" => "Base Key",
                     _ => "Link Mode",
                 };
                 let count = self.group_len();

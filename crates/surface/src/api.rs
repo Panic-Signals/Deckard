@@ -527,9 +527,10 @@ pub fn install(lua: &Lua, shared: &Rc<RefCell<Shared>>) -> mlua::Result<()> {
                     "link_group" => ("link_group", 8),
                     "choke_mode" => ("choke_mode", 1),
                     "link_mode" => ("link_mode", 1),
+                    "base_key" => ("base_key", 127),
                     _ => {
                         return Err(mlua::Error::runtime(format!(
-                            "no sound setting \"{name}\" (choke_group, choke_mode, link_group, link_mode)"
+                            "no sound setting \"{name}\" (choke_group, choke_mode, link_group, link_mode, base_key)"
                         )));
                     }
                 };

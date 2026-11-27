@@ -149,3 +149,26 @@ fn a_new_release_offers_its_release_notes_once() {
     assert_eq!(app.whats_new.as_deref(), Some("0.3.0"));
     assert_eq!(app.settings.last_version, "0.3.0");
 }
+
+/// PAD MODE's octave and semitone buttons on the MK3 move the focused sound's base key
+/// in the project: the note its pad plays.
+#[test]
+fn the_mk3s_pad_mode_octave_and_semitone_set_the_base_key() {
+    use deckard_mk3::Event as Mk3;
+    let press = |h: &mut Harness<'static, crate::App>, name: &'static str| {
+        let mut reqs = Vec::new();
+        h.state_mut().mk3_events(vec![Mk3::Button(name, true), Mk3::Button(name, false)], &mut reqs);
+        h.run_steps(3);
+    };
+    let Some(mut h) = crate::tests::harness(false, false) else { return };
+    let key = |h: &Harness<'static, crate::App>| {
+        let a = h.state();
+        a.doc.as_ref().unwrap().borrow().project().groups[a.group].sounds[a.sound].channel.base_key
+    };
+    let was = key(&h);
+    press(&mut h, "BUTTON_PAD_MODE");
+    press(&mut h, "BUTTON_SCREEN_6");
+    assert_eq!(key(&h), was + 12, "OCTAVE+");
+    press(&mut h, "BUTTON_SCREEN_7");
+    assert_eq!(key(&h), was + 11, "SEMITONE-");
+}

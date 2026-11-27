@@ -29,6 +29,8 @@ pub struct PadRoute {
     pub fixed: i64,
     /// The group's sounds' Pad Touch (what pressing a held pad does for each).
     pub touches: [PadTouch; 16],
+    /// The group's sounds' base keys: the note each one's pad plays in Pad mode.
+    pub base_keys: [i64; 16],
 }
 
 impl PadRoute {
@@ -301,7 +303,7 @@ pub struct Mk3Io {
     display_wake: Arc<std::sync::Condvar>,
 }
 
-/// The pitch pads play: a sound's base key (Maschine's default, C3).
+/// The pitch a pad plays where its sound's base key isn't known (Maschine's default, C3).
 const PAD_PITCH: i64 = 60;
 
 /// Both displays side by side, every pixel black. Closing sends this so the panels
@@ -310,14 +312,14 @@ fn black_displays() -> Vec<[u8; 4]> {
     vec![[0, 0, 0, 255]; deckard_mk3::display::WIDTH * 2 * deckard_mk3::display::HEIGHT]
 }
 
-/// The notes (sound, pitch) a hit on `pad` (1–16) plays: its sound at C3, its key in
+/// The notes (sound, pitch) a hit on `pad` (1–16) plays: its sound at its base key, its key in
 /// Keyboard mode, or its chord in Chords mode; none for a pad with nothing to play.
 pub fn pad_notes(route: &PadRoute, pad: usize) -> Vec<(usize, i64)> {
     let Some(i) = pad.checked_sub(1).filter(|&i| i < 16) else { return Vec::new() };
     match (route.keys, route.chords) {
         (Some((sound, _)), Some(chords)) => chords[i].iter().filter(|&&n| n < 128).map(|&n| (sound, n)).collect(),
         (Some((sound, notes)), None) => notes.get(i).filter(|&&n| n < 128).map(|&n| vec![(sound, n)]).unwrap_or_default(),
-        (None, _) => vec![(i, PAD_PITCH)],
+        (None, _) => vec![(i, route.base_keys[i])],
     }
 }
 
@@ -572,6 +574,7 @@ fn run(shared: &Mutex<Shared>) {
                     scaling: 0,
                     fixed: 100,
                     touches: [PadTouch::default(); 16],
+                    base_keys: [PAD_PITCH; 16],
                 });
                 let out = s.output.clone().filter(Sender::has_engine);
                 let monitor = s.monitor.clone().filter(crate::midi_monitor::Monitor::is_open);
@@ -621,7 +624,7 @@ fn run(shared: &Mutex<Shared>) {
                             shown_mon(pad, Some((group, sound, pitch)), crate::midi_monitor::Pad::Off);
                             send(pad, Some((group, sound, pitch)), touching.release(pad, (group, sound, pitch), &route));
                         } else if out.is_none() && route.play && route.keys.is_none() {
-                            s.pending.push((route.group, pad - 1, PAD_PITCH, 0));
+                            s.pending.push((route.group, pad - 1, route.base_keys.get(pad - 1).copied().unwrap_or(PAD_PITCH), 0));
                         }
                         continue;
                     }
@@ -972,7 +975,17 @@ mod tests {
     fn route(touch: PadTouch) -> PadRoute {
         let mut touches = [PadTouch::default(); 16];
         touches[0] = touch;
-        PadRoute { play: true, group: 0, keys: None, chords: None, velocity: None, scaling: 0, fixed: 90, touches }
+        PadRoute {
+            play: true,
+            group: 0,
+            keys: None,
+            chords: None,
+            velocity: None,
+            scaling: 0,
+            fixed: 90,
+            touches,
+            base_keys: [PAD_PITCH; 16],
+        }
     }
 
     fn mode(mode: TouchMode) -> PadTouch {
@@ -990,6 +1003,11 @@ mod tests {
     fn pads_play_a_sound_a_key_or_a_chord() {
         let plain = route(PadTouch::default());
         assert_eq!(pad_notes(&plain, 3), [(2, PAD_PITCH)]);
+        // (Pad mode: a sound's pad plays its base key, as PAD MODE's octave and semitone set it.)
+        let mut moved = plain;
+        moved.base_keys[2] = 48;
+        assert_eq!(pad_notes(&moved, 3), [(2, 48)]);
+        assert_eq!(pad_notes(&moved, 4), [(3, PAD_PITCH)]);
         let k = keys(PadTouch::default());
         assert_eq!(pad_notes(&k, 2), [(0, 64)]);
         assert!(pad_notes(&k, 3).is_empty(), "a pad with no note plays nothing");
