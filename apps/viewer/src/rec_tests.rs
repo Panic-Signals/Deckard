@@ -995,6 +995,22 @@ fn the_groups_internal_menu_offers_the_perform_fx() {
     assert_eq!(doc.borrow().project().groups[g].slots[0].param("mode"), Some(5.0), "Stutter");
 }
 
+#[test]
+fn the_sound_internal_menu_adds_an_effect() {
+    use egui_kittest::kittest::Queryable;
+    let Some(mut h) = crate::tests::harness(false, false) else { return };
+    h.state_mut().chain_tab = crate::layout::ChainTab::Sound;
+    h.run_steps(3);
+    h.get_by_label("Add plug-in").click();
+    h.run_steps(2);
+    h.get_by_label("Internal ⏵").click();
+    h.run_steps(2);
+    h.get_by_label("Compressor").click();
+    h.run_steps(3);
+    assert_eq!(h.state().doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].slots.len(), 2);
+    assert_eq!(h.state().doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].slots[1].module, "Compressor");
+}
+
 /// A group's and the master's chains take effects only: their "+" offers no
 /// instruments; the master has no Perform FX.
 #[test]

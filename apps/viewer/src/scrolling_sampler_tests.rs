@@ -160,3 +160,26 @@ fn dropping_invalid_scrolling_sample_reports_error() {
     app.drop_scrolling_sample(0, 0, &path);
     assert!(app.status.starts_with("can't read "));
 }
+
+#[test]
+fn dropping_valid_sample_without_project_reports_load_error() {
+    let path = test_wav("no-project");
+    let mut app = crate::App::default();
+    app.settings.scrolling_drop_audio = true;
+    app.drop_scrolling_sample(0, 0, &path);
+    assert!(app.status.starts_with("can't load "));
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn dropping_valid_sample_into_audio_sound_adds_a_take() {
+    let path = test_wav("existing-audio");
+    let mut app = crate::App::default();
+    app.new_project();
+    let doc = app.doc.clone().unwrap();
+    doc.borrow_mut().audio_only(0, 0).unwrap();
+    app.settings.scrolling_drop_audio = true;
+    app.drop_scrolling_sample(0, 0, &path);
+    assert_eq!(doc.borrow().project().groups[0].sounds[0].audio.as_ref().unwrap().takes.len(), 1);
+    std::fs::remove_file(path).unwrap();
+}
