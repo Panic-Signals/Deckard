@@ -333,7 +333,6 @@ fn main() {
         args.windows(2).filter(|w| ["--press", "--pad", "--hold"].contains(&w[0].as_str())).map(|w| (w[0].clone(), w[1].clone())).collect();
     let width = if scripts.is_some() { 1500.0 + layout::CONTROLLER_WIDTH } else { 1500.0 };
     let app_icon = settings::Settings::load().app_icon;
-    let root_size = if splash && splash::wayland() { splash::size() } else { egui::vec2(width, 930.0) };
     let vsync = std::env::var_os("DECKARD_VSYNC").is_some();
     let mut wgpu_options = eframe::egui_wgpu::WgpuConfiguration::default();
     wgpu_options.surface.present_mode = if vsync { eframe::wgpu::PresentMode::AutoVsync } else { eframe::wgpu::PresentMode::AutoNoVsync };
@@ -341,7 +340,7 @@ fn main() {
     let options = eframe::NativeOptions {
         // The icon picked in Preferences ▸ General, from the start.
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size(root_size)
+            .with_inner_size([width, 930.0])
             .with_drag_and_drop(true)
             .with_icon(std::sync::Arc::new(app_icon.icon_data())),
         wgpu_options,

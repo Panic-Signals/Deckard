@@ -208,13 +208,10 @@ impl App {
         self.boot_next();
         ui.painter().rect_filled(ui.max_rect(), 0.0, layout::s00());
         if let Some(b) = self.boot.as_mut() {
-            crate::splash::show(&ctx, ui, b);
+            crate::splash::show(&ctx, b);
         }
         if self.boot.as_ref().is_some_and(|b| b.may_close(Instant::now())) {
             let held = self.boot.take().and_then(|b| b.held);
-            if crate::splash::wayland() {
-                ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Maximized(true));
-            }
             if let Some(p) = held {
                 self.open_file(p);
             }
