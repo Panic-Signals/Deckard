@@ -343,7 +343,7 @@ mod tests {
 
     #[test]
     fn centred_on_the_main_window_wherever_it_is() {
-        assert_eq!(size(), Vec2::new(760.0, 480.0));
+        assert_eq!(SIZE, Vec2::new(760.0, 480.0));
         // The main window on a second display, to the right of the first.
         let main = Rect::from_min_size(Pos2::new(2261.0, 100.0), Vec2::new(1500.0, 930.0));
         let at = splash_position(Some(main), Some(Vec2::new(1800.0, 1169.0))).unwrap();
@@ -375,13 +375,9 @@ mod tests {
 
     #[test]
     fn the_buttons_open_their_links() {
-        let mut h = Harness::builder().with_size(egui::vec2(1000.0, 700.0)).build_ui_state(
-            |ui, boot: &mut Boot| {
-                let ctx = ui.ctx().clone();
-                show(&ctx, ui, boot);
-            },
-            Boot::new(all_steps(None)),
-        );
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1000.0, 700.0))
+            .build_ui_state(|ui, boot: &mut Boot| show(ui.ctx(), boot), Boot::new(all_steps(None)));
         h.run_steps(2);
         for (label, url) in
             [("GitHub", GITHUB_URL.to_string()), ("Discord", DISCORD_URL.into()), ("Release notes", release_notes_link(VERSION))]
@@ -392,15 +388,6 @@ mod tests {
             // (Clicking doesn't close the splash.)
             assert!(!h.state().hidden);
         }
-    }
-
-    #[test]
-    fn wayland_root_paints_the_splash() {
-        let mut h = Harness::builder()
-            .with_size(SIZE)
-            .build_ui_state(|ui, boot: &mut Boot| super::paint_root(ui, boot), Boot::new(all_steps(None)));
-        h.run_steps(2);
-        assert!(!h.state().hidden);
     }
 
     /// A picture of the splash part-way through (run by hand:
@@ -427,7 +414,7 @@ mod tests {
         let mut h = Harness::builder().with_size(SIZE).with_pixels_per_point(2.0).build_ui_state(
             |ui, boot: &mut Boot| {
                 let rect = ui.max_rect();
-                paint_ui(ui, rect, boot);
+                paint(ui, rect, boot);
             },
             boot,
         );
