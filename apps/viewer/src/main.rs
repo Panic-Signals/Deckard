@@ -20150,6 +20150,35 @@ mod tests {
         assert_eq!(h.state().sampling.tab, 0);
     }
 
+    #[test]
+    fn a_scrolling_selection_dragged_onto_a_sound_loads_as_a_sample() {
+        let mut h = blank_harness(false);
+        h.state_mut().settings.scrolling_drop_audio = false;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("scrolling-selection.wav");
+        let spec = hound::WavSpec { channels: 2, sample_rate: 48_000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        for sample in [0i16, 1_000, -1_000, 0] {
+            writer.write_sample(sample).unwrap();
+            writer.write_sample(sample).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        h.run_steps(3);
+        let rows: Vec<(egui::Rect, (usize, usize))> = h.ctx.data(|d| d.get_temp(egui::Id::new(layout::DROP_ROWS))).expect("sound rows");
+        let (row, (g, s)) = rows.iter().find(|(_, gs)| *gs == (0, 1)).copied().expect("second sound row");
+        let at = row.center();
+        h.hover_at(at);
+        h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.step();
+        egui::DragAndDrop::set_payload(&h.ctx, scrolling_sampler::DraggedSelection(path.clone()));
+        h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        h.run_steps(3);
+
+        let sound = &project_of(&h).groups[g].sounds[s];
+        assert!(sound.sampler.as_ref().is_some_and(|sampler| sampler.zones.iter().any(|zone| zone.sample.path == path.to_string_lossy())));
+    }
+
     /// Recording another take on an Audio sound stops its old take at once; the new take
     /// plays when it's done (DELETE brings the old one back); a cancel brings it back too.
     #[test]
