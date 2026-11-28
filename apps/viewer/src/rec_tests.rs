@@ -1011,6 +1011,52 @@ fn the_sound_internal_menu_adds_an_effect() {
     assert_eq!(h.state().doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].slots[1].module, "Compressor");
 }
 
+#[test]
+fn the_sound_menu_groups_and_adds_catalog_plugins() {
+    use deckard_plugins::scan::{Entry, Kind};
+    use egui_kittest::kittest::Queryable;
+    let Some(mut h) = crate::tests::harness(false, false) else { return };
+    h.state_mut().catalog.entries = vec![
+        Entry {
+            kind: Kind::Vst3,
+            vendor: "Vendor A".into(),
+            name: "Synth".into(),
+            instrument: true,
+            location: String::new(),
+            cid: "000102030405060708090a0b0c0d0e0f".into(),
+        },
+        Entry {
+            kind: Kind::Vst3,
+            vendor: "Vendor A".into(),
+            name: "Verb".into(),
+            instrument: false,
+            location: String::new(),
+            cid: "101112131415161718191a1b1c1d1e1f".into(),
+        },
+    ];
+    h.run_steps(3);
+    h.get_by_label("Add plug-in").click();
+    h.run_steps(2);
+    h.get_by_label("VST3 ⏵").click();
+    h.run_steps(2);
+    h.get_by_label("Vendor A ⏵").click();
+    h.run_steps(2);
+    h.get_by_label("Verb  (effect)").click();
+    h.run_steps(3);
+    assert!(h.state().doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].slots.iter().any(|slot| slot.module == "Verb"));
+}
+
+#[test]
+fn empty_catalog_shows_no_plugins_message() {
+    use egui_kittest::kittest::Queryable;
+    let Some(mut h) = crate::tests::harness(false, false) else { return };
+    h.state_mut().catalog.entries.clear();
+    h.run_steps(3);
+    h.get_by_label("Add plug-in").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("No plug-ins found").is_some() || h.query_by_label("Scanning plug-ins…").is_some());
+}
+
 /// A group's and the master's chains take effects only: their "+" offers no
 /// instruments; the master has no Perform FX.
 #[test]

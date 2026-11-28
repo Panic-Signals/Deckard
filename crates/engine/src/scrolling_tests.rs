@@ -19,6 +19,27 @@ fn capture_is_prepared_before_push() {
 }
 
 #[test]
+fn repeated_prepare_and_invalid_pushes_are_harmless() {
+    let scrolling = Scrolling::default();
+    scrolling.sync(true, 1.0);
+    scrolling.prepare(48_000);
+    scrolling.prepare(48_000);
+    scrolling.push(&[], 0, 48_000);
+    scrolling.push(&[0.25, 0.25], 1, 0);
+    assert_eq!(scrolling.available_frames(), 0);
+}
+
+#[test]
+fn changing_capture_length_before_prepare_keeps_zero_rate_empty() {
+    let scrolling = Scrolling::default();
+    scrolling.sync(true, 2.0);
+    assert_eq!(scrolling.available_frames(), 0);
+    scrolling.prepare(48_000);
+    scrolling.sync(true, 3.0);
+    assert_eq!(scrolling.available_frames(), 0);
+}
+
+#[test]
 fn an_unprepared_rate_does_not_allocate_on_push() {
     let scrolling = Scrolling::default();
     scrolling.sync(true, 1.0);
@@ -87,4 +108,15 @@ fn export_wav_rejects_empty_and_silent_selections() {
     let silent = wav_path("silent");
     assert_eq!(scrolling.export_wav(&silent, 0, 1, false, 0).unwrap_err(), "the selection is silent");
     assert!(!silent.exists());
+}
+
+#[test]
+fn export_wav_rejects_selection_outside_capture() {
+    let scrolling = Scrolling::default();
+    scrolling.sync(true, 1.0);
+    scrolling.prepare(1_000);
+    scrolling.push(&[0.5, 0.5], 1, 1_000);
+    let path = wav_path("outside");
+    assert_eq!(scrolling.export_wav(&path, 10, 1, false, 0).unwrap_err(), "the selection is no longer in the capture buffer");
+    assert!(!path.exists());
 }
