@@ -8393,6 +8393,35 @@ mod lane_tests {
 }
 
 #[cfg(test)]
+mod module_menu_tests {
+    use super::*;
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    fn harness(chain: deckard_doc::Chain, perform: bool) -> Harness<'static, App> {
+        let mut app = App::default();
+        app.new_project();
+        Harness::builder().with_size(egui::vec2(600.0, 700.0)).build_ui_state(
+            move |ui, app: &mut App| {
+                let mut acts = Vec::new();
+                module_menu(ui, app, chain, matches!(chain, deckard_doc::Chain::Sound(..)), perform, &Act::AddSlot, &mut acts);
+            },
+            app,
+        )
+    }
+
+    #[test]
+    fn module_menu_renders_internal_native_and_perform_choices() {
+        let mut h = harness(deckard_doc::Chain::Group(0), true);
+        h.run_steps(3);
+        h.get_by_label("Internal").click();
+        h.run_steps(2);
+        assert!(h.query_by_label("Compressor").is_some());
+        assert!(h.query_by_label("Tuner").is_some());
+        assert!(h.query_by_label("Perform FX ⏵").is_some());
+    }
+}
+
+#[cfg(test)]
 mod emoji_tests {
     /// Names with emoji draw in the app's text: the full emoji font (which has the
     /// newer emoji egui's own lacks; see deckard-nwl's test) comes right after the text
