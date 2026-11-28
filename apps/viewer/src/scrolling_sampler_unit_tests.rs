@@ -2,6 +2,7 @@ use super::{
     cleanup_temporary_files, effective_fade_ms, frame_at, hsv_color, panel, poll_cached_selection, queue_cached_selection, waveform_color,
 };
 use eframe::egui::{self, Color32, Rect};
+use eframe::egui::{Event, MouseWheelUnit, PointerButton, TouchPhase};
 use egui_kittest::Harness;
 use std::sync::Arc;
 use std::time::Duration;
@@ -74,4 +75,48 @@ fn silent_selection_is_cached_without_a_file() {
     assert_eq!(app.scroll_cached_selection, Some((0, 1)));
     assert!(app.scroll_cached_path.is_none());
     cleanup_temporary_files();
+}
+
+#[test]
+fn panel_renders_and_handles_zoom_pan_and_selection() {
+    let Ok(output) = deckard_engine::output::Output::new() else { return };
+    output.scrolling().sync(true, 120.0);
+    output.scrolling().push(&vec![0.25; 48_000 * 2], 48_000, output.rate);
+    let mut app = crate::App::default();
+    app.output = Some(Ok(output));
+    app.settings.scrolling_sampler = true;
+    app.scroll_view_seconds = 10.0;
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(800.0, 80.0))
+        .with_step_dt(1.0 / 60.0)
+        .build_ui_state(|ui, app: &mut crate::App| super::panel(ui, app), app);
+    harness.run_steps(2);
+    let wave = Rect::from_min_size(egui::pos2(12.0, 2.0), egui::vec2(776.0, 25.0));
+    let center = wave.center();
+    harness.hover_at(center);
+    harness.event(Event::MouseWheel {
+        unit: MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, 48.0),
+        phase: TouchPhase::Move,
+        modifiers: egui::Modifiers::SHIFT,
+    });
+    harness.run_steps(2);
+    harness.event(Event::PointerButton {
+        pos: egui::pos2(150.0, center.y),
+        button: PointerButton::Primary,
+        pressed: true,
+        modifiers: Default::default(),
+    });
+    harness.step();
+    harness.event(Event::PointerMoved(egui::pos2(600.0, center.y)));
+    harness.step();
+    harness.event(Event::PointerButton {
+        pos: egui::pos2(600.0, center.y),
+        button: PointerButton::Primary,
+        pressed: false,
+        modifiers: Default::default(),
+    });
+    harness.run_steps(3);
+    assert!(harness.state().scroll_selection.is_some_and(|(start, end)| end > start));
 }
