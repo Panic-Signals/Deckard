@@ -37,6 +37,8 @@ fn changing_capture_length_before_prepare_keeps_zero_rate_empty() {
     scrolling.prepare(48_000);
     scrolling.sync(true, 3.0);
     assert_eq!(scrolling.available_frames(), 0);
+    scrolling.sync(true, 3.0);
+    assert_eq!(scrolling.available_frames(), 0);
     scrolling.sync(true, 4.0);
     assert_eq!(scrolling.available_frames(), 0);
     scrolling.sync(false, 4.0);
