@@ -1,6 +1,19 @@
 use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
+use std::path::PathBuf;
+
+fn test_wav(name: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!("deckard-scrolling-drop-{}-{name}.wav", std::process::id()));
+    let spec = hound::WavSpec { channels: 2, sample_rate: 48_000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+    let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+    for sample in [0i16, 1_000, -1_000, 0] {
+        writer.write_sample(sample).unwrap();
+        writer.write_sample(sample).unwrap();
+    }
+    writer.finalize().unwrap();
+    path
+}
 
 fn audio_preferences() -> Harness<'static, crate::App> {
     let app = crate::App { prefs: Some(2), ..Default::default() };
@@ -118,4 +131,32 @@ fn scrolling_sampler_preferences_render_custom_color_control() {
     harness.get_by_label("Custom").click();
     harness.run_steps(3);
     assert!(harness.query_by_label("Custom colour").is_some());
+}
+
+#[test]
+fn dropping_scrolling_sample_loads_sampler_or_loop() {
+    let path = test_wav("valid");
+
+    let mut sampler = crate::App::default();
+    sampler.new_project();
+    sampler.settings.scrolling_drop_audio = false;
+    sampler.drop_scrolling_sample(0, 0, &path);
+    assert!(sampler.doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].sampler.as_ref().is_some_and(|s| !s.zones.is_empty()));
+
+    let mut audio = crate::App::default();
+    audio.new_project();
+    audio.settings.scrolling_drop_audio = true;
+    audio.drop_scrolling_sample(0, 0, &path);
+    assert!(audio.doc.as_ref().unwrap().borrow().project().groups[0].sounds[0].audio.as_ref().is_some_and(|audio| audio.takes.len() == 1));
+
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn dropping_invalid_scrolling_sample_reports_error() {
+    let mut app = crate::App::default();
+    app.new_project();
+    let path = std::env::temp_dir().join(format!("deckard-missing-scroll-{}.wav", std::process::id()));
+    app.drop_scrolling_sample(0, 0, &path);
+    assert!(app.status.starts_with("can't read "));
 }

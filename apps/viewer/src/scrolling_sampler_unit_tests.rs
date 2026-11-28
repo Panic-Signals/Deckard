@@ -119,4 +119,38 @@ fn panel_renders_and_handles_zoom_pan_and_selection() {
     });
     harness.run_steps(3);
     assert!(harness.state().scroll_selection.is_some_and(|(start, end)| end > start));
+
+    let selection = harness.state().scroll_selection.unwrap();
+    let left = 12.0 + (selection.0 as f32 / 48_000.0) * 776.0;
+    harness.hover_at(egui::pos2(left, center.y));
+    harness.event(Event::PointerButton {
+        pos: egui::pos2(left, center.y),
+        button: PointerButton::Primary,
+        pressed: true,
+        modifiers: Default::default(),
+    });
+    harness.step();
+    harness.event(Event::PointerMoved(egui::pos2(left + 30.0, center.y)));
+    harness.step();
+    harness.event(Event::PointerButton {
+        pos: egui::pos2(left + 30.0, center.y),
+        button: PointerButton::Primary,
+        pressed: false,
+        modifiers: Default::default(),
+    });
+    harness.run_steps(2);
+
+    harness.hover_at(center);
+    harness.event(Event::MouseWheel {
+        unit: MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -48.0),
+        phase: TouchPhase::Move,
+        modifiers: Default::default(),
+    });
+    harness.run_steps(2);
+    harness.event(Event::PointerButton { pos: center, button: PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::CTRL });
+    harness.step();
+    harness.event(Event::PointerButton { pos: center, button: PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::CTRL });
+    harness.run_steps(2);
+    assert!(harness.state().scroll_pan_frames > 0 || harness.state().scroll_view_seconds > 0.0);
 }

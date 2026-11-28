@@ -416,6 +416,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn wayland_root_paints_the_splash() {
+        let mut h = Harness::builder()
+            .with_size(SIZE)
+            .build_ui_state(|ui, boot: &mut Boot| super::paint_root(ui, boot), Boot::new(all_steps(None)));
+        h.run_steps(2);
+        assert!(!h.state().hidden);
+    }
+
     /// A picture of the splash part-way through (run by hand:
     /// `DECKARD_PICTURE=splash.png cargo test -p deckard -- --ignored splash_picture`).
     #[test]
