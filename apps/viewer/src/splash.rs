@@ -365,6 +365,7 @@ mod tests {
 
     #[test]
     fn centred_on_the_main_window_wherever_it_is() {
+        assert_eq!(size(), Vec2::new(760.0, 480.0));
         // The main window on a second display, to the right of the first.
         let main = Rect::from_min_size(Pos2::new(2261.0, 100.0), Vec2::new(1500.0, 930.0));
         let at = splash_position(Some(main), Some(Vec2::new(1800.0, 1169.0))).unwrap();

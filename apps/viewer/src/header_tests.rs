@@ -51,6 +51,18 @@ fn the_header_is_in_maschines_order() {
     assert!(((l + r) / 2.0 - mid).abs() < 2.0, "centred: {l}..{r} about {mid}");
 }
 
+#[test]
+fn the_header_toggles_the_scrolling_sampler_visibility() {
+    let mut h = crate::tests::blank_harness(false);
+    let rect = at(&h, "scrolling-sampler-toggle");
+    assert!(!h.state().scroll_collapsed);
+    click(&mut h, rect.center(), false);
+    assert!(h.state().scroll_collapsed);
+    let rect = at(&h, "scrolling-sampler-toggle");
+    click(&mut h, rect.center(), false);
+    assert!(!h.state().scroll_collapsed);
+}
+
 /// SWING shows the master swing; dragging it up raises it, a double-click types it, ⌘-click
 /// sets 0 %. BPM types the same way.
 #[test]
