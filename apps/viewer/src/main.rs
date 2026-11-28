@@ -15332,6 +15332,7 @@ mod tests {
             for (field, value) in [("mode", 1.0), ("probability", 100.0)] {
                 d.set_groove_setting(0, 0, &format!("sequence_variation/{field}"), value).expect("the page's setting");
             }
+            d.set_groove_setting(0, 0, "sequence_generation/probability", 100.0).expect("generator probability");
         }
         let count = |d: &deckard_doc::Document| d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).count();
         assert_eq!(count(&doc.borrow()), 4, "four to the bar");
