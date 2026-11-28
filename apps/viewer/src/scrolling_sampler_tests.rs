@@ -94,3 +94,28 @@ fn scrolling_sampler_preferences_choose_drop_mode() {
     harness.run_steps(3);
     assert!(!harness.state().settings.scrolling_drop_audio);
 }
+
+#[test]
+fn scrolling_sampler_preferences_choose_fade_and_buffer_values() {
+    let mut harness = enabled_audio_preferences();
+    harness.get_by_value("5 ms").click();
+    harness.run_steps(1);
+    harness.get_by_label("10 ms").click();
+    harness.get_by_value("256 samples (5.3 ms)").click();
+    harness.run_steps(1);
+    harness.get_by_label("512 samples (10.7 ms)").click();
+    harness.run_steps(3);
+    assert!(harness.state().settings.scrolling_fade_enabled);
+    assert_eq!(harness.state().settings.scrolling_fade_ms, 10);
+    assert_eq!(harness.state().settings.buffer_frames, 512);
+}
+
+#[test]
+fn scrolling_sampler_preferences_render_custom_color_control() {
+    let mut harness = enabled_audio_preferences();
+    harness.get_by_value("Theme").click();
+    harness.run_steps(1);
+    harness.get_by_label("Custom").click();
+    harness.run_steps(3);
+    assert!(harness.query_by_label("Custom colour").is_some());
+}
