@@ -20179,6 +20179,13 @@ mod tests {
         assert!(sound.sampler.as_ref().is_some_and(|sampler| sampler.zones.iter().any(|zone| zone.sample.path == path.to_string_lossy())));
     }
 
+    #[test]
+    fn a_scrolling_sampler_frame_requests_periodic_repaint() {
+        let mut h = blank_harness(false);
+        h.state_mut().settings.scrolling_sampler = true;
+        h.run_steps(1);
+    }
+
     /// Recording another take on an Audio sound stops its old take at once; the new take
     /// plays when it's done (DELETE brings the old one back); a cancel brings it back too.
     #[test]
