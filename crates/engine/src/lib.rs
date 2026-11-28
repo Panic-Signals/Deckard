@@ -43,6 +43,9 @@ mod prehear;
 pub mod queue;
 pub mod render;
 pub mod repeat;
+pub mod scrolling;
+#[cfg(test)]
+mod scrolling_tests;
 pub mod spectrum;
 pub use ahead::Junk;
 pub mod sample;

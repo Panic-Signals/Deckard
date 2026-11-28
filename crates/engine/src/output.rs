@@ -331,6 +331,7 @@ pub struct Output {
     /// MIDI clock sent, for each engine played.
     clock_out: Mutex<Option<crate::sync::ClockOut>>,
     pub stats: Arc<Stats>,
+    scrolling: Arc<crate::scrolling::Scrolling>,
     /// What the audio thread last published of the engine (meters, playhead).
     telemetry: Arc<Mutex<crate::Telemetry>>,
     sender: Sender,
@@ -623,6 +624,8 @@ impl Output {
         let invalidated: Arc<AtomicBool> = Arc::default();
         let monitor: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
         let stats = Arc::new(Stats::default());
+        let scrolling = Arc::new(crate::scrolling::Scrolling::default());
+        scrolling.prepare(rate);
         // (Room made here, so publishing doesn't allocate on the audio thread.)
         let telemetry: Arc<Mutex<crate::Telemetry>> = Arc::new(Mutex::new(crate::Telemetry::with_room()));
         let sender = Sender {
@@ -645,6 +648,7 @@ impl Output {
             let latency_us = latency_us.clone();
             let monitor = monitor.clone();
             let stats = stats.clone();
+            let scrolling = scrolling.clone();
             let telemetry = telemetry.clone();
             let (commands, garbage) = (sender.commands.clone(), sender.garbage.clone());
             let exact = sample_accurate.clone();
@@ -722,6 +726,7 @@ impl Output {
                         }
                     }
                 }
+                scrolling.push(buf, frames, rate);
                 standalone_prehear.mix(buf, rate as f64);
                 // Never waits: if the UI is reading, the next block publishes
                 // (peaks keep adding up meanwhile).
@@ -881,6 +886,7 @@ impl Output {
             live_in: Mutex::new(None),
             clock_out: Mutex::new(None),
             stats,
+            scrolling,
             telemetry,
             sender,
             sample_accurate,
@@ -1302,6 +1308,10 @@ impl Output {
             }
             (meters, std::mem::take(&mut t.master_peak))
         })
+    }
+
+    pub fn scrolling(&self) -> Arc<crate::scrolling::Scrolling> {
+        self.scrolling.clone()
     }
 
     /// The cue bus's peaks since the last call (reset).

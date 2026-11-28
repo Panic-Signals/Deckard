@@ -41,6 +41,8 @@ mod controller;
 #[cfg(test)]
 mod controller_quality_tests;
 mod controller_timing;
+#[cfg(test)]
+mod scrolling_sampler_tests;
 /// A zone's meta after an edit took its sample from `old_len` frames to `new_len`:
 /// its warp markers go; stretched (`stretched`), its tempo follows; cut, its length in
 /// beats does, and its grid moves by the `shift` frames taken from the front.
@@ -182,6 +184,7 @@ mod sampler_ui;
 mod sampling_hw;
 #[cfg(test)]
 mod scene_tempo_tests;
+mod scrolling_sampler;
 mod session_backup;
 mod session_record;
 #[cfg(test)]
@@ -309,6 +312,7 @@ fn main() {
         p.exists().then_some(p)
     });
     let model = flag("--controller").unwrap_or_else(|| "M3".into());
+    let splash = boot::splash_wanted(&args);
     // `--jam KEY` (repeatable): press a Jam control through the script, so the strip and its
     // window can be looked at with no Jam on the wire. An unknown name is named back.
     let jam_shot = args.iter().any(|a| a == "--jam-shot");
@@ -342,7 +346,6 @@ fn main() {
         wgpu_options,
         ..Default::default()
     };
-    let splash = boot::splash_wanted(&args);
     let result = eframe::run_native(
         "DECKARD",
         options,
@@ -1021,6 +1024,21 @@ enum WineAction {
 
 #[derive(Default)]
 pub struct App {
+    /// Scrolling sampler view state; these are session/UI values, never project data.
+    scroll_view_seconds: f32,
+    scroll_pan_frames: u64,
+    scroll_selection: Option<(u64, u64)>,
+    scroll_drag_start: Option<u64>,
+    scroll_dragging_selection: bool,
+    scroll_cached_selection: Option<(u64, u64)>,
+    scroll_cached_remove_silence: bool,
+    scroll_cached_fade_ms: u32,
+    scroll_cached_path: Option<PathBuf>,
+    scroll_export: Option<std::sync::mpsc::Receiver<(u64, u64, bool, u32, PathBuf, Result<(), String>)>>,
+    /// Selection edge currently being resized: 0 = left, 1 = right.
+    scroll_resize_edge: Option<u8>,
+    /// Whether the scrolling sampler strip is hidden; capture continues while hidden.
+    scroll_collapsed: bool,
     group_load: Option<preset_load::GroupLoad>,
     /// A non-group library load held back a couple of frames so the MK3 "loading" overlay is drawn first.
     item_load: Option<preset_load::ItemLoad>,
@@ -2789,6 +2807,97 @@ impl App {
         let mut size = self.settings.buffer_frames;
         let mut restart = false;
         egui::Grid::new("audio-engine").num_columns(2).show(ui, |ui| {
+            ui.label("Scrolling sampler");
+            let mut scrolling = self.settings.scrolling_sampler;
+            ui.checkbox(&mut scrolling, "Capture recent master output");
+            ui.end_row();
+            if scrolling != self.settings.scrolling_sampler {
+                self.settings.scrolling_sampler = scrolling;
+                self.settings.save();
+                if let Some(Ok(out)) = &self.output {
+                    out.scrolling().sync(scrolling, self.settings.scrolling_seconds as f32);
+                }
+            }
+                if self.settings.scrolling_sampler {
+                ui.label("Buffer");
+                let mut seconds = self.settings.scrolling_seconds;
+                crate::layout::combo("scrolling-buffer").selected_text(format!("{seconds} seconds")).show_ui(ui, |ui| {
+                    for value in [30, 60, 120, 300, 600] {
+                        ui.selectable_value(&mut seconds, value, format!("{value} seconds"));
+                    }
+                });
+                ui.end_row();
+                if seconds != self.settings.scrolling_seconds {
+                    self.settings.scrolling_seconds = seconds;
+                    self.settings.save();
+                }
+                ui.label("Waveform colour");
+                let mut palette = self.settings.scrolling_palette;
+                crate::layout::combo("scrolling-palette").selected_text(["Theme", "Custom", "Rainbow"][palette as usize]).show_ui(ui, |ui| {
+                    for (value, label) in [(0, "Theme"), (1, "Custom"), (2, "Rainbow")] {
+                        ui.selectable_value(&mut palette, value, label);
+                    }
+                });
+                ui.end_row();
+                if palette != self.settings.scrolling_palette {
+                    self.settings.scrolling_palette = palette;
+                    self.settings.save();
+                }
+                if self.settings.scrolling_palette == 1 {
+                    ui.label("Custom colour");
+                    let mut color = egui::Color32::from_rgb(
+                        (self.settings.scrolling_color >> 16) as u8,
+                        (self.settings.scrolling_color >> 8) as u8,
+                        self.settings.scrolling_color as u8,
+                    );
+                    if ui.color_edit_button_srgba(&mut color).changed() {
+                        self.settings.scrolling_color = (u32::from(color.r()) << 16) | (u32::from(color.g()) << 8) | u32::from(color.b());
+                        self.settings.save();
+                    }
+                    ui.end_row();
+                }
+                ui.label("Selection cleanup");
+                let mut remove_silence = self.settings.scrolling_remove_silence;
+                ui.checkbox(&mut remove_silence, "Remove leading and trailing silence");
+                ui.end_row();
+                if remove_silence != self.settings.scrolling_remove_silence {
+                    self.settings.scrolling_remove_silence = remove_silence;
+                    self.settings.save();
+                }
+                ui.label("Fade to zero crossing");
+                let mut fade_enabled = self.settings.scrolling_fade_enabled;
+                ui.checkbox(&mut fade_enabled, "Enable");
+                ui.end_row();
+                if fade_enabled != self.settings.scrolling_fade_enabled {
+                    self.settings.scrolling_fade_enabled = fade_enabled;
+                    self.settings.save();
+                }
+                ui.label("Fade duration");
+                let mut fade = self.settings.scrolling_fade_ms;
+                egui::ComboBox::from_id_salt("scrolling-fade").selected_text(format!("{fade} ms")).show_ui(ui, |ui| {
+                    for value in 1..=10 {
+                        ui.selectable_value(&mut fade, value, format!("{value} ms"));
+                    }
+                });
+                ui.end_row();
+                if fade != self.settings.scrolling_fade_ms {
+                    self.settings.scrolling_fade_ms = fade;
+                    self.settings.save();
+                }
+            }
+            ui.label("Dropped selection instrument");
+            let mut drop_audio = self.settings.scrolling_drop_audio;
+            egui::ComboBox::from_id_salt("scrolling-drop-instrument")
+                .selected_text(if drop_audio { "Audio" } else { "Sampler" })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut drop_audio, true, "Audio");
+                    ui.selectable_value(&mut drop_audio, false, "Sampler");
+                });
+            ui.end_row();
+            if drop_audio != self.settings.scrolling_drop_audio {
+                self.settings.scrolling_drop_audio = drop_audio;
+                self.settings.save();
+            }
             ui.label("Buffer size");
             crate::layout::combo("buffer-size").selected_text(format!("{size} samples ({:.1} ms)", ms(size))).show_ui(ui, |ui| {
                 for n in BUFFER_SIZES {
@@ -12394,6 +12503,23 @@ impl App {
         };
     }
 
+    fn drop_scrolling_sample(&mut self, g: usize, s: usize, file: &Path) {
+        let smp = match deckard_engine::sample::Sample::load(file) {
+            Ok(smp) => smp,
+            Err(e) => {
+                self.status = format!("can't read {}: {e}", file.display());
+                return;
+            }
+        };
+        if self.settings.scrolling_drop_audio {
+            if let Err(e) = self.load_scrolling_loop(g, s, file, &smp) {
+                self.status = format!("can't load {}: {e}", file.display());
+            }
+        } else {
+            self.load_take(g, s, file, smp.frames.len());
+        }
+    }
+
     /// Add `file` to sound `s`'s Sampler as a new zone, on the key above its others, and
     /// focus it (one undo step).
     fn add_zone(&mut self, g: usize, s: usize, file: &Path, frames: usize) -> Result<(), String> {
@@ -12425,18 +12551,40 @@ impl App {
     /// sound named after it unless named by hand. One undo step.
     fn load_loop(&mut self, g: usize, s: usize, file: &Path, smp: &deckard_engine::sample::Sample) -> Result<(), String> {
         let Some(doc) = self.doc.clone() else { return Err("no project".into()) };
-        let name = file.file_name().map_or_else(String::new, |f| f.to_string_lossy().into_owned());
-        let (tempo, bar) = {
-            let d = doc.borrow();
-            (d.project().tempo, d.project().bar_length().max(1))
-        };
-        let beats = loops::beats(&name, smp.frames.len(), smp.rate, tempo);
+        let tempo = doc.borrow().project().tempo;
+        let beats = loops::beats(
+            &file.file_name().map_or_else(String::new, |f| f.to_string_lossy().into_owned()),
+            smp.frames.len(),
+            smp.rate,
+            tempo,
+        );
+        self.load_loop_with_beats(g, s, file, smp, beats)
+    }
+
+    fn load_loop_with_beats(
+        &mut self,
+        g: usize,
+        s: usize,
+        file: &Path,
+        smp: &deckard_engine::sample::Sample,
+        beats: f64,
+    ) -> Result<(), String> {
+        let Some(doc) = self.doc.clone() else { return Err("no project".into()) };
+        let already_audio = self.is_audio_sound(g, s);
+        let bar = doc.borrow().project().bar_length().max(1);
         let focused = (g == self.group).then_some(self.pattern);
         let spec = deckard_doc::TakeSpec { file: file.to_path_buf(), frames: smp.frames.len(), rate: smp.rate, beats };
         let heard = self.heard_scene();
         doc.borrow_mut().transaction("Load Loop", |d| {
-            d.audio_only(g, s)?;
-            d.set_takes(g, s, &[spec], "Load Loop")?;
+            if !already_audio {
+                d.audio_only(g, s)?;
+            }
+            let take = if already_audio {
+                d.add_take(g, s, &spec, "Load Loop")?
+            } else {
+                d.set_takes(g, s, &[spec], "Load Loop")?;
+                0
+            };
             let pi = match focused.filter(|&p| p < d.project().groups[g].patterns.len()) {
                 Some(p) => p,
                 None if d.project().groups[g].patterns.is_empty() => {
@@ -12446,7 +12594,7 @@ impl App {
                 }
                 None => 0,
             };
-            d.set_audio_in(g, s, &[pi], Some(0), "Load Loop")?;
+            d.set_audio_in(g, s, &[pi], Some(take), "Load Loop")?;
             // Long enough to hear it all: whole bars.
             let need = ((beats * PPQ as f64 / bar as f64).ceil() as i64).max(1) * bar;
             let len = d.project().groups[g].patterns[pi].length;
@@ -12466,6 +12614,13 @@ impl App {
             self.chain_tab = layout::ChainTab::Sound;
         }
         Ok(())
+    }
+
+    fn load_scrolling_loop(&mut self, g: usize, s: usize, file: &Path, smp: &deckard_engine::sample::Sample) -> Result<(), String> {
+        let Some(doc) = self.doc.clone() else { return Err("no project".into()) };
+        let tempo = doc.borrow().project().tempo;
+        let beats = loops::beats_at_tempo(smp.frames.len(), smp.rate, tempo);
+        self.load_loop_with_beats(g, s, file, smp, beats)
     }
 
     /// A recorded take put on sound (`g`, `s`) (a take clicked, or dragged onto a sound's
@@ -14455,6 +14610,7 @@ impl eframe::App for App {
             self.close_output();
             deckard_engine::devices::shut_down();
         }
+        scrolling_sampler::cleanup_temporary_files();
     }
 
     /// While the window is covered or minimized eframe runs no `ui`, only this: keep the
@@ -14748,6 +14904,9 @@ impl App {
         if let Some(Ok(out)) = &self.output {
             out.set_focus(Some(self.group));
         }
+        if self.settings.scrolling_sampler {
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        }
         self.update_meters(ctx, BACKGROUND_PACE);
         self.poll_prehear();
         if self.prehear_task.is_some() {
@@ -14896,6 +15055,16 @@ impl App {
             let rows = ctx.data(|d| d.get_temp::<Vec<(egui::Rect, (usize, usize))>>(egui::Id::new(layout::DROP_ROWS))).unwrap_or_default();
             if let Some(&(_, gs)) = rows.iter().find(|(r, _)| r.contains(p)) {
                 self.browse(browser::BrowseAct::LoadFile(dragged.0.clone(), Some(gs)));
+            }
+        }
+        if ctx.input(|i| i.pointer.any_released())
+            && egui::DragAndDrop::has_payload_of_type::<scrolling_sampler::DraggedSelection>(ctx)
+            && let Some(dragged) = egui::DragAndDrop::take_payload::<scrolling_sampler::DraggedSelection>(ctx)
+            && let Some(p) = ctx.input(|i| i.pointer.interact_pos())
+        {
+            let rows = ctx.data(|d| d.get_temp::<Vec<(egui::Rect, (usize, usize))>>(egui::Id::new(layout::DROP_ROWS))).unwrap_or_default();
+            if let Some(&(_, (g, s))) = rows.iter().find(|(r, _)| r.contains(p)) {
+                self.drop_scrolling_sample(g, s, &dragged.0);
             }
         }
         if self.save_dialog.is_some() {
@@ -15162,6 +15331,7 @@ mod tests {
             for (field, value) in [("mode", 1.0), ("probability", 100.0)] {
                 d.set_groove_setting(0, 0, &format!("sequence_variation/{field}"), value).expect("the page's setting");
             }
+            d.set_groove_setting(0, 0, "sequence_generation/probability", 100.0).expect("generator probability");
         }
         let count = |d: &deckard_doc::Document| d.project().groups[0].patterns[0].notes.iter().filter(|n| n.sound == 0).count();
         assert_eq!(count(&doc.borrow()), 4, "four to the bar");
@@ -19978,6 +20148,42 @@ mod tests {
         (h.state_mut().sampling_open, h.state_mut().sampling.tab) = (true, 0);
         h.run_steps(3);
         assert_eq!(h.state().sampling.tab, 0);
+    }
+
+    #[test]
+    fn a_scrolling_selection_dragged_onto_a_sound_loads_as_a_sample() {
+        let mut h = blank_harness(false);
+        h.state_mut().settings.scrolling_drop_audio = false;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("scrolling-selection.wav");
+        let spec = hound::WavSpec { channels: 2, sample_rate: 48_000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        for sample in [0i16, 1_000, -1_000, 0] {
+            writer.write_sample(sample).unwrap();
+            writer.write_sample(sample).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        h.run_steps(3);
+        let rows: Vec<(egui::Rect, (usize, usize))> = h.ctx.data(|d| d.get_temp(egui::Id::new(layout::DROP_ROWS))).expect("sound rows");
+        let (row, (g, s)) = rows.iter().find(|(_, gs)| *gs == (0, 1)).copied().expect("second sound row");
+        let at = row.center();
+        h.hover_at(at);
+        h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.step();
+        egui::DragAndDrop::set_payload(&h.ctx, scrolling_sampler::DraggedSelection(path.clone()));
+        h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        h.run_steps(3);
+
+        let sound = &project_of(&h).groups[g].sounds[s];
+        assert!(sound.sampler.as_ref().is_some_and(|sampler| sampler.zones.iter().any(|zone| zone.sample.path == path.to_string_lossy())));
+    }
+
+    #[test]
+    fn a_scrolling_sampler_frame_requests_periodic_repaint() {
+        let mut h = blank_harness(false);
+        h.state_mut().settings.scrolling_sampler = true;
+        h.run_steps(1);
     }
 
     /// Recording another take on an Audio sound stops its old take at once; the new take
