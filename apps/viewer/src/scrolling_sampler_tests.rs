@@ -51,6 +51,22 @@ fn audio_preferences_show_scrolling_sampler_controls() {
 }
 
 #[test]
+fn audio_preferences_toggle_capture_and_change_buffer() {
+    let mut harness = audio_preferences();
+    harness.get_by_label("Capture recent master output").click();
+    harness.run_steps(2);
+    assert!(harness.state().settings.scrolling_sampler);
+    harness.get_by_value("120 seconds").click();
+    harness.run_steps(1);
+    harness.get_by_label("30 seconds").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().settings.scrolling_seconds, 30);
+    harness.get_by_label("Capture recent master output").click();
+    harness.run_steps(2);
+    assert!(!harness.state().settings.scrolling_sampler);
+}
+
+#[test]
 fn disabled_capture_hides_buffer_controls() {
     let harness = audio_preferences();
     assert!(harness.query_by_label("Buffer").is_none());
